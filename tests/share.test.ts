@@ -54,4 +54,28 @@ describe('нормализация плана из файла', () => {
     const p = normalizePlan({ walls: [], furniture: 'нет' as never })
     expect(p.furniture).toEqual([])
   })
+
+  it('битые записи отбрасываются', () => {
+    const p = normalizePlan({
+      walls: [{ id: 'w1', a: { x: 0, y: 0 }, b: { x: 100, y: 0 }, thickness: 10 }, { id: 'bad', a: null, b: { x: 1, y: 1 } }] as never,
+      furniture: [{ id: 'f1', type: 'chair', x: 1, y: 2, w: 45, d: 50, rot: 0 }, { id: 'f2', type: 'chair', x: 'нет', y: 2 }] as never,
+      openings: [{ id: 'o1', kind: 'door', wallId: 'w1', t: 0.5, width: 80 }, { id: 'o2', kind: 'door', wallId: 'нет-такой', t: 0.5, width: 80 }] as never,
+    })
+    expect(p.walls.map((w) => w.id)).toEqual(['w1'])
+    expect(p.furniture.map((f) => f.id)).toEqual(['f1'])
+    expect(p.openings.map((o) => o.id)).toEqual(['o1'])
+  })
+
+  it('нулевые и нечисловые габариты предмета заменяются разумными', () => {
+    const p = normalizePlan({ furniture: [{ id: 'f', type: 'box', x: 0, y: 0, w: 0, d: Number.NaN, rot: 'нет' }] as never })
+    expect(p.furniture[0].w).toBeGreaterThan(0)
+    expect(p.furniture[0].d).toBeGreaterThan(0)
+    expect(p.furniture[0].rot).toBe(0)
+  })
+
+  it('план из ссылки проходит ту же проверку', async () => {
+    const broken = await encodePlan({ ...emptyPlan(), furniture: [{ id: 'f', type: 'box', x: 0, y: 0, w: 0, d: 0, rot: 0 }] })
+    const decoded = await decodePlan(broken)
+    expect(decoded!.furniture[0].w).toBeGreaterThan(0)
+  })
 })

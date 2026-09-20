@@ -21,6 +21,7 @@ function getRenderer(): THREE.WebGLRenderer {
 
 /** PNG (data URL) с видом сверху: ширина картинки — вдоль w, высота — вдоль d, «спинка» объекта сверху */
 export function renderTopView(ref: ModelRef, w: number, d: number, h: number): Promise<string> {
+  if (!(w > 0) || !(d > 0) || !(h > 0)) return Promise.reject(new Error('нулевые габариты предмета'))
   const key = topViewKey(ref, w, d, h)
   let p = cache.get(key)
   if (!p) {

@@ -13,6 +13,7 @@ import {
   lineIntersect,
   mul,
   norm,
+  normDeg,
   obbCorners,
   perp,
   pointSegDist,
@@ -232,7 +233,7 @@ export function snapFurniture(item: Furniture, rawCenter: Pt, plan: Plan, o: Fur
         if (best && Math.abs(gap) >= Math.abs(best.gap)) continue
         const foot = add(facePt, mul(dir, along))
         const c = add(foot, mul(nrm, halfExt[k]))
-        best = { gap, x: c.x, y: c.y, rot: Math.round(rots[k] * 100) / 100, wallId: w.id }
+        best = { gap, x: c.x, y: c.y, rot: normDeg(Math.round(rots[k] * 100) / 100), wallId: w.id }
       }
     }
   }

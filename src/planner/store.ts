@@ -83,7 +83,7 @@ export function usePlanHistory(initial: () => Plan): PlanHistory {
     setH((s) => {
       if (!s.future.length) return s
       const [next, ...rest] = s.future
-      return { past: [...s.past, s.present], present: next, future: rest }
+      return { past: [...s.past.slice(-LIMIT + 1), s.present], present: next, future: rest }
     })
   }, [])
 

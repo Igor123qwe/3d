@@ -11,6 +11,12 @@ export const OPENING_WIDTHS: Record<OpeningKind, number[]> = {
   doorway: [80, 90, 100, 120, 150, 200, 250],
 }
 export const WALL_THICKNESSES = [8, 10, 12, 15, 20, 25, 30, 38, 40, 51]
+/** ниже этой длины стена теряет смысл, см */
+export const MIN_WALL_LENGTH = 20
+/** минимальная ширина проёма, см */
+export const MIN_OPENING_WIDTH = 30
+/** какой длины должна быть стена, чтобы принять проём такой ширины */
+export const wallNeededFor = (width: number): number => width + 2
 
 export function addWall(plan: Plan, a: Pt, b: Pt, thickness: number): Plan {
   if (dist(a, b) < 1) return plan
@@ -64,10 +70,12 @@ export function cleanupWalls(plan: Plan): Plan {
     .map((o) => {
       const w = wmap.get(o.wallId)!
       const L = dist(w.a, w.b)
-      if (L <= o.width + 2) return null
-      const hw = o.width / 2 / L
+      // стена стала короче — сужаем проём, а не выбрасываем его молча
+      const width = Math.min(o.width, L - 2)
+      if (width < MIN_OPENING_WIDTH) return null
+      const hw = width / 2 / L
       const t = Math.min(1 - hw, Math.max(hw, o.t))
-      return t === o.t ? o : { ...o, t }
+      return t === o.t && width === o.width ? o : { ...o, t, width }
     })
     .filter((o): o is Opening => !!o)
   if (walls.length === plan.walls.length && openings.length === plan.openings.length && openings.every((o, i) => o === plan.openings[i])) return plan
@@ -80,7 +88,7 @@ export function updateWall(plan: Plan, id: string, patch: Partial<Wall>): Plan {
 
 export function setWallLength(plan: Plan, id: string, L: number): Plan {
   const w = plan.walls.find((x) => x.id === id)
-  if (!w || L < 5) return plan
+  if (!w || !Number.isFinite(L) || L < MIN_WALL_LENGTH) return plan
   const dir = norm(sub(w.b, w.a))
   const nb = add(w.a, mul(dir, L))
   return cleanupWalls(moveNodes(plan, [{ from: w.b, to: nb }]))
@@ -105,8 +113,21 @@ export function pickOpeningSide(wall: Wall, t: number, rooms: Room[]): 1 | -1 {
 export function addOpening(plan: Plan, kind: OpeningKind, wallId: string, t: number, width: number, rooms: Room[]): { plan: Plan; id: string } {
   const wall = plan.walls.find((w) => w.id === wallId)
   if (!wall) return { plan, id: '' }
+  const L = dist(wall.a, wall.b)
+  // проём шире стены оставил бы дыру за её пределами — сужаем по месту
+  const w = Math.min(width, L - 2)
+  if (w < MIN_OPENING_WIDTH) return { plan, id: '' }
+  const hw = w / 2 / L
   const id = uid('o')
-  const op: Opening = { id, kind, wallId, t, width, hinge: 'a', side: pickOpeningSide(wall, t, rooms) }
+  const op: Opening = {
+    id,
+    kind,
+    wallId,
+    t: Math.min(1 - hw, Math.max(hw, t)),
+    width: w,
+    hinge: 'a',
+    side: pickOpeningSide(wall, t, rooms),
+  }
   return { plan: { ...plan, openings: [...plan.openings, op] }, id }
 }
 
@@ -183,10 +204,10 @@ export function deleteSelection(plan: Plan, sel: Selection): Plan {
       return { ...plan, furniture: plan.furniture.filter((f) => f.id !== sel.id) }
     case 'dim':
       return { ...plan, dims: plan.dims.filter((d) => d.id !== sel.id) }
-    case 'room': {
-      // удаляем всю мебель внутри комнаты — стены остаются
+    case 'room':
+      // комната — это не объект, а следствие замкнутого контура стен:
+      // удалять нечего, убрать её можно только удалением стены
       return plan
-    }
   }
 }
 

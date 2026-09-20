@@ -5,6 +5,7 @@ import {
   eq,
   interiorPoint,
   lerp,
+  minEdgeDist,
   offsetPolygon,
   pointInPoly,
   pointSegDist,
@@ -114,13 +115,18 @@ export function detectFaces(walls: Wall[]): Face[] {
         poly.push(u)
         const list = adj[v]
         const idx = list.findIndex((n) => n.to === u)
-        thick.push(list[idx]?.th ?? 10)
+        if (idx < 0) {
+          poly.length = 0 // ребро потерялось: контур недостоверен
+          break
+        }
+        thick.push(list[idx].th)
         // следующее ребро против часовой относительно обратного направления
         const nxt = list[(idx + 1) % list.length]
         u = v
         v = nxt.to
         if (u === start && v === next) break
       }
+      if (guard >= 10000) continue // обход не замкнулся — контур отбрасываем
       if (poly.length < 3) continue
       const pts = poly.map((i) => verts[i])
       const area = polyArea(pts)
@@ -134,14 +140,12 @@ export function detectFaces(walls: Wall[]): Face[] {
 
 function cleanFace(face: Face): Face | null {
   const n = face.polygon.length
-  // удаляем шипы, синхронно ведя толщины рёбер
-  const idx = face.polygon.map((_, i) => i)
   const cleaned = removeSpikes(face.polygon)
   if (cleaned.length < 3) return null
   // сопоставляем толщины: для каждого ребра очищенного контура ищем исходное ребро
   const thick = cleaned.map((p, i) => {
     const q = cleaned[(i + 1) % cleaned.length]
-    for (const k of idx) {
+    for (let k = 0; k < n; k++) {
       const a = face.polygon[k]
       const b = face.polygon[(k + 1) % n]
       if ((eq(a, p, EPS) && eq(b, q, EPS)) || (eq(a, q, EPS) && eq(b, p, EPS))) return face.thick[k]
@@ -149,7 +153,7 @@ function cleanFace(face: Face): Face | null {
     // ребро могло склеиться из нескольких коллинеарных — берём ближайшее
     let best = 10
     let bestD = Infinity
-    for (const k of idx) {
+    for (let k = 0; k < n; k++) {
       const a = face.polygon[k]
       const b = face.polygon[(k + 1) % n]
       const d = pointSegDist(lerp(p, q, 0.5), a, b)
@@ -188,24 +192,27 @@ export function buildRooms(plan: Plan): { rooms: Room[]; metas: RoomMeta[] } {
   const metas = plan.rooms.slice()
   const rooms: Room[] = []
   faces.forEach((f) => {
-    let meta = metas.find((m) => !used.has(m.id) && pointInPoly(m.anchor, f.polygon))
     const inner = offsetPolygon(f.polygon, f.thick.map((t) => t / 2))
-    if (!meta) {
-      const anchor = interiorPoint(f.polygon)
-      const taken = new Set(metas.map((m) => m.name))
-      const areaM2 = Math.abs(polyArea(inner)) / 10000
-      const name = defaultName(areaM2, taken)
-      meta = { id: uid('room'), anchor, name, floor: areaM2 < 5 ? 'tile' : 'laminate' }
+    const areaM2 = Math.abs(polyArea(inner)) / 10000
+    const anchor = interiorPoint(f.polygon)
+    const idx = metas.findIndex((m) => !used.has(m.id) && pointInPoly(m.anchor, f.polygon))
+    let meta: RoomMeta
+    if (idx >= 0) {
+      meta = metas[idx]
+      // форма комнаты могла измениться — подпись держим по свежей внутренней точке
+      if (minEdgeDist(meta.anchor, f.polygon) < minEdgeDist(anchor, f.polygon) / 2) {
+        meta = { ...meta, anchor }
+        metas[idx] = meta
+      }
+    } else {
+      // занятыми считаем только имена уже найденных комнат: метаданные исчезнувших
+      // комнат не должны превращать следующую «Гостиную» в «Гостиную 2»
+      const taken = new Set(rooms.map((r) => r.meta.name))
+      meta = { id: uid('room'), anchor, name: defaultName(areaM2, taken), floor: areaM2 < 5 ? 'tile' : 'laminate' }
       metas.push(meta)
     }
     used.add(meta.id)
-    rooms.push({
-      meta,
-      polygon: f.polygon,
-      inner,
-      area: Math.abs(polyArea(inner)) / 10000,
-      perimeter: polyPerimeter(f.polygon),
-    })
+    rooms.push({ meta, polygon: f.polygon, inner, area: areaM2, perimeter: polyPerimeter(f.polygon) })
   })
   return { rooms, metas }
 }

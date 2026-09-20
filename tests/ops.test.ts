@@ -98,12 +98,38 @@ describe('проёмы', () => {
     expect(op.t * 200).toBeLessThanOrEqual(200 - op.width / 2 + 0.01)
   })
 
-  it('стена короче проёма — проём удаляется', () => {
+  it('стена стала короче проёма — проём сужается, а не исчезает', () => {
     const p = rect()
     const top = p.walls.find((w) => w.a.y === 0 && w.b.y === 0)!
     const withDoor = addOpening(p, 'door', top.id, 0.5, 90, buildRooms(p).rooms).plan
-    const tiny = cleanupWalls(setWallLength(withDoor, top.id, 50))
-    expect(tiny.openings.length).toBe(0)
+    const shorter = cleanupWalls(setWallLength(withDoor, top.id, 60))
+    expect(shorter.openings.length).toBe(1)
+    expect(shorter.openings[0].width).toBe(58)
+  })
+
+  it('проём исчезает только если стена уже минимального проёма', () => {
+    const p = rect()
+    const top = p.walls.find((w) => w.a.y === 0 && w.b.y === 0)!
+    const withDoor = addOpening(p, 'door', top.id, 0.5, 90, buildRooms(p).rooms).plan
+    expect(cleanupWalls(setWallLength(withDoor, top.id, 25)).openings.length).toBe(0)
+  })
+
+  it('проём шире стены сужается при создании', () => {
+    const p = addRect(emptyPlan(), { x: 0, y: 0 }, { x: 120, y: 400 }, 20)
+    const short = p.walls.find((w) => Math.round(dist(w.a, w.b)) === 120)!
+    const { plan, id } = addOpening(p, 'window', short.id, 0.5, 150, buildRooms(p).rooms)
+    expect(id).toBeTruthy()
+    const op = plan.openings.find((o) => o.id === id)!
+    expect(op.width).toBe(118)
+    // проём целиком внутри стены
+    expect(op.t * 120 - op.width / 2).toBeGreaterThanOrEqual(-0.01)
+    expect(op.t * 120 + op.width / 2).toBeLessThanOrEqual(120.01)
+  })
+
+  it('на слишком короткой стене проём не создаётся', () => {
+    const p = addRect(emptyPlan(), { x: 0, y: 0 }, { x: 25, y: 400 }, 8)
+    const short = p.walls.find((w) => Math.round(dist(w.a, w.b)) === 25)!
+    expect(addOpening(p, 'door', short.id, 0.5, 80, []).id).toBe('')
   })
 })
 
@@ -164,6 +190,13 @@ describe('прочее', () => {
     const p = addDim(emptyPlan(), { x: 0, y: 0 }, { x: 100, y: 0 })
     expect(p.dims.length).toBe(1)
     expect(deleteSelection(p, { kind: 'dim', id: p.dims[0].id }).dims.length).toBe(0)
+  })
+
+  it('стена не схлопывается до исчезновения', () => {
+    const p = rect()
+    const top = p.walls.find((w) => w.a.y === 0 && w.b.y === 0)!
+    expect(setWallLength(p, top.id, 3)).toBe(p) // слишком короткая длина игнорируется
+    expect(setWallLength(p, top.id, Number.NaN)).toBe(p)
   })
 
   it('пустой план распознаётся', () => {

@@ -179,15 +179,6 @@ export function convexOverlap(A: Pt[], B: Pt[], tol = 0.5): boolean {
   return true
 }
 
-export function segIntersectsPoly(a: Pt, b: Pt, poly: Pt[]): boolean {
-  if (pointInPoly(a, poly) || pointInPoly(b, poly)) return true
-  for (let i = 0; i < poly.length; i++) {
-    const r = segIntersect(a, b, poly[i], poly[(i + 1) % poly.length])
-    if (r && r.t >= 0 && r.t <= 1 && r.u >= 0 && r.u <= 1) return true
-  }
-  return false
-}
-
 /** удаляет «шипы» (A,B,A) и повторяющиеся точки контура */
 export function removeSpikes(poly: Pt[], eps = 0.5): Pt[] {
   let pts = poly.slice()
@@ -236,22 +227,53 @@ export function offsetPolygon(poly: Pt[], insets: number[]): Pt[] {
   return out
 }
 
-/** точка внутри многоугольника, максимально удалённая от его сторон (грубый поиск) */
+/**
+ * Точка внутри многоугольника, по возможности удалённая от его сторон.
+ * Кандидаты: центроид, сетка по габаритам и середины горизонтальных отрезков
+ * внутри контура — последние гарантируют попадание внутрь даже в узких коленах,
+ * где сетка промахивается.
+ */
 export function interiorPoint(poly: Pt[]): Pt {
-  const c = polyCentroid(poly)
+  const centroid = polyCentroid(poly)
+  if (poly.length < 3) return centroid
   const bb = bboxOf(poly)
-  let best: Pt = c
-  let bestD = pointInPoly(c, poly) ? minEdgeDist(c, poly) : -1
+  const candidates: Pt[] = []
+  if (pointInPoly(centroid, poly)) candidates.push(centroid)
+
   const steps = 14
   for (let i = 1; i < steps; i++) {
     for (let j = 1; j < steps; j++) {
       const p = { x: bb.minX + ((bb.maxX - bb.minX) * i) / steps, y: bb.minY + ((bb.maxY - bb.minY) * j) / steps }
-      if (!pointInPoly(p, poly)) continue
-      const d = minEdgeDist(p, poly)
-      if (d > bestD) {
-        bestD = d
-        best = p
-      }
+      if (pointInPoly(p, poly)) candidates.push(p)
+    }
+  }
+
+  // развёртка по горизонталям между уровнями вершин
+  const levels = [...new Set(poly.map((p) => p.y))].sort((a, b) => a - b)
+  const ys = new Set<number>()
+  for (let i = 0; i + 1 < levels.length; i++) ys.add((levels[i] + levels[i + 1]) / 2)
+  for (let i = 0; i < poly.length; i++) ys.add((poly[i].y + poly[(i + 1) % poly.length].y) / 2)
+  for (const y of ys) {
+    const xs: number[] = []
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i]
+      const b = poly[(i + 1) % poly.length]
+      if (a.y > y !== b.y > y) xs.push(a.x + ((b.x - a.x) * (y - a.y)) / (b.y - a.y))
+    }
+    xs.sort((p, q) => p - q)
+    for (let i = 0; i + 1 < xs.length; i += 2) {
+      if (xs[i + 1] - xs[i] < 0.01) continue
+      candidates.push({ x: (xs[i] + xs[i + 1]) / 2, y })
+    }
+  }
+
+  let best = candidates[0] ?? centroid
+  let bestD = -1
+  for (const p of candidates) {
+    const d = minEdgeDist(p, poly)
+    if (d > bestD) {
+      bestD = d
+      best = p
     }
   }
   return best
@@ -267,7 +289,7 @@ export const fmtNum = (v: number, digits = 1): string =>
   v.toLocaleString('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: digits })
 
 export function fmtLen(cm: number, unit: 'cm' | 'mm' | 'm'): string {
-  if (unit === 'mm') return String(Math.round(cm * 10))
+  if (unit === 'mm') return `${Math.round(cm * 10)} мм`
   if (unit === 'm') return `${fmtNum(cm / 100, 2)} м`
   return `${fmtNum(cm, 0)} см`
 }

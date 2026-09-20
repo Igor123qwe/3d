@@ -21,23 +21,28 @@ export interface SceneOpts {
   wallsMode: WallsMode
   /** AR: без пола-подложки, стены полупрозрачные */
   ar?: boolean
-  selectionId?: string | null
   onModelLoaded?: () => void
+  /** не удалось загрузить модель: предмет остался боксом */
+  onModelError?: (name: string) => void
+  /** сборка ещё нужна? модели грузятся асинхронно и могут опоздать к своей сцене */
+  alive?: () => boolean
 }
 
-export const toWorld = (p: Pt, h = 0): THREE.Vector3 => new THREE.Vector3(p.x * M, h * M, p.y * M)
+/** пометка «ресурсы общие с кэшем моделей» — такое поддерево освобождать нельзя */
+const SHARED = 'sharedModel'
 
 function disposeObject(o: THREE.Object3D): void {
-  o.traverse((c) => {
-    const m = c as THREE.Mesh
-    if (m.geometry) m.geometry.dispose()
-    const mat = m.material as THREE.Material | THREE.Material[] | undefined
-    if (Array.isArray(mat)) mat.forEach((x) => x.dispose())
-    else mat?.dispose()
-  })
+  if (o.userData?.[SHARED]) return
+  for (const child of [...o.children]) disposeObject(child)
+  const m = o as THREE.Mesh
+  if (m.geometry) m.geometry.dispose()
+  const mat = m.material as THREE.Material | THREE.Material[] | undefined
+  if (Array.isArray(mat)) mat.forEach((x) => x.dispose())
+  else mat?.dispose()
 }
 
 export function disposeGroup(g: THREE.Object3D): void {
+  g.userData.disposed = true
   disposeObject(g)
   g.parent?.remove(g)
 }
@@ -218,16 +223,19 @@ function buildFurniture(plan: Plan, opts: SceneOpts): THREE.Group {
       const ref = f.model
       loadModel(ref)
         .then((model) => {
-          if (!item.parent) return
+          if (!item.parent || opts.alive?.() === false || g.userData.disposed) return
           fitModel(model, f.w, h, f.d, elev)
           model.name = 'model'
+          // геометрия и материалы общие с кэшем: их нельзя освобождать вместе со сценой
+          model.userData[SHARED] = true
           item.remove(ph)
           disposeObject(ph)
           item.add(model)
           opts.onModelLoaded?.()
         })
         .catch(() => {
-          // остаёмся с боксом
+          // предмет остаётся боксом — об этом нужно сказать пользователю
+          opts.onModelError?.(f.label || ref.name || cat?.name || f.type)
         })
     }
   }
@@ -263,21 +271,29 @@ export function buildPlanGroup(plan: Plan, rooms: Room[], opts: SceneOpts): Plan
   return { group, center, size }
 }
 
-/** подсветить выбранный предмет */
+const OUTLINE = 'selection-outline'
+
+/** Подсветить выбранный предмет контуром. Материалы моделей общие с кэшем,
+ *  поэтому менять их свойства нельзя — подсветилась бы вся копия предмета. */
 export function highlightSelection(group: THREE.Object3D, id: string | null | undefined): void {
+  const prev = group.getObjectByName(OUTLINE) as THREE.Box3Helper | undefined
+  if (prev) {
+    group.remove(prev)
+    prev.geometry?.dispose()
+    ;(prev.material as THREE.Material | undefined)?.dispose()
+  }
+  if (!id) return
+  let target: THREE.Object3D | null = null
   group.traverse((o) => {
-    const item = o as THREE.Group
-    if (!item.userData?.furnitureId) return
-    const sel = item.userData.furnitureId === id
-    item.traverse((c) => {
-      const m = c as THREE.Mesh
-      const mat = m.material as THREE.MeshStandardMaterial | undefined
-      if (m.isMesh && mat && 'emissive' in mat) {
-        mat.emissive = new THREE.Color(sel ? 0x2563eb : 0x000000)
-        mat.emissiveIntensity = sel ? 0.35 : 0
-      }
-    })
+    if (o.userData?.furnitureId === id) target = o
   })
+  if (!target) return
+  const box = new THREE.Box3().setFromObject(target)
+  if (box.isEmpty()) return
+  box.expandByScalar(0.02)
+  const helper = new THREE.Box3Helper(box, new THREE.Color(0x2563eb))
+  helper.name = OUTLINE
+  group.add(helper)
 }
 
 // ---------- якорь для AR ----------

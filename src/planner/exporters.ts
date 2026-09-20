@@ -72,15 +72,80 @@ export function readPlanFile(file: File): Promise<Plan> {
   })
 }
 
+const num = (v: unknown, fallback: number): number => (typeof v === 'number' && Number.isFinite(v) ? v : fallback)
+const pt = (v: unknown): { x: number; y: number } | null => {
+  const p = v as { x?: unknown; y?: unknown } | null
+  if (!p || typeof p !== 'object') return null
+  const x = num(p.x, NaN)
+  const y = num(p.y, NaN)
+  return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null
+}
+const list = <T,>(v: unknown, map: (item: unknown, i: number) => T | null): T[] =>
+  Array.isArray(v) ? v.map(map).filter((x): x is T => x !== null) : []
+
+/** План приходит из файла или из ссылки, поэтому проверяем каждую запись:
+ *  нечисловые координаты и нулевые габариты ломают геометрию и рендер. */
 export function normalizePlan(p: Partial<Plan>): Plan {
+  const walls = list(p.walls, (raw, i) => {
+    const w = raw as Partial<Plan['walls'][number]>
+    const a = pt(w?.a)
+    const b = pt(w?.b)
+    if (!a || !b) return null
+    return { id: typeof w.id === 'string' ? w.id : `w${i}`, a, b, thickness: Math.max(1, num(w.thickness, 10)) }
+  })
+  const wallIds = new Set(walls.map((w) => w.id))
   return {
     version: 1,
     name: typeof p.name === 'string' ? p.name : 'План',
-    walls: Array.isArray(p.walls) ? p.walls : [],
-    openings: Array.isArray(p.openings) ? p.openings : [],
-    furniture: Array.isArray(p.furniture) ? p.furniture : [],
-    rooms: Array.isArray(p.rooms) ? p.rooms : [],
-    dims: Array.isArray(p.dims) ? p.dims : [],
-    settings: { grid: p.settings?.grid ?? 10 },
+    walls,
+    openings: list(p.openings, (raw, i) => {
+      const o = raw as Partial<Plan['openings'][number]>
+      if (!o || !wallIds.has(String(o.wallId))) return null
+      const kind = o.kind === 'window' || o.kind === 'doorway' ? o.kind : 'door'
+      return {
+        id: typeof o.id === 'string' ? o.id : `o${i}`,
+        kind,
+        wallId: String(o.wallId),
+        t: Math.min(1, Math.max(0, num(o.t, 0.5))),
+        width: Math.max(1, num(o.width, 80)),
+        hinge: o.hinge === 'b' ? 'b' : 'a',
+        side: o.side === -1 ? -1 : 1,
+      }
+    }),
+    furniture: list(p.furniture, (raw, i) => {
+      const f = raw as Partial<Plan['furniture'][number]>
+      if (!f || typeof f.type !== 'string') return null
+      const c = pt(f)
+      if (!c) return null
+      return {
+        ...f,
+        id: typeof f.id === 'string' ? f.id : `f${i}`,
+        type: f.type,
+        x: c.x,
+        y: c.y,
+        w: Math.max(1, num(f.w, 50)),
+        d: Math.max(1, num(f.d, 50)),
+        rot: num(f.rot, 0),
+      }
+    }),
+    rooms: list(p.rooms, (raw, i) => {
+      const r = raw as Partial<Plan['rooms'][number]>
+      const anchor = pt(r?.anchor)
+      if (!r || !anchor) return null
+      return {
+        id: typeof r.id === 'string' ? r.id : `r${i}`,
+        anchor,
+        name: typeof r.name === 'string' ? r.name : 'Комната',
+        floor: r.floor ?? 'laminate',
+      }
+    }),
+    dims: list(p.dims, (raw, i) => {
+      const d = raw as Partial<Plan['dims'][number]>
+      const a = pt(d?.a)
+      const b = pt(d?.b)
+      if (!a || !b) return null
+      return { id: typeof d.id === 'string' ? d.id : `d${i}`, a, b, offset: num(d.offset, 30) }
+    }),
+    settings: { grid: Math.max(1, num(p.settings?.grid, 10)) },
   }
 }

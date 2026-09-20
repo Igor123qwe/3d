@@ -14,7 +14,10 @@ import {
   deleteSelection,
   duplicateFurniture,
   isEmptyPlan,
+  MIN_OPENING_WIDTH,
+  MIN_WALL_LENGTH,
   OPENING_WIDTHS,
+  wallNeededFor,
   rotateFurniture,
   setWallLength,
   updateDim,
@@ -63,6 +66,15 @@ const loadPrefs = (): UiPrefs => {
   return { layers: DEFAULT_LAYERS, unit: 'cm', ortho: true, wallThickness: 10 }
 }
 
+/** был ли в этом браузере сохранённый план — чтобы не затирать работу планом из ссылки */
+const hasSavedPlan = (): boolean => {
+  try {
+    return !!localStorage.getItem(LS_PLAN)
+  } catch {
+    return false
+  }
+}
+
 const loadInitialPlan = (): Plan => {
   try {
     const raw = localStorage.getItem(LS_PLAN)
@@ -87,6 +99,48 @@ const TOOLS: { tool: Tool; icon: string; name: string; key: string }[] = [
 ]
 
 const COLORS = ['', '#e6edf7', '#f5e9d8', '#e6f3e8', '#e0f1f7', '#fdf1dc', '#fbe7ee', '#ececec', '#d9c9b4', '#c7d2fe', '#bbf7d0', '#fecaca', '#fde68a', '#ffffff', '#4b5563']
+
+/**
+ * Числовое поле, которое применяет значение по Enter или уходу фокуса.
+ * Применение на каждый символ ломало данные: набирая «350» в длине стены,
+ * пользователь на середине ввода получал стену 35 см и терял примыкающие.
+ */
+const NumberField: React.FC<{
+  value: number
+  onCommit: (v: number) => void
+  min?: number
+  max?: number
+  step?: number
+  list?: string
+}> = ({ value, onCommit, min, max, step, list }) => {
+  const [draft, setDraft] = useState<string | null>(null)
+  const commit = () => {
+    if (draft === null) return
+    const v = Number(draft.replace(',', '.'))
+    setDraft(null)
+    if (!Number.isFinite(v)) return
+    onCommit(Math.min(max ?? Infinity, Math.max(min ?? -Infinity, v)))
+  }
+  return (
+    <input
+      type="number"
+      step={step}
+      min={min}
+      max={max}
+      list={list}
+      value={draft ?? String(Math.round(value * 100) / 100)}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur()
+        else if (e.key === 'Escape') {
+          setDraft(null)
+          e.currentTarget.blur()
+        }
+      }}
+    />
+  )
+}
 
 interface Props {
   onBack?: () => void
@@ -127,17 +181,19 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   })
   const [topViews, setTopViews] = useState<Record<string, string>>({})
   const topViewPending = useRef(new Set<string>())
+  const topViewFailed = useRef(new Set<string>())
   const canvasRef = useRef<CanvasHandle>(null)
   const fileInput = useRef<HTMLInputElement>(null)
+  const hadSavedPlan = useRef(hasSavedPlan()).current
 
   const roomsResult = useMemo(() => buildRooms(plan), [plan.walls, plan.rooms]) // eslint-disable-line react-hooks/exhaustive-deps
   const rooms = roomsResult.rooms
   useEffect(() => {
-    if (roomsResult.metas.length !== plan.rooms.length) {
-      const metas = roomsResult.metas
-      history.silent((p) => ({ ...p, rooms: metas }))
-    }
-  }, [roomsResult, plan.rooms.length, history])
+    // сравниваем содержимое, а не длину: так в план попадают и новые комнаты,
+    // и пересчитанные якоря подписей, и при этом нет петли обновлений
+    const metas = roomsResult.metas
+    if (JSON.stringify(metas) !== JSON.stringify(plan.rooms)) history.silent((p) => ({ ...p, rooms: metas }))
+  }, [roomsResult, plan.rooms, history])
 
   const check = useMemo(() => runChecks(plan, rooms), [plan, rooms])
   const badItems = useMemo(() => new Set(check.issues.filter((i) => i.level === 'error' && i.target?.kind === 'furniture').map((i) => i.target!.id)), [check])
@@ -205,7 +261,12 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           .then((url) => {
             if (alive) setTopViews((prev) => ({ ...prev, [key]: url }))
           })
-          .catch(() => {})
+          .catch(() => {
+            if (alive && !topViewFailed.current.has(key)) {
+              topViewFailed.current.add(key)
+              setToast('Не удалось показать модель на плане — предмет нарисован схемой')
+            }
+          })
           .finally(() => topViewPending.current.delete(key))
       }
     })
@@ -238,11 +299,13 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     const run = async () => {
       if (h.plan) {
         const p = await decodePlan(h.plan)
-        if (p && alive) {
+        if (!alive) return
+        if (!p) setToast('Не удалось прочитать план из ссылки')
+        else if (!hadSavedPlan || window.confirm('Открыть план из ссылки? План, сохранённый в этом браузере, будет заменён.')) {
           history.replace(p)
           setSelection(null)
           setTimeout(() => canvasRef.current?.fit(), 30)
-        } else if (alive) setToast('Не удалось прочитать план из ссылки')
+        }
       }
       if (alive && (h.mode === '3d' || h.mode === 'ar')) {
         setView3d(true)
@@ -313,8 +376,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       try {
         dims = phDimsCm((await phInfo(a.id)).dimensions)
       } catch {
-        /* ignore */
+        /* размеры остались неизвестны — предупредим ниже */
       }
+      if (!dims) setToast(`Размеры «${a.name}» неизвестны: задайте ширину и глубину в свойствах`)
     }
     const type = guessType(a)
     const cat = CATALOG_MAP[type] ?? CATALOG_MAP.box
@@ -362,7 +426,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   useEffect(() => {
     if (!exportJob) return
     const el = exportSvgRef.current
-    if (!el) return
+    if (!el) {
+      setExportJob(null)
+      setToast('Не удалось подготовить изображение')
+      return
+    }
     const job = exportJob
     const run = async () => {
       try {
@@ -432,21 +500,21 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             <>
               <label className="pl-field">
                 <span>Ширина, см</span>
-                <input type="number" min={5} step={5} value={f.w} onChange={(e) => upd({ w: Math.max(5, Number(e.target.value) || 5) })} />
+                <NumberField value={f.w} min={5} max={2000} step={5} onCommit={(v) => upd({ w: v })} />
               </label>
               <label className="pl-field">
                 <span>Глубина, см</span>
-                <input type="number" min={5} step={5} value={f.d} onChange={(e) => upd({ d: Math.max(5, Number(e.target.value) || 5) })} />
+                <NumberField value={f.d} min={5} max={2000} step={5} onCommit={(v) => upd({ d: v })} />
               </label>
             </>
           )}
           <label className="pl-field">
             <span>Поворот, °</span>
-            <input type="number" step={15} value={Math.round(f.rot)} onChange={(e) => upd({ rot: normDeg(Number(e.target.value) || 0) })} />
+            <NumberField value={Math.round(f.rot)} step={15} onCommit={(v) => upd({ rot: normDeg(v) })} />
           </label>
           <label className="pl-field">
             <span>Высота, см</span>
-            <input type="number" min={1} step={5} value={f.h ?? dims3d(f).h} onChange={(e) => upd({ h: Math.max(1, Number(e.target.value) || 1) })} />
+            <NumberField value={f.h ?? dims3d(f).h} min={1} max={400} step={5} onCommit={(v) => upd({ h: v })} />
           </label>
           <div className="pl-row">
             <button className="pl-btn" onClick={() => history.apply((p) => rotateFurniture(p, f.id, -15))}>⟲ 15°</button>
@@ -468,13 +536,10 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             <button
               className="pl-btn"
               onClick={() => {
-                let nid = ''
-                history.apply((p) => {
-                  const r = duplicateFurniture(p, f.id)
-                  nid = r.id
-                  return r.plan
-                })
-                if (nid) setSelection({ kind: 'furniture', id: nid })
+                const r = duplicateFurniture(plan, f.id)
+                if (r.id === f.id) return
+                history.apply(() => r.plan)
+                setSelection({ kind: 'furniture', id: r.id })
               }}
             >
               ⧉ Дублировать
@@ -547,7 +612,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           <div className="pl-props-title">Стена</div>
           <label className="pl-field">
             <span>Длина, см</span>
-            <input type="number" min={5} step={5} value={Math.round(L)} onChange={(e) => history.apply((p) => setWallLength(p, w.id, Number(e.target.value) || L))} />
+            <NumberField value={Math.round(L)} min={MIN_WALL_LENGTH} step={5} onCommit={(v) => history.apply((p) => setWallLength(p, w.id, v))} />
           </label>
           <label className="pl-field">
             <span>Толщина, см</span>
@@ -565,15 +630,15 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
               <button
                 key={k}
                 className="pl-btn"
-                disabled={L < 100}
+                disabled={L < wallNeededFor(MIN_OPENING_WIDTH)}
                 onClick={() => {
-                  let nid = ''
-                  history.apply((p) => {
-                    const r = addOpening(p, k, w.id, 0.5, k === 'door' ? 80 : k === 'window' ? 150 : 90, rooms)
-                    nid = r.id
-                    return r.plan
-                  })
-                  if (nid) setSelection({ kind: 'opening', id: nid })
+                  const r = addOpening(plan, k, w.id, 0.5, k === 'door' ? 80 : k === 'window' ? 150 : 90, rooms)
+                  if (!r.id) {
+                    setToast('Стена слишком короткая для проёма')
+                    return
+                  }
+                  history.apply(() => r.plan)
+                  setSelection({ kind: 'opening', id: r.id })
                 }}
               >
                 + {k === 'door' ? 'Дверь' : k === 'window' ? 'Окно' : 'Проём'}
@@ -612,7 +677,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           </label>
           <label className="pl-field">
             <span>Ширина, см</span>
-            <input type="number" min={30} step={5} value={o.width} list={`pl-widths-${o.kind}`} onChange={(e) => upd({ width: Math.max(30, Number(e.target.value) || 30) })} />
+            <NumberField value={o.width} min={MIN_OPENING_WIDTH} max={Math.max(MIN_OPENING_WIDTH, Math.floor(L - 2))} step={5} list={`pl-widths-${o.kind}`} onCommit={(v) => upd({ width: v })} />
             <datalist id={`pl-widths-${o.kind}`}>
               {OPENING_WIDTHS[o.kind].map((v) => (
                 <option key={v} value={v} />
@@ -623,7 +688,14 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             <span>
               Положение от начала стены: {fmtLen(pos, unit)} (до конца {fmtLen(L - pos, unit)})
             </span>
-            <input type="range" min={o.width / 2} max={L - o.width / 2} step={1} value={pos} onChange={(e) => upd({ t: Number(e.target.value) / L })} />
+            <input
+              type="range"
+              min={Math.min(o.width / 2, L / 2)}
+              max={Math.max(o.width / 2, L - o.width / 2)}
+              step={1}
+              value={pos}
+              onChange={(e) => upd({ t: Number(e.target.value) / L })}
+            />
           </label>
           <div className="pl-row">
             <button className="pl-btn" onClick={() => upd({ t: 0.5 })}>По центру стены</button>
@@ -685,7 +757,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
               <span>периметр по осям</span>
             </div>
           </div>
-          <div className="pl-note">Площадь считается по внутренним граням стен — как в техпаспорте.</div>
+          <div className="pl-note">
+            Площадь считается по внутренним граням стен — как в техпаспорте. Комната появляется сама из замкнутого контура: чтобы убрать её, удалите стену.
+          </div>
         </div>
       )
     }
@@ -701,7 +775,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           </label>
           <label className="pl-field">
             <span>Отступ, см</span>
-            <input type="number" step={5} value={d.offset} onChange={(e) => history.apply((p) => updateDim(p, d.id, { offset: Number(e.target.value) || 5 }))} />
+            <NumberField value={d.offset} step={5} onCommit={(v) => history.apply((p) => updateDim(p, d.id, { offset: v || 5 }))} />
           </label>
           <button
             className="pl-btn danger"

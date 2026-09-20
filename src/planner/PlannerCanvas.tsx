@@ -373,30 +373,27 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         case 'doorway': {
           const width = OPENING_DEFAULT_WIDTH[tool]
           const s = snapOpening(raw, p, width, tol + 10)
-          if (!s) return
-          let newId = ''
-          history.apply((pl) => {
-            const r = addOpening(pl, tool, s.wallId, s.t, width, rooms)
-            newId = r.id
-            return r.plan
-          })
-          if (newId) {
-            onSelect({ kind: 'opening', id: newId })
-            onToolChange('select')
+          if (!s) {
+            onHint('Здесь нет подходящей стены: проём ставится на стену длиннее проёма')
+            return
           }
+          const r = addOpening(p, tool, s.wallId, s.t, width, rooms)
+          if (!r.id) {
+            onHint('Стена слишком короткая для проёма')
+            return
+          }
+          history.apply(() => r.plan)
+          onSelect({ kind: 'opening', id: r.id })
+          onToolChange('select')
           return
         }
         case 'place': {
           if (!placing) return
           const temp: Furniture = { id: 'ghost', type: placing.type, x: raw.x, y: raw.y, w: placing.w, d: placing.d, rot: ghostRot }
           const s = snapFurniture(temp, raw, p, { grid: 5, tol: Math.max(tol, 12) })
-          let newId = ''
-          history.apply((pl) => {
-            const r = addFurniture(pl, placing, s.x, s.y, s.rot)
-            newId = r.id
-            return r.plan
-          })
-          onSelect({ kind: 'furniture', id: newId })
+          const r = addFurniture(p, placing, s.x, s.y, s.rot)
+          history.apply(() => r.plan)
+          onSelect({ kind: 'furniture', id: r.id })
           onToolChange('select')
           return
         }
@@ -417,7 +414,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         }
       }
     },
-    [tool, tol, ortho, wallThickness, history, rooms, placing, ghostRot, dimStart, onSelect, onToolChange, finishDraft],
+    [tool, tol, ortho, wallThickness, history, rooms, placing, ghostRot, dimStart, onSelect, onToolChange, onHint, finishDraft],
   )
 
   // ---------- указатель ----------
@@ -699,19 +696,18 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       }
       if ((e.key === 'Delete' || e.key === 'Backspace') && selection) {
         e.preventDefault()
+        // комната — следствие контура стен, удалять в ней нечего
+        if (selection.kind === 'room') return
         history.apply((pl) => deleteSelection(pl, selection))
         onSelect(null)
         return
       }
       if (ctrl && e.code === 'KeyD' && selection?.kind === 'furniture') {
         e.preventDefault()
-        let nid = ''
-        history.apply((pl) => {
-          const r = duplicateFurniture(pl, selection.id)
-          nid = r.id
-          return r.plan
-        })
-        if (nid) onSelect({ kind: 'furniture', id: nid })
+        const r = duplicateFurniture(planRef.current, selection.id)
+        if (r.id === selection.id) return
+        history.apply(() => r.plan)
+        onSelect({ kind: 'furniture', id: r.id })
         return
       }
       if (e.code === 'KeyR' && !ctrl) {

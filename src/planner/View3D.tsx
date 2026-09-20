@@ -63,6 +63,8 @@ export const View3D: React.FC<View3DProps> = ({ plan, rooms, selection, onSelect
   const three = useRef<ThreeState | null>(null)
   const xr = useRef<XRState>({ active: false, anchored: false, yawOffset: 0, nudge: new THREE.Vector3(), anchorPos: null, heading: 0, lastHit: null, hitTestSource: null, session: null, hasHitUi: false })
   const anchorRef = useRef<AnchorInfo>(findAnchor(plan, rooms))
+  const buildId = useRef(0)
+  const reportedModelErrors = useRef(new Set<string>())
   const planRef = useRef(plan)
   planRef.current = plan
   const roomsRef = useRef(rooms)
@@ -130,12 +132,18 @@ export const View3D: React.FC<View3DProps> = ({ plan, rooms, selection, onSelect
     const t = three.current
     if (!t) return
     if (t.group) disposeGroup(t.group)
+    const build = ++buildId.current
     const built = buildPlanGroup(planRef.current, roomsRef.current, {
       wallsMode: wallsRef.current,
       ar: xr.current.active,
-      selectionId: selId(),
+      alive: () => buildId.current === build,
       onModelLoaded: () => {
-        if (three.current?.group) highlightSelection(three.current.group, selId())
+        if (buildId.current === build && three.current?.group) highlightSelection(three.current.group, selId())
+      },
+      onModelError: (name) => {
+        if (buildId.current !== build || reportedModelErrors.current.has(name)) return
+        reportedModelErrors.current.add(name)
+        onToast(`Не удалось загрузить модель «${name}» — предмет показан габаритами`)
       },
     })
     t.group = built.group
@@ -425,7 +433,12 @@ export const View3D: React.FC<View3DProps> = ({ plan, rooms, selection, onSelect
     setBusy('Готовим модель для AR…')
     try {
       let pending = planRef.current.furniture.filter((f) => f.model).length
-      const built = buildPlanGroup(planRef.current, roomsRef.current, { wallsMode: 'ghost', ar: true, onModelLoaded: () => (pending -= 1) })
+      const built = buildPlanGroup(planRef.current, roomsRef.current, {
+        wallsMode: 'ghost',
+        ar: true,
+        onModelLoaded: () => (pending -= 1),
+        onModelError: () => (pending -= 1),
+      })
       const a = anchorRef.current
       built.group.position.set(-a.p0.x * M, 0, -a.p0.y * M)
       const holder = new THREE.Group()

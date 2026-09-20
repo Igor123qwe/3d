@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { buildRooms, detectFaces } from '../src/planner/rooms'
+import { pointInPoly } from '../src/planner/geometry'
 import { emptyPlan, type Plan, type Wall } from '../src/planner/types'
 
 const W = (id: string, ax: number, ay: number, bx: number, by: number, th = 20): Wall => ({
@@ -72,6 +73,52 @@ describe('поиск комнат по контурам стен', () => {
   })
 })
 
+describe('устойчивость метаданных', () => {
+  // Г-образный коридор: центроид контура лежит снаружи, и раньше якорь комнаты
+  // оказывался вне её границ — тогда комната не «узнавалась» и метаданные
+  // плодились на каждом пересчёте, подвешивая интерфейс.
+  const corridor = (width: number, size: number): Wall[] => [
+    W('a', 0, 0, size, 0),
+    W('b', size, 0, size, width),
+    W('c', size, width, width, width),
+    W('d', width, width, width, size),
+    W('e', width, size, 0, size),
+    W('f', 0, size, 0, 0),
+  ]
+
+  it('повторные пересчёты не плодят метаданные', () => {
+    let plan = planOf(corridor(50, 700))
+    for (let i = 0; i < 6; i++) {
+      const r = buildRooms(plan)
+      plan = { ...plan, rooms: r.metas }
+      expect(r.rooms.length).toBe(1)
+      expect(r.metas.length).toBe(1)
+    }
+  })
+
+  it('второй пересчёт не меняет метаданные', () => {
+    const plan = planOf(corridor(60, 500))
+    const first = buildRooms(plan)
+    const second = buildRooms({ ...plan, rooms: first.metas })
+    expect(second.metas).toEqual(first.metas)
+  })
+
+  it('якорь комнаты лежит внутри её контура', () => {
+    for (const width of [40, 50, 80, 150]) {
+      for (const size of [300, 600, 700, 1000]) {
+        const { rooms } = buildRooms(planOf(corridor(width, size)))
+        expect(rooms.length, `${width}×${size}`).toBe(1)
+        expect(pointInPoly(rooms[0].meta.anchor, rooms[0].polygon), `${width}×${size}`).toBe(true)
+      }
+    }
+  })
+
+  it('якорь лежит внутри и для обычных комнат', () => {
+    const { rooms } = buildRooms(planOf(box(600, 400, 40)))
+    expect(pointInPoly(rooms[0].meta.anchor, rooms[0].polygon)).toBe(true)
+  })
+})
+
 describe('имена и метаданные комнат', () => {
   it('маленькой комнате достаётся имя санузла и плитка', () => {
     const { rooms } = buildRooms(planOf(box(200, 200, 10)))
@@ -91,6 +138,19 @@ describe('имена и метаданные комнат', () => {
     const after = buildRooms(moved)
     expect(after.rooms[0].meta.name).toBe('Моя комната')
     expect(after.rooms[0].meta.floor).toBe('parquet')
+  })
+
+  it('исчезнувшая комната не занимает своё имя навсегда', () => {
+    const first = buildRooms(planOf(box(600, 400, 40)))
+    // стены стёрли, но метаданные остались в плане; рисуем комнату в другом месте
+    const elsewhere = box(500, 500, 20).map((w, i) => ({
+      ...w,
+      id: `n${i}`,
+      a: { x: w.a.x + 2000, y: w.a.y },
+      b: { x: w.b.x + 2000, y: w.b.y },
+    }))
+    const { rooms } = buildRooms({ ...planOf(elsewhere), rooms: first.metas })
+    expect(rooms[0].meta.name).toBe('Гостиная')
   })
 
   it('имена комнат не повторяются', () => {

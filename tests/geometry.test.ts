@@ -115,7 +115,7 @@ describe('пересечение прямоугольников (SAT)', () => {
 describe('форматирование', () => {
   it('единицы длины', () => {
     expect(fmtLen(150, 'cm')).toContain('150')
-    expect(fmtLen(150, 'mm')).toBe('1500')
+    expect(fmtLen(150, 'mm')).toBe('1500 мм')
     expect(fmtLen(150, 'm')).toContain('1,5')
   })
 

@@ -2,7 +2,7 @@ import React, { useMemo } from 'react'
 import type { DimensionLine, Layers, LengthUnit, Opening, Plan, Pt, Room, Selection, Wall } from './types'
 import { CATALOG_MAP, FLOORS } from './catalog'
 import { Glyph } from './Glyph'
-import { add, angleDeg, bboxOf, dist, fmtArea, fmtLen, lerp, mid, mul, norm, obbCorners, perp, pointInPoly, sub } from './geometry'
+import { add, angleDeg, bboxOf, dist, fmtArea, fmtLen, mid, mul, norm, obbCorners, perp, pointInPoly, sub } from './geometry'
 import { openingGeom, zonesOf, type CheckResult } from './checks'
 import { wallsAtNode } from './snapping'
 
@@ -364,5 +364,3 @@ export function planBounds(plan: Plan): { minX: number; minY: number; maxX: numb
   if (!pts.length) return null
   return bboxOf(pts)
 }
-
-export const openingCenter = (op: Opening, wall: Wall): Pt => lerp(wall.a, wall.b, op.t)
