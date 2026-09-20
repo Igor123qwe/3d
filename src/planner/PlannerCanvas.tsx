@@ -1,0 +1,907 @@
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
+import type { DimensionLine, Furniture, Layers, LengthUnit, Opening, Plan, Pt, Room, Selection, Tool, Wall } from './types'
+import type { PlanHistory } from './store'
+import type { CatalogItem } from './catalog'
+import { CATALOG_MAP } from './catalog'
+import { openingGeom, type CheckResult } from './checks'
+import { Glyph } from './Glyph'
+import { ACCENT, Scene, planBounds, ptsAttr, sortedFurniture, wallPolygon } from './Scene'
+import { snapFurniture, snapOpening, snapWallPoint, type Guide } from './snapping'
+import {
+  addDim,
+  addFurniture,
+  addOpening,
+  addRect,
+  addWall,
+  cleanupWalls,
+  deleteSelection,
+  duplicateFurniture,
+  moveNodes,
+  nudgeFurniture,
+  OPENING_DEFAULT_WIDTH,
+  rotateFurniture,
+  updateDim,
+  updateFurniture,
+  updateOpening,
+} from './ops'
+import {
+  add,
+  angleDeg,
+  clamp,
+  dist,
+  dot,
+  eq,
+  fmtLen,
+  lerp,
+  mul,
+  norm,
+  normDeg,
+  obbCorners,
+  perp,
+  pointInPoly,
+  pointSegDist,
+  rotate,
+  roundTo,
+  snapPt,
+  sub,
+} from './geometry'
+
+export interface View {
+  x: number
+  y: number
+  zoom: number
+}
+
+export interface CanvasHandle {
+  fit: () => void
+  zoomBy: (k: number) => void
+  centerOn: (p: Pt) => void
+  finishDraft: () => void
+}
+
+export interface CanvasProps {
+  plan: Plan
+  rooms: Room[]
+  check: CheckResult
+  badItems: Set<string>
+  history: PlanHistory
+  tool: Tool
+  onToolChange: (t: Tool) => void
+  selection: Selection
+  onSelect: (s: Selection) => void
+  layers: Layers
+  unit: LengthUnit
+  ortho: boolean
+  wallThickness: number
+  placing: CatalogItem | null
+  view: View
+  onViewChange: (v: View) => void
+  onHint: (text: string) => void
+  photos?: Record<string, string>
+}
+
+type Drag =
+  | { kind: 'pan'; sx: number; sy: number; view0: View; moved: boolean; clickSel: Selection }
+  | { kind: 'maybe'; sx: number; sy: number; view0: View }
+  | { kind: 'room'; a: Pt }
+  | { kind: 'move'; id: string; offset: Pt; plan0: Plan; item0: Furniture }
+  | { kind: 'rotate'; id: string; plan0: Plan }
+  | { kind: 'resize'; id: string; plan0: Plan; item0: Furniture }
+  | { kind: 'node'; from: Pt; plan0: Plan }
+  | { kind: 'wall'; id: string; plan0: Plan; start: Pt; wall0: Wall }
+  | { kind: 'opening'; id: string; plan0: Plan }
+  | { kind: 'dim'; id: string; plan0: Plan; dim0: DimensionLine }
+
+const NS = { vectorEffect: 'non-scaling-stroke' as const }
+const sameSel = (a: Selection, b: Selection) => (a === null && b === null) || (!!a && !!b && a.kind === b.kind && a.id === b.id)
+const isEditable = (t: EventTarget | null) => {
+  const el = t as HTMLElement | null
+  if (!el) return false
+  const tag = el.tagName
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable
+}
+
+export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) => {
+  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view, onViewChange, onHint, photos } = props
+  const svgRef = useRef<SVGSVGElement>(null)
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const [size, setSize] = useState({ w: 800, h: 600 })
+  const [cursor, setCursor] = useState<{ p: Pt; kind: string } | null>(null)
+  const [guides, setGuides] = useState<Guide[]>([])
+  const [draft, setDraft] = useState<Pt[]>([])
+  const [roomDraft, setRoomDraft] = useState<{ a: Pt; b: Pt } | null>(null)
+  const [dimStart, setDimStart] = useState<Pt | null>(null)
+  const [measure, setMeasure] = useState<{ a: Pt; b: Pt; live: boolean } | null>(null)
+  const [hover, setHover] = useState<Selection>(null)
+  const [ghost, setGhost] = useState<{ x: number; y: number; rot: number } | null>(null)
+  const [ghostRot, setGhostRot] = useState(0)
+  const [openingGhost, setOpeningGhost] = useState<Opening | null>(null)
+  const [panning, setPanning] = useState(false)
+  const drag = useRef<Drag | null>(null)
+  const pointers = useRef(new Map<number, { x: number; y: number }>())
+  const pinch = useRef<{ d0: number; mid0: Pt; view0: View } | null>(null)
+  const spaceDown = useRef(false)
+  const viewRef = useRef(view)
+  viewRef.current = view
+  const planRef = useRef(plan)
+  planRef.current = plan
+  const draftRef = useRef(draft)
+  draftRef.current = draft
+
+  const zoom = view.zoom
+  const tol = 12 / zoom
+  const grid = plan.settings.grid
+  const wallMap = useMemo(() => new Map(plan.walls.map((w) => [w.id, w])), [plan.walls])
+  const ordered = useMemo(() => sortedFurniture(plan), [plan])
+
+  // ---------- размеры ----------
+  useEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      const r = el.getBoundingClientRect()
+      setSize({ w: Math.max(50, Math.floor(r.width)), h: Math.max(50, Math.floor(r.height)) })
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  const toWorld = useCallback((cx: number, cy: number): Pt => {
+    const r = svgRef.current?.getBoundingClientRect()
+    const v = viewRef.current
+    const sx = cx - (r?.left ?? 0)
+    const sy = cy - (r?.top ?? 0)
+    return { x: (sx - v.x) / v.zoom, y: (sy - v.y) / v.zoom }
+  }, [])
+
+  const fit = useCallback(() => {
+    const b = planBounds(planRef.current) ?? { minX: 0, minY: 0, maxX: 800, maxY: 600 }
+    const pad = 90
+    const bw = b.maxX - b.minX + pad * 2
+    const bh = b.maxY - b.minY + pad * 2
+    const z = clamp(Math.min(size.w / bw, size.h / bh), 0.12, 6)
+    onViewChange({ zoom: z, x: (size.w - bw * z) / 2 - (b.minX - pad) * z, y: (size.h - bh * z) / 2 - (b.minY - pad) * z })
+  }, [size, onViewChange])
+
+  const zoomAt = useCallback(
+    (factor: number, sx: number, sy: number) => {
+      const v = viewRef.current
+      const z = clamp(v.zoom * factor, 0.12, 8)
+      const k = z / v.zoom
+      onViewChange({ zoom: z, x: sx - (sx - v.x) * k, y: sy - (sy - v.y) * k })
+    },
+    [onViewChange],
+  )
+
+  const finishDraft = useCallback(() => {
+    setDraft([])
+    setGuides([])
+  }, [])
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      fit,
+      zoomBy: (k) => zoomAt(k, size.w / 2, size.h / 2),
+      centerOn: (p) => {
+        const v = viewRef.current
+        onViewChange({ ...v, x: size.w / 2 - p.x * v.zoom, y: size.h / 2 - p.y * v.zoom })
+      },
+      finishDraft,
+    }),
+    [fit, zoomAt, size, finishDraft, onViewChange],
+  )
+
+  // ---------- колесо: масштаб ----------
+  useEffect(() => {
+    const el = svgRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault()
+      const r = el.getBoundingClientRect()
+      if (e.ctrlKey || !e.shiftKey) zoomAt(Math.exp(-e.deltaY * 0.0012), e.clientX - r.left, e.clientY - r.top)
+      else {
+        const v = viewRef.current
+        onViewChange({ ...v, x: v.x - e.deltaY })
+      }
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [zoomAt, onViewChange])
+
+  // ---------- сброс временных состояний при смене инструмента ----------
+  useEffect(() => {
+    setDraft([])
+    setRoomDraft(null)
+    setDimStart(null)
+    setMeasure(null)
+    setGhost(null)
+    setOpeningGhost(null)
+    setGuides([])
+    setCursor(null)
+    setHover(null)
+  }, [tool, placing])
+
+  // ---------- подсказки ----------
+  useEffect(() => {
+    let text = ''
+    switch (tool) {
+      case 'select':
+        text = selection
+          ? 'Перетаскивайте объект. Ручка сверху — поворот, уголок — размер. Del — удалить, R — повернуть на 90°, Ctrl+D — дублировать'
+          : 'Клик — выбрать объект или комнату. Перетаскивание пустого места — сдвиг, колесо — масштаб'
+        break
+      case 'wall':
+        text = draft.length
+          ? 'Клик — следующая точка. Повторный клик в той же точке, Enter или Esc — завершить. Клик в начало — замкнуть контур'
+          : 'Клик — первая точка стены. Привязка к концам стен, осям и сетке'
+        break
+      case 'room':
+        text = 'Потяните прямоугольник — получится комната из четырёх стен'
+        break
+      case 'door':
+      case 'window':
+      case 'doorway':
+        text = 'Наведите на стену и кликните — проём встанет на стену. Потом можно двигать и менять ширину'
+        break
+      case 'place':
+        text = placing ? `«${placing.name}»: кликните, куда поставить. R — повернуть, Esc — отмена. Объект сам прилипает к стене` : 'Выберите предмет в каталоге'
+        break
+      case 'dimension':
+        text = dimStart ? 'Клик — вторая точка размера' : 'Клик — первая точка размерной линии'
+        break
+      case 'measure':
+        text = measure?.live ? 'Клик — зафиксировать измерение' : 'Клик — начать измерение рулеткой'
+        break
+    }
+    onHint(text)
+  }, [tool, selection, draft.length, placing, dimStart, measure?.live, onHint])
+
+  // ---------- вспомогательные ----------
+  const handlePositions = (f: Furniture) => {
+    const c = { x: f.x, y: f.y }
+    return {
+      rotate: add(c, rotate({ x: 0, y: -f.d / 2 - 26 / zoom }, f.rot)),
+      rotateBase: add(c, rotate({ x: 0, y: -f.d / 2 }, f.rot)),
+      resize: add(c, rotate({ x: f.w / 2, y: f.d / 2 }, f.rot)),
+    }
+  }
+
+  const hitTest = useCallback(
+    (p: Pt): Selection => {
+      const z = viewRef.current.zoom
+      const t = 5 / z
+      for (let i = ordered.length - 1; i >= 0; i--) {
+        const { f, cat } = ordered[i]
+        const isElectric = cat?.category === 'electric'
+        if (isElectric ? !layers.electric : !layers.furniture) continue
+        if (cat?.symbol) {
+          if (dist(p, { x: f.x, y: f.y }) < 14 / z) return { kind: 'furniture', id: f.id }
+        } else if (pointInPoly(p, obbCorners(f.x, f.y, f.w, f.d, f.rot))) return { kind: 'furniture', id: f.id }
+      }
+      for (const op of plan.openings) {
+        const w = wallMap.get(op.wallId)
+        if (!w) continue
+        const g = openingGeom(op, w)
+        const s0 = add(g.center, mul(g.dir, -g.hw))
+        const s1 = add(g.center, mul(g.dir, g.hw))
+        if (pointSegDist(p, s0, s1) < w.thickness / 2 + t) return { kind: 'opening', id: op.id }
+      }
+      for (const w of plan.walls) if (pointSegDist(p, w.a, w.b) < w.thickness / 2 + t) return { kind: 'wall', id: w.id }
+      if (layers.dims) {
+        for (const d of plan.dims) {
+          const dir = norm(sub(d.b, d.a))
+          const n = perp(dir)
+          if (pointSegDist(p, add(d.a, mul(n, d.offset)), add(d.b, mul(n, d.offset))) < 7 / z) return { kind: 'dim', id: d.id }
+        }
+      }
+      for (const r of rooms) if (pointInPoly(p, r.polygon)) return { kind: 'room', id: r.meta.id }
+      return null
+    },
+    [ordered, plan.openings, plan.walls, plan.dims, rooms, wallMap, layers],
+  )
+
+  const updateDrawingCursor = useCallback(
+    (raw: Pt) => {
+      const p = planRef.current
+      const g = p.settings.grid
+      switch (tool) {
+        case 'wall': {
+          const last = draftRef.current[draftRef.current.length - 1] ?? null
+          const s = snapWallPoint(raw, p.walls, { grid: g, tol, ortho, last })
+          setCursor({ p: s.p, kind: s.kind })
+          setGuides(s.guides)
+          break
+        }
+        case 'room':
+        case 'dimension':
+        case 'measure': {
+          const s = snapWallPoint(raw, p.walls, { grid: g, tol, ortho: false })
+          setCursor({ p: s.p, kind: s.kind })
+          setGuides(s.guides)
+          if (tool === 'measure') setMeasure((m) => (m && m.live ? { ...m, b: s.p } : m))
+          break
+        }
+        case 'door':
+        case 'window':
+        case 'doorway': {
+          const width = OPENING_DEFAULT_WIDTH[tool]
+          const s = snapOpening(raw, p, width, tol + 10)
+          setOpeningGhost(s ? { id: 'ghost', kind: tool, wallId: s.wallId, t: s.t, width, hinge: 'a', side: 1 } : null)
+          break
+        }
+        case 'place': {
+          if (!placing) break
+          const temp: Furniture = { id: 'ghost', type: placing.type, x: raw.x, y: raw.y, w: placing.w, d: placing.d, rot: ghostRot }
+          const s = snapFurniture(temp, raw, p, { grid: 5, tol: Math.max(tol, 12) })
+          setGhost({ x: s.x, y: s.y, rot: s.rot })
+          setGuides(s.guides)
+          break
+        }
+      }
+    },
+    [tool, tol, ortho, placing, ghostRot],
+  )
+
+  const handleTap = useCallback(
+    (raw: Pt) => {
+      const p = planRef.current
+      const g = p.settings.grid
+      switch (tool) {
+        case 'wall': {
+          const d = draftRef.current
+          const last = d[d.length - 1] ?? null
+          const s = snapWallPoint(raw, p.walls, { grid: g, tol, ortho, last })
+          if (!last) {
+            setDraft([s.p])
+            return
+          }
+          if (dist(s.p, last) < 1) {
+            finishDraft()
+            return
+          }
+          history.apply((pl) => addWall(pl, last, s.p, wallThickness))
+          if (d.length >= 2 && eq(s.p, d[0], 0.75)) {
+            finishDraft()
+            return
+          }
+          setDraft([...d, s.p])
+          return
+        }
+        case 'door':
+        case 'window':
+        case 'doorway': {
+          const width = OPENING_DEFAULT_WIDTH[tool]
+          const s = snapOpening(raw, p, width, tol + 10)
+          if (!s) return
+          let newId = ''
+          history.apply((pl) => {
+            const r = addOpening(pl, tool, s.wallId, s.t, width, rooms)
+            newId = r.id
+            return r.plan
+          })
+          if (newId) {
+            onSelect({ kind: 'opening', id: newId })
+            onToolChange('select')
+          }
+          return
+        }
+        case 'place': {
+          if (!placing) return
+          const temp: Furniture = { id: 'ghost', type: placing.type, x: raw.x, y: raw.y, w: placing.w, d: placing.d, rot: ghostRot }
+          const s = snapFurniture(temp, raw, p, { grid: 5, tol: Math.max(tol, 12) })
+          let newId = ''
+          history.apply((pl) => {
+            const r = addFurniture(pl, placing, s.x, s.y, s.rot)
+            newId = r.id
+            return r.plan
+          })
+          onSelect({ kind: 'furniture', id: newId })
+          onToolChange('select')
+          return
+        }
+        case 'dimension': {
+          const s = snapWallPoint(raw, p.walls, { grid: g, tol, ortho: false })
+          if (!dimStart) setDimStart(s.p)
+          else {
+            const a = dimStart
+            history.apply((pl) => addDim(pl, a, s.p, 30))
+            setDimStart(null)
+          }
+          return
+        }
+        case 'measure': {
+          const s = snapWallPoint(raw, p.walls, { grid: g, tol, ortho: false })
+          setMeasure((m) => (!m || !m.live ? { a: s.p, b: s.p, live: true } : { ...m, b: s.p, live: false }))
+          return
+        }
+      }
+    },
+    [tool, tol, ortho, wallThickness, history, rooms, placing, ghostRot, dimStart, onSelect, onToolChange, finishDraft],
+  )
+
+  // ---------- указатель ----------
+  const onPointerDown = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (e.button === 2) return
+    const svg = svgRef.current
+    svg?.setPointerCapture(e.pointerId)
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    if (pointers.current.size === 2) {
+      const [p1, p2] = [...pointers.current.values()]
+      if (drag.current && 'plan0' in drag.current) history.cancelPreview()
+      drag.current = null
+      setRoomDraft(null)
+      pinch.current = { d0: Math.hypot(p1.x - p2.x, p1.y - p2.y), mid0: { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 }, view0: viewRef.current }
+      return
+    }
+    if (pointers.current.size > 2) return
+    const raw = toWorld(e.clientX, e.clientY)
+    if (e.button === 1 || spaceDown.current) {
+      drag.current = { kind: 'pan', sx: e.clientX, sy: e.clientY, view0: viewRef.current, moved: false, clickSel: selection }
+      setPanning(true)
+      return
+    }
+    if (tool === 'select') {
+      downSelect(raw, e)
+      return
+    }
+    if (tool === 'room') {
+      const s = snapWallPoint(raw, plan.walls, { grid, tol, ortho: false })
+      drag.current = { kind: 'room', a: s.p }
+      setRoomDraft({ a: s.p, b: s.p })
+      return
+    }
+    drag.current = { kind: 'maybe', sx: e.clientX, sy: e.clientY, view0: viewRef.current }
+  }
+
+  const downSelect = (raw: Pt, e: React.PointerEvent) => {
+    const z = viewRef.current.zoom
+    if (selection?.kind === 'furniture') {
+      const f = plan.furniture.find((x) => x.id === selection.id)
+      const cat = f ? CATALOG_MAP[f.type] : undefined
+      if (f && !cat?.symbol) {
+        const h = handlePositions(f)
+        if (dist(raw, h.rotate) < 11 / z) {
+          drag.current = { kind: 'rotate', id: f.id, plan0: plan }
+          return
+        }
+        if (cat?.resizable !== false && dist(raw, h.resize) < 10 / z) {
+          drag.current = { kind: 'resize', id: f.id, plan0: plan, item0: f }
+          return
+        }
+      }
+    }
+    if (selection?.kind === 'wall') {
+      const w = wallMap.get(selection.id)
+      if (w) {
+        for (const p of [w.a, w.b]) {
+          if (dist(raw, p) < 10 / z) {
+            drag.current = { kind: 'node', from: p, plan0: plan }
+            return
+          }
+        }
+      }
+    }
+    const hit = hitTest(raw)
+    if (hit?.kind === 'furniture') {
+      const f = plan.furniture.find((x) => x.id === hit.id)!
+      if (!sameSel(hit, selection)) onSelect(hit)
+      drag.current = { kind: 'move', id: f.id, offset: sub({ x: f.x, y: f.y }, raw), plan0: plan, item0: f }
+      return
+    }
+    if (hit?.kind === 'opening') {
+      if (!sameSel(hit, selection)) onSelect(hit)
+      drag.current = { kind: 'opening', id: hit.id, plan0: plan }
+      return
+    }
+    if (hit?.kind === 'wall') {
+      if (!sameSel(hit, selection)) onSelect(hit)
+      drag.current = { kind: 'wall', id: hit.id, plan0: plan, start: raw, wall0: wallMap.get(hit.id)! }
+      return
+    }
+    if (hit?.kind === 'dim') {
+      if (!sameSel(hit, selection)) onSelect(hit)
+      drag.current = { kind: 'dim', id: hit.id, plan0: plan, dim0: plan.dims.find((d) => d.id === hit.id)! }
+      return
+    }
+    drag.current = { kind: 'pan', sx: e.clientX, sy: e.clientY, view0: viewRef.current, moved: false, clickSel: hit }
+  }
+
+  const onPointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (pointers.current.has(e.pointerId)) pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    if (pinch.current && pointers.current.size >= 2) {
+      const [p1, p2] = [...pointers.current.values()]
+      const r = svgRef.current?.getBoundingClientRect()
+      const d = Math.hypot(p1.x - p2.x, p1.y - p2.y)
+      const m = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 }
+      const v0 = pinch.current.view0
+      const z = clamp((v0.zoom * d) / Math.max(1, pinch.current.d0), 0.12, 8)
+      const wx = (pinch.current.mid0.x - (r?.left ?? 0) - v0.x) / v0.zoom
+      const wy = (pinch.current.mid0.y - (r?.top ?? 0) - v0.y) / v0.zoom
+      onViewChange({ zoom: z, x: m.x - (r?.left ?? 0) - wx * z, y: m.y - (r?.top ?? 0) - wy * z })
+      return
+    }
+    const raw = toWorld(e.clientX, e.clientY)
+    const d = drag.current
+    if (!d) {
+      if (tool === 'select') {
+        const h = hitTest(raw)
+        setHover((prev) => (sameSel(prev, h) ? prev : h))
+      } else updateDrawingCursor(raw)
+      return
+    }
+    switch (d.kind) {
+      case 'pan': {
+        const dx = e.clientX - d.sx
+        const dy = e.clientY - d.sy
+        if (!d.moved && Math.hypot(dx, dy) > 4) {
+          d.moved = true
+          setPanning(true)
+        }
+        if (d.moved) onViewChange({ ...d.view0, x: d.view0.x + dx, y: d.view0.y + dy })
+        return
+      }
+      case 'maybe': {
+        const dx = e.clientX - d.sx
+        const dy = e.clientY - d.sy
+        if (Math.hypot(dx, dy) > 6) {
+          drag.current = { kind: 'pan', sx: d.sx, sy: d.sy, view0: d.view0, moved: true, clickSel: selection }
+          setPanning(true)
+          onViewChange({ ...d.view0, x: d.view0.x + dx, y: d.view0.y + dy })
+        } else updateDrawingCursor(raw)
+        return
+      }
+      case 'room': {
+        const s = snapWallPoint(raw, plan.walls, { grid, tol, ortho: false })
+        setRoomDraft({ a: d.a, b: s.p })
+        setGuides(s.guides)
+        return
+      }
+      case 'move': {
+        const without: Plan = { ...d.plan0, furniture: d.plan0.furniture.filter((f) => f.id !== d.id) }
+        const s = snapFurniture(d.item0, add(raw, d.offset), without, { grid: 5, tol: Math.max(tol, 10), selfId: d.id })
+        setGuides(s.guides)
+        history.preview(updateFurniture(d.plan0, d.id, { x: s.x, y: s.y, rot: s.rot }))
+        return
+      }
+      case 'rotate': {
+        const f = d.plan0.furniture.find((x) => x.id === d.id)
+        if (!f) return
+        const ang = roundTo(angleDeg({ x: f.x, y: f.y }, raw) + 90, e.shiftKey ? 1 : 15)
+        history.preview(updateFurniture(d.plan0, d.id, { rot: normDeg(ang) }))
+        return
+      }
+      case 'resize': {
+        const f = d.item0
+        const corner = add({ x: f.x, y: f.y }, rotate({ x: -f.w / 2, y: -f.d / 2 }, f.rot))
+        const local = rotate(sub(raw, corner), -f.rot)
+        const w = Math.max(10, roundTo(local.x, 5))
+        const dd = Math.max(5, roundTo(local.y, 5))
+        const c = add(corner, rotate({ x: w / 2, y: dd / 2 }, f.rot))
+        history.preview(updateFurniture(d.plan0, d.id, { x: c.x, y: c.y, w, d: dd }))
+        return
+      }
+      case 'node': {
+        const s = snapWallPoint(raw, d.plan0.walls, { grid, tol, ortho: false, exclude: (p) => eq(p, d.from, 0.75) })
+        setGuides(s.guides)
+        history.preview(moveNodes(d.plan0, [{ from: d.from, to: s.p }]))
+        return
+      }
+      case 'wall': {
+        const delta = sub(raw, d.start)
+        const na = snapPt(add(d.wall0.a, delta), grid)
+        const dd = sub(na, d.wall0.a)
+        history.preview(
+          moveNodes(d.plan0, [
+            { from: d.wall0.a, to: add(d.wall0.a, dd) },
+            { from: d.wall0.b, to: add(d.wall0.b, dd) },
+          ]),
+        )
+        return
+      }
+      case 'opening': {
+        const op = d.plan0.openings.find((o) => o.id === d.id)
+        if (!op) return
+        const s = snapOpening(raw, d.plan0, op.width, tol + 15)
+        if (s) history.preview(updateOpening(d.plan0, d.id, { wallId: s.wallId, t: s.t }))
+        return
+      }
+      case 'dim': {
+        const dir = norm(sub(d.dim0.b, d.dim0.a))
+        const n = perp(dir)
+        const off = roundTo(dot(sub(raw, d.dim0.a), n), 5)
+        history.preview(updateDim(d.plan0, d.id, { offset: off === 0 ? 5 : off }))
+        return
+      }
+    }
+  }
+
+  const onPointerUp = (e: React.PointerEvent<SVGSVGElement>) => {
+    pointers.current.delete(e.pointerId)
+    if (pinch.current) {
+      if (pointers.current.size < 2) pinch.current = null
+      return
+    }
+    const d = drag.current
+    drag.current = null
+    setPanning(false)
+    if (!d) return
+    const raw = toWorld(e.clientX, e.clientY)
+    switch (d.kind) {
+      case 'pan':
+        if (!d.moved && tool === 'select') onSelect(d.clickSel)
+        return
+      case 'maybe':
+        handleTap(raw)
+        return
+      case 'room': {
+        setRoomDraft(null)
+        setGuides([])
+        const s = snapWallPoint(raw, plan.walls, { grid, tol, ortho: false })
+        history.apply((pl) => addRect(pl, d.a, s.p, wallThickness))
+        return
+      }
+      case 'node':
+      case 'wall':
+        history.preview((pl) => cleanupWalls(pl))
+        history.endPreview()
+        setGuides([])
+        return
+      default:
+        history.endPreview()
+        setGuides([])
+    }
+  }
+
+  const onPointerCancel = (e: React.PointerEvent<SVGSVGElement>) => {
+    pointers.current.delete(e.pointerId)
+    pinch.current = null
+    const d = drag.current
+    drag.current = null
+    setPanning(false)
+    setRoomDraft(null)
+    setGuides([])
+    if (d && 'plan0' in d) history.cancelPreview()
+  }
+
+  // ---------- клавиатура ----------
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (isEditable(e.target)) return
+      const ctrl = e.ctrlKey || e.metaKey
+      if (e.code === 'Space') {
+        spaceDown.current = true
+        e.preventDefault()
+        return
+      }
+      if (e.key === 'Escape') {
+        if (draftRef.current.length) finishDraft()
+        else if (dimStart) setDimStart(null)
+        else if (measure) setMeasure(null)
+        else if (tool !== 'select') onToolChange('select')
+        else onSelect(null)
+        return
+      }
+      if (e.key === 'Enter' && draftRef.current.length) {
+        finishDraft()
+        return
+      }
+      if (ctrl && e.code === 'KeyZ') {
+        e.preventDefault()
+        if (e.shiftKey) history.redo()
+        else history.undo()
+        return
+      }
+      if (ctrl && e.code === 'KeyY') {
+        e.preventDefault()
+        history.redo()
+        return
+      }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selection) {
+        e.preventDefault()
+        history.apply((pl) => deleteSelection(pl, selection))
+        onSelect(null)
+        return
+      }
+      if (ctrl && e.code === 'KeyD' && selection?.kind === 'furniture') {
+        e.preventDefault()
+        let nid = ''
+        history.apply((pl) => {
+          const r = duplicateFurniture(pl, selection.id)
+          nid = r.id
+          return r.plan
+        })
+        if (nid) onSelect({ kind: 'furniture', id: nid })
+        return
+      }
+      if (e.code === 'KeyR' && !ctrl) {
+        if (selection?.kind === 'furniture') history.apply((pl) => rotateFurniture(pl, selection.id, e.shiftKey ? -90 : 90))
+        else if (tool === 'place') setGhostRot((r) => normDeg(r + 90))
+        return
+      }
+      if (e.key.startsWith('Arrow') && selection?.kind === 'furniture') {
+        e.preventDefault()
+        const step = e.shiftKey ? 10 : 1
+        const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0
+        const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0
+        history.apply((pl) => nudgeFurniture(pl, selection.id, dx, dy))
+        return
+      }
+      if (ctrl) return
+      const map: Record<string, Tool> = { KeyV: 'select', KeyW: 'wall', KeyC: 'room', KeyD: 'door', KeyN: 'window', KeyM: 'dimension', KeyL: 'measure' }
+      if (map[e.code]) onToolChange(map[e.code])
+    }
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') spaceDown.current = false
+    }
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('keyup', onKeyUp)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('keyup', onKeyUp)
+    }
+  }, [tool, selection, history, onSelect, onToolChange, finishDraft, dimStart, measure])
+
+  // ---------- отрисовка ----------
+  const drawing = tool !== 'select'
+  const cursorStyle = panning ? 'grabbing' : drawing ? 'crosshair' : hover?.kind === 'furniture' || hover?.kind === 'opening' ? 'move' : hover?.kind === 'wall' ? 'pointer' : 'default'
+  const minor = 50 * zoom
+  const major = 100 * zoom
+  const draftWalls = draft.slice(1).map((p, i) => ({ id: `d${i}`, a: draft[i], b: p, thickness: wallThickness }))
+  const rubber = tool === 'wall' && draft.length && cursor ? { a: draft[draft.length - 1], b: cursor.p } : null
+  const selFurn = selection?.kind === 'furniture' ? plan.furniture.find((f) => f.id === selection.id) : undefined
+  const selCat = selFurn ? CATALOG_MAP[selFurn.type] : undefined
+  const selWall = selection?.kind === 'wall' ? wallMap.get(selection.id) : undefined
+  const ghostWall = openingGhost ? wallMap.get(openingGhost.wallId) : undefined
+
+  const wallGhost = (w: Wall, key: string) => <polygon key={key} points={ptsAttr(wallPolygon(w, [...plan.walls, w]))} fill="rgba(37,99,235,0.45)" stroke={ACCENT} strokeWidth={1} {...NS} />
+  const lengthLabel = (a: Pt, b: Pt, key: string) => {
+    const m = lerp(a, b, 0.5)
+    let ang = angleDeg(a, b)
+    if (ang > 90 || ang <= -90) ang += 180
+    return (
+      <text key={key} transform={`translate(${m.x} ${m.y}) rotate(${ang})`} y={-8 / zoom} fontSize={12 / zoom} textAnchor="middle" fill={ACCENT} stroke="#fff" strokeWidth={3 / zoom} paintOrder="stroke" fontFamily="system-ui, sans-serif" fontWeight={600}>
+        {fmtLen(dist(a, b), unit)}
+      </text>
+    )
+  }
+
+  return (
+    <div ref={wrapRef} className="pl-canvas-wrap" style={{ cursor: cursorStyle }}>
+      <svg
+        ref={svgRef}
+        width={size.w}
+        height={size.h}
+        style={{ touchAction: 'none', display: 'block', userSelect: 'none' }}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerCancel}
+        onContextMenu={(e) => {
+          e.preventDefault()
+          if (draft.length) finishDraft()
+          else if (tool !== 'select') onToolChange('select')
+        }}
+      >
+        <defs>
+          <pattern id="pl-grid-minor" width={minor} height={minor} patternUnits="userSpaceOnUse" x={view.x % minor} y={view.y % minor}>
+            <path d={`M ${minor} 0 L 0 0 0 ${minor}`} fill="none" stroke="#e5e7eb" strokeWidth={1} />
+          </pattern>
+          <pattern id="pl-grid-major" width={major} height={major} patternUnits="userSpaceOnUse" x={view.x % major} y={view.y % major}>
+            <path d={`M ${major} 0 L 0 0 0 ${major}`} fill="none" stroke="#d1d5db" strokeWidth={1} />
+          </pattern>
+        </defs>
+        <rect width={size.w} height={size.h} fill="#fbfbfa" />
+        {layers.grid && minor > 7 && <rect width={size.w} height={size.h} fill="url(#pl-grid-minor)" />}
+        {layers.grid && major > 12 && <rect width={size.w} height={size.h} fill="url(#pl-grid-major)" />}
+
+        <g transform={`translate(${view.x} ${view.y}) scale(${zoom})`}>
+          <Scene plan={plan} rooms={rooms} check={check} layers={layers} unit={unit} zoom={zoom} selection={selection} hover={hover} badItems={badItems} photos={photos} />
+
+          {/* направляющие */}
+          {guides.map((g, i) => (
+            <line key={i} x1={g.a.x} y1={g.a.y} x2={g.b.x} y2={g.b.y} stroke="#f43f5e" strokeWidth={1} strokeDasharray="4 3" {...NS} />
+          ))}
+
+          {/* черновик стен */}
+          {draftWalls.map((w) => wallGhost(w, w.id))}
+          {rubber && (
+            <g>
+              {wallGhost({ id: 'rubber', a: rubber.a, b: rubber.b, thickness: wallThickness }, 'rubber')}
+              {lengthLabel(rubber.a, rubber.b, 'rubber-len')}
+            </g>
+          )}
+          {draft.length > 0 && <circle cx={draft[0].x} cy={draft[0].y} r={6 / zoom} fill="#fff" stroke={ACCENT} strokeWidth={1.5} {...NS} />}
+
+          {/* черновик комнаты */}
+          {roomDraft &&
+            (() => {
+              const { a, b } = roomDraft
+              const pts: Pt[] = [a, { x: b.x, y: a.y }, b, { x: a.x, y: b.y }]
+              return (
+                <g>
+                  {pts.map((p, i) => wallGhost({ id: `rd${i}`, a: p, b: pts[(i + 1) % 4], thickness: wallThickness }, `rd${i}`))}
+                  {lengthLabel(a, { x: b.x, y: a.y }, 'rd-w')}
+                  {lengthLabel({ x: b.x, y: a.y }, b, 'rd-h')}
+                </g>
+              )
+            })()}
+
+          {/* призрак мебели */}
+          {tool === 'place' && placing && ghost && (
+            <g transform={`translate(${ghost.x} ${ghost.y}) rotate(${ghost.rot})`} opacity={0.65} pointerEvents="none">
+              <Glyph item={{ id: 'ghost', type: placing.type, x: 0, y: 0, w: placing.w, d: placing.d, rot: 0 }} cat={placing} zoom={zoom} />
+            </g>
+          )}
+
+          {/* призрак проёма */}
+          {openingGhost &&
+            ghostWall &&
+            (() => {
+              const g = openingGeom(openingGhost, ghostWall)
+              const s0 = add(g.center, mul(g.dir, -g.hw))
+              const s1 = add(g.center, mul(g.dir, g.hw))
+              const half = ghostWall.thickness / 2 + 1
+              const cut = [add(s0, mul(g.n, half)), add(s1, mul(g.n, half)), sub(s1, mul(g.n, half)), sub(s0, mul(g.n, half))]
+              return <polygon points={ptsAttr(cut)} fill="rgba(37,99,235,0.35)" stroke={ACCENT} strokeWidth={1.2} {...NS} />
+            })()}
+
+          {/* размер: первая точка */}
+          {dimStart && cursor && (
+            <g>
+              <line x1={dimStart.x} y1={dimStart.y} x2={cursor.p.x} y2={cursor.p.y} stroke={ACCENT} strokeWidth={1} strokeDasharray="4 3" {...NS} />
+              {lengthLabel(dimStart, cursor.p, 'dim-len')}
+            </g>
+          )}
+
+          {/* рулетка */}
+          {measure && (
+            <g>
+              <line x1={measure.a.x} y1={measure.a.y} x2={measure.b.x} y2={measure.b.y} stroke="#f59e0b" strokeWidth={1.5} {...NS} />
+              <circle cx={measure.a.x} cy={measure.a.y} r={3 / zoom} fill="#f59e0b" />
+              <circle cx={measure.b.x} cy={measure.b.y} r={3 / zoom} fill="#f59e0b" />
+              {lengthLabel(measure.a, measure.b, 'measure')}
+            </g>
+          )}
+
+          {/* маркер курсора при рисовании */}
+          {cursor && (tool === 'wall' || tool === 'room' || tool === 'dimension' || tool === 'measure') && (
+            <g pointerEvents="none">
+              <circle cx={cursor.p.x} cy={cursor.p.y} r={(cursor.kind === 'endpoint' ? 7 : 4) / zoom} fill="none" stroke={cursor.kind === 'endpoint' ? '#f43f5e' : ACCENT} strokeWidth={1.5} {...NS} />
+            </g>
+          )}
+
+          {/* ручки выбранной мебели */}
+          {selFurn &&
+            !selCat?.symbol &&
+            (() => {
+              const h = handlePositions(selFurn)
+              return (
+                <g>
+                  <line x1={h.rotateBase.x} y1={h.rotateBase.y} x2={h.rotate.x} y2={h.rotate.y} stroke={ACCENT} strokeWidth={1} {...NS} />
+                  <circle cx={h.rotate.x} cy={h.rotate.y} r={7 / zoom} fill="#fff" stroke={ACCENT} strokeWidth={1.5} {...NS} />
+                  <text x={h.rotate.x} y={h.rotate.y} fontSize={9 / zoom} textAnchor="middle" dominantBaseline="central" fill={ACCENT} pointerEvents="none">
+                    ↻
+                  </text>
+                  {selCat?.resizable !== false && (
+                    <rect x={h.resize.x - 5 / zoom} y={h.resize.y - 5 / zoom} width={10 / zoom} height={10 / zoom} fill="#fff" stroke={ACCENT} strokeWidth={1.5} {...NS} transform={`rotate(${selFurn.rot} ${h.resize.x} ${h.resize.y})`} />
+                  )}
+                </g>
+              )
+            })()}
+
+          {/* ручки выбранной стены */}
+          {selWall && (
+            <g>
+              {[selWall.a, selWall.b].map((p, i) => (
+                <circle key={i} cx={p.x} cy={p.y} r={6 / zoom} fill="#fff" stroke={ACCENT} strokeWidth={1.5} {...NS} />
+              ))}
+              {lengthLabel(selWall.a, selWall.b, 'sel-wall-len')}
+            </g>
+          )}
+        </g>
+      </svg>
+    </div>
+  )
+})
+PlannerCanvas.displayName = 'PlannerCanvas'

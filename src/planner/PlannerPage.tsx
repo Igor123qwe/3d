@@ -1,0 +1,1133 @@
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { Layers, LengthUnit, Plan, Pt, Selection, Tool } from './types'
+import { CATALOG, CATALOG_MAP, CATEGORIES, FLOORS, ROOM_NAMES, dims3d, type CatalogItem, type CategoryKey } from './catalog'
+import { usePlanHistory } from './store'
+import { buildRooms } from './rooms'
+import { runChecks } from './checks'
+import { PlannerCanvas, type CanvasHandle, type View } from './PlannerCanvas'
+import { Scene, planBounds } from './Scene'
+import { Glyph } from './Glyph'
+import { TEMPLATES } from './templates'
+import { downloadJson, downloadPng, downloadSvg, normalizePlan, readPlanFile } from './exporters'
+import {
+  addOpening,
+  deleteSelection,
+  duplicateFurniture,
+  isEmptyPlan,
+  OPENING_WIDTHS,
+  rotateFurniture,
+  setWallLength,
+  updateDim,
+  updateFurniture,
+  updateOpening,
+  updateRoomMeta,
+  updateWall,
+  WALL_THICKNESSES,
+} from './ops'
+import { dist, fmtArea, fmtLen, fmtNum, lerp, normDeg } from './geometry'
+import { getTelegramWebApp } from '../telegram'
+import { guessType, modelRefFromAsset, modelRefFromUrl, phAssets, phCategories, phDimsCm, phInfo, phPage, type PhAsset } from './polyhaven'
+import { decodePlan, parseHash, planShareUrl } from './share'
+import { modelKey } from './polyhaven'
+import './planner.css'
+
+const View3D = lazy(() => import('./View3D'))
+
+const LS_PLAN = 'boop.planner.plan.v1'
+const LS_UI = 'boop.planner.ui.v1'
+
+const DEFAULT_LAYERS: Layers = { grid: true, rooms: true, furniture: true, electric: true, dims: true, ergo: false, labels: true }
+
+interface UiPrefs {
+  layers: Layers
+  unit: LengthUnit
+  ortho: boolean
+  wallThickness: number
+}
+
+const loadPrefs = (): UiPrefs => {
+  try {
+    const raw = localStorage.getItem(LS_UI)
+    if (raw) {
+      const p = JSON.parse(raw) as Partial<UiPrefs>
+      return {
+        layers: { ...DEFAULT_LAYERS, ...(p.layers ?? {}) },
+        unit: p.unit ?? 'cm',
+        ortho: p.ortho ?? true,
+        wallThickness: p.wallThickness ?? 10,
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return { layers: DEFAULT_LAYERS, unit: 'cm', ortho: true, wallThickness: 10 }
+}
+
+const loadInitialPlan = (): Plan => {
+  try {
+    const raw = localStorage.getItem(LS_PLAN)
+    if (raw) return normalizePlan(JSON.parse(raw))
+  } catch {
+    /* ignore */
+  }
+  return TEMPLATES[1].build()
+}
+
+type PanelTab = 'props' | 'catalog' | 'checks' | 'help'
+
+const TOOLS: { tool: Tool; icon: string; name: string; key: string }[] = [
+  { tool: 'select', icon: '⬚', name: 'Выбор', key: 'V' },
+  { tool: 'wall', icon: '╱', name: 'Стена', key: 'W' },
+  { tool: 'room', icon: '▭', name: 'Комната', key: 'C' },
+  { tool: 'door', icon: '⌐', name: 'Дверь', key: 'D' },
+  { tool: 'window', icon: '☰', name: 'Окно', key: 'N' },
+  { tool: 'doorway', icon: '⌶', name: 'Проём', key: '' },
+  { tool: 'dimension', icon: '↔', name: 'Размер', key: 'M' },
+  { tool: 'measure', icon: '📏', name: 'Рулетка', key: 'L' },
+]
+
+const COLORS = ['', '#e6edf7', '#f5e9d8', '#e6f3e8', '#e0f1f7', '#fdf1dc', '#fbe7ee', '#ececec', '#d9c9b4', '#c7d2fe', '#bbf7d0', '#fecaca', '#fde68a', '#ffffff', '#4b5563']
+
+interface Props {
+  onBack?: () => void
+}
+
+export const PlannerPage: React.FC<Props> = ({ onBack }) => {
+  const history = usePlanHistory(loadInitialPlan)
+  const { plan } = history
+  const prefs = useMemo(loadPrefs, [])
+  const [tool, setToolRaw] = useState<Tool>('select')
+  const [selection, setSelection] = useState<Selection>(null)
+  const [placing, setPlacing] = useState<CatalogItem | null>(null)
+  const [layers, setLayers] = useState<Layers>(prefs.layers)
+  const [unit, setUnit] = useState<LengthUnit>(prefs.unit)
+  const [ortho, setOrtho] = useState(prefs.ortho)
+  const [wallThickness, setWallThickness] = useState(prefs.wallThickness)
+  const [view, setView] = useState<View>({ x: 40, y: 40, zoom: 0.7 })
+  const [panel, setPanel] = useState<PanelTab>('props')
+  const [panelOpen, setPanelOpen] = useState(true)
+  const [menu, setMenu] = useState<null | 'file' | 'layers'>(null)
+  const [hint, setHint] = useState('')
+  const [catQuery, setCatQuery] = useState('')
+  const [catCategory, setCatCategory] = useState<CategoryKey | 'all'>('all')
+  const [toast, setToast] = useState<string | null>(null)
+  const [view3d, setView3d] = useState(false)
+  const [catMode, setCatMode] = useState<'schemes' | 'photo'>('schemes')
+  const [phCats, setPhCats] = useState<{ name: string; count: number }[]>([])
+  const [phCat, setPhCat] = useState('furniture')
+  const [phItems, setPhItems] = useState<PhAsset[]>([])
+  const [phState, setPhState] = useState<'idle' | 'loading' | 'error'>('idle')
+  const [customModelUrl, setCustomModelUrl] = useState('')
+  const [photoMode, setPhotoMode] = useState(() => {
+    try {
+      return localStorage.getItem('boop.planner.photo') !== '0'
+    } catch {
+      return true
+    }
+  })
+  const [topViews, setTopViews] = useState<Record<string, string>>({})
+  const topViewPending = useRef(new Set<string>())
+  const canvasRef = useRef<CanvasHandle>(null)
+  const fileInput = useRef<HTMLInputElement>(null)
+
+  const roomsResult = useMemo(() => buildRooms(plan), [plan.walls, plan.rooms]) // eslint-disable-line react-hooks/exhaustive-deps
+  const rooms = roomsResult.rooms
+  useEffect(() => {
+    if (roomsResult.metas.length !== plan.rooms.length) {
+      const metas = roomsResult.metas
+      history.silent((p) => ({ ...p, rooms: metas }))
+    }
+  }, [roomsResult, plan.rooms.length, history])
+
+  const check = useMemo(() => runChecks(plan, rooms), [plan, rooms])
+  const badItems = useMemo(() => new Set(check.issues.filter((i) => i.level === 'error' && i.target?.kind === 'furniture').map((i) => i.target!.id)), [check])
+  const problems = check.issues.filter((i) => i.level !== 'info').length
+
+  // автосохранение
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try {
+        localStorage.setItem(LS_PLAN, JSON.stringify(plan))
+      } catch {
+        /* ignore */
+      }
+    }, 400)
+    return () => clearTimeout(t)
+  }, [plan])
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_UI, JSON.stringify({ layers, unit, ortho, wallThickness }))
+    } catch {
+      /* ignore */
+    }
+  }, [layers, unit, ortho, wallThickness])
+
+  useEffect(() => {
+    const t = setTimeout(() => canvasRef.current?.fit(), 60)
+    return () => clearTimeout(t)
+  }, [])
+
+  useEffect(() => {
+    const tg = getTelegramWebApp() as (ReturnType<typeof getTelegramWebApp> & { disableVerticalSwipes?: () => void }) | null
+    try {
+      tg?.expand()
+      tg?.disableVerticalSwipes?.()
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 3500)
+    return () => clearTimeout(t)
+  }, [toast])
+
+  // фотореалистичный план: виды сверху моделей
+  useEffect(() => {
+    try {
+      localStorage.setItem('boop.planner.photo', photoMode ? '1' : '0')
+    } catch {
+      /* ignore */
+    }
+    if (!photoMode) return
+    const items = plan.furniture.filter((f) => f.model)
+    if (!items.length) return
+    let alive = true
+    import('./topview').then((mod) => {
+      for (const f of items) {
+        const h = f.h ?? dims3d(f).h
+        const key = mod.topViewKey(f.model!, f.w, f.d, h)
+        if (topViews[key] || topViewPending.current.has(key)) continue
+        topViewPending.current.add(key)
+        mod
+          .renderTopView(f.model!, f.w, f.d, h)
+          .then((url) => {
+            if (alive) setTopViews((prev) => ({ ...prev, [key]: url }))
+          })
+          .catch(() => {})
+          .finally(() => topViewPending.current.delete(key))
+      }
+    })
+    return () => {
+      alive = false
+    }
+  }, [plan.furniture, photoMode]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const photos = useMemo(() => {
+    if (!photoMode) return undefined
+    const out: Record<string, string> = {}
+    for (const f of plan.furniture) {
+      if (!f.model) continue
+      const h = f.h ?? dims3d(f).h
+      const url = topViews[`${modelKey(f.model)}|${Math.round(f.w)}x${Math.round(f.d)}x${Math.round(h)}`]
+      if (url) out[f.id] = url
+    }
+    return Object.keys(out).length ? out : undefined
+  }, [plan.furniture, topViews, photoMode])
+
+  useEffect(() => {
+    if (view3d) setHint('3D-вид: вращайте сцену мышью или пальцем. AR: на Android — «AR через камеру» в Chrome, на iPhone — «AR на iPhone» в Safari')
+  }, [view3d])
+
+  // план из ссылки (#mode=ar&plan=...)
+  useEffect(() => {
+    const h = parseHash(location.hash)
+    if (!h.plan && !h.mode) return
+    let alive = true
+    const run = async () => {
+      if (h.plan) {
+        const p = await decodePlan(h.plan)
+        if (p && alive) {
+          history.replace(p)
+          setSelection(null)
+          setTimeout(() => canvasRef.current?.fit(), 30)
+        } else if (alive) setToast('Не удалось прочитать план из ссылки')
+      }
+      if (alive && (h.mode === '3d' || h.mode === 'ar')) {
+        setView3d(true)
+        if (h.mode === 'ar') setToast('Нажмите «AR через камеру» (Android) или «AR на iPhone»')
+      }
+      try {
+        window.history.replaceState(null, '', location.pathname + location.search)
+      } catch {
+        /* ignore */
+      }
+    }
+    void run()
+    return () => {
+      alive = false
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // фотокаталог Poly Haven
+  useEffect(() => {
+    if (catMode !== 'photo') return
+    let alive = true
+    setPhState('loading')
+    Promise.all([phCats.length ? Promise.resolve(phCats) : phCategories(), phAssets(phCat)])
+      .then(([cats, items]) => {
+        if (!alive) return
+        setPhCats(cats)
+        setPhItems(items)
+        setPhState('idle')
+      })
+      .catch(() => alive && setPhState('error'))
+    return () => {
+      alive = false
+    }
+  }, [catMode, phCat]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const isMobile = () => window.innerWidth < 860
+
+  const setTool = useCallback((t: Tool) => {
+    setToolRaw(t)
+    if (t !== 'place') setPlacing(null)
+    if (t !== 'select') setSelection(null)
+  }, [])
+
+  const onSelect = useCallback((s: Selection) => {
+    setSelection(s)
+    if (s) {
+      setPanel('props')
+      if (!isMobile()) setPanelOpen(true)
+    }
+  }, [])
+
+  const pick = (item: CatalogItem) => {
+    setPlacing(item)
+    setToolRaw('place')
+    setSelection(null)
+    if (isMobile()) setPanelOpen(false)
+  }
+
+  const openCatalog = () => {
+    setPanel('catalog')
+    setPanelOpen(true)
+    if (tool !== 'place') setTool('select')
+  }
+
+  const pickPhoto = async (a: PhAsset) => {
+    let dims = a.dims
+    if (!dims) {
+      try {
+        dims = phDimsCm((await phInfo(a.id)).dimensions)
+      } catch {
+        /* ignore */
+      }
+    }
+    const type = guessType(a)
+    const cat = CATALOG_MAP[type] ?? CATALOG_MAP.box
+    pick({ ...cat, name: a.name, w: dims?.w ?? cat.w, d: dims?.d ?? cat.d, h: dims?.h, model: modelRefFromAsset(a) })
+  }
+
+  const shareForPhone = async () => {
+    try {
+      const url = await planShareUrl(plan, 'ar')
+      const tg = getTelegramWebApp() as (ReturnType<typeof getTelegramWebApp> & { openLink?: (u: string) => void }) | null
+      if (tg?.openLink) {
+        tg.openLink(url)
+        return
+      }
+      await navigator.clipboard.writeText(url)
+      setToast('Ссылка скопирована: откройте её на телефоне в Chrome (Android) или Safari (iPhone)')
+    } catch {
+      setToast('Не удалось скопировать ссылку')
+    }
+  }
+
+  const newFromTemplate = (key: string) => {
+    const t = TEMPLATES.find((x) => x.key === key)
+    if (!t) return
+    if (!isEmptyPlan(plan) && !window.confirm('Заменить текущий план? Несохранённые изменения будут потеряны.')) return
+    history.replace(t.build())
+    setSelection(null)
+    setMenu(null)
+    setTimeout(() => canvasRef.current?.fit(), 30)
+  }
+
+  // экспорт: рендерим сцену в скрытый SVG и сериализуем его
+  const [exportJob, setExportJob] = useState<{ kind: 'png' | 'svg'; x: number; y: number; w: number; h: number; z: number } | null>(null)
+  const exportSvgRef = useRef<SVGSVGElement>(null)
+  const doExport = (kind: 'png' | 'svg') => {
+    setMenu(null)
+    const b = planBounds(plan)
+    if (!b) {
+      setToast('План пуст — нечего экспортировать')
+      return
+    }
+    const pad = 120
+    setExportJob({ kind, x: b.minX - pad, y: b.minY - pad, w: b.maxX - b.minX + pad * 2, h: b.maxY - b.minY + pad * 2, z: 2 })
+  }
+  useEffect(() => {
+    if (!exportJob) return
+    const el = exportSvgRef.current
+    if (!el) return
+    const job = exportJob
+    const run = async () => {
+      try {
+        const markup = new XMLSerializer().serializeToString(el)
+        if (job.kind === 'svg') downloadSvg(plan.name, markup)
+        else await downloadPng(plan.name, markup, job.w * job.z, job.h * job.z)
+      } catch {
+        setToast('Не удалось экспортировать')
+      } finally {
+        setExportJob(null)
+      }
+    }
+    void run()
+  }, [exportJob]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const onOpenFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0]
+    e.target.value = ''
+    if (!f) return
+    try {
+      const p = await readPlanFile(f)
+      history.replace(p)
+      setSelection(null)
+      setTimeout(() => canvasRef.current?.fit(), 30)
+    } catch (err) {
+      setToast((err as Error).message)
+    }
+  }
+
+  const focusIssueTarget = (s: Selection) => {
+    if (!s) return
+    setSelection(s)
+    let p: Pt | null = null
+    if (s.kind === 'furniture') {
+      const f = plan.furniture.find((x) => x.id === s.id)
+      if (f) p = { x: f.x, y: f.y }
+    } else if (s.kind === 'opening') {
+      const o = plan.openings.find((x) => x.id === s.id)
+      const w = o && plan.walls.find((x) => x.id === o.wallId)
+      if (o && w) p = lerp(w.a, w.b, o.t)
+    } else if (s.kind === 'room') {
+      const r = rooms.find((x) => x.meta.id === s.id)
+      if (r) p = r.meta.anchor
+    }
+    if (p) canvasRef.current?.centerOn(p)
+    if (isMobile()) setPanelOpen(false)
+  }
+
+  const totalArea = rooms.reduce((s, r) => s + r.area, 0)
+  const toggleLayer = (k: keyof Layers) => setLayers((l) => ({ ...l, [k]: !l[k] }))
+
+  // ---------- панель свойств ----------
+  const renderProps = () => {
+    if (selection?.kind === 'furniture') {
+      const f = plan.furniture.find((x) => x.id === selection.id)
+      if (!f) return null
+      const cat = CATALOG_MAP[f.type]
+      const upd = (patch: Partial<typeof f>) => history.apply((p) => updateFurniture(p, f.id, patch))
+      return (
+        <div>
+          <div className="pl-props-title">{cat?.name ?? f.type}</div>
+          <label className="pl-field">
+            <span>Подпись</span>
+            <input value={f.label ?? ''} placeholder={cat?.name} onChange={(e) => upd({ label: e.target.value })} />
+          </label>
+          {cat?.resizable !== false && (
+            <>
+              <label className="pl-field">
+                <span>Ширина, см</span>
+                <input type="number" min={5} step={5} value={f.w} onChange={(e) => upd({ w: Math.max(5, Number(e.target.value) || 5) })} />
+              </label>
+              <label className="pl-field">
+                <span>Глубина, см</span>
+                <input type="number" min={5} step={5} value={f.d} onChange={(e) => upd({ d: Math.max(5, Number(e.target.value) || 5) })} />
+              </label>
+            </>
+          )}
+          <label className="pl-field">
+            <span>Поворот, °</span>
+            <input type="number" step={15} value={Math.round(f.rot)} onChange={(e) => upd({ rot: normDeg(Number(e.target.value) || 0) })} />
+          </label>
+          <label className="pl-field">
+            <span>Высота, см</span>
+            <input type="number" min={1} step={5} value={f.h ?? dims3d(f).h} onChange={(e) => upd({ h: Math.max(1, Number(e.target.value) || 1) })} />
+          </label>
+          <div className="pl-row">
+            <button className="pl-btn" onClick={() => history.apply((p) => rotateFurniture(p, f.id, -15))}>⟲ 15°</button>
+            <button className="pl-btn" onClick={() => history.apply((p) => rotateFurniture(p, f.id, 15))}>⟳ 15°</button>
+            <button className="pl-btn" onClick={() => history.apply((p) => rotateFurniture(p, f.id, 90))}>↻ 90°</button>
+            <button className={`pl-btn ${f.flip ? 'active' : ''}`} onClick={() => upd({ flip: !f.flip })}>⇋ Отразить</button>
+          </div>
+          {!cat?.symbol && (
+            <div className="pl-field pl-field-col">
+              <span>Цвет</span>
+              <div className="pl-swatches">
+                {COLORS.map((c) => (
+                  <button key={c || 'auto'} className={`pl-swatch ${(f.color ?? '') === c ? 'active' : ''}`} style={{ background: c || 'linear-gradient(135deg,#fff 45%,#999 55%)' }} title={c || 'По умолчанию'} onClick={() => upd({ color: c || undefined })} />
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="pl-row">
+            <button
+              className="pl-btn"
+              onClick={() => {
+                let nid = ''
+                history.apply((p) => {
+                  const r = duplicateFurniture(p, f.id)
+                  nid = r.id
+                  return r.plan
+                })
+                if (nid) setSelection({ kind: 'furniture', id: nid })
+              }}
+            >
+              ⧉ Дублировать
+            </button>
+            <button
+              className="pl-btn danger"
+              onClick={() => {
+                history.apply((p) => deleteSelection(p, selection))
+                setSelection(null)
+              }}
+            >
+              🗑 Удалить
+            </button>
+          </div>
+          {cat?.hint && <div className="pl-hint-box">💡 {cat.hint}</div>}
+          <div className="pl-block">
+            <div className="pl-props-title">3D-модель</div>
+            {f.model ? (
+              <div className="pl-model">
+                {f.model.thumb && <img src={f.model.thumb} alt="" loading="lazy" />}
+                <div>
+                  <b>{f.model.name ?? f.model.id}</b>
+                  <div className="pl-note">
+                    {f.model.license ?? 'Своя модель'}
+                    {f.model.provider === 'polyhaven' && (
+                      <>
+                        {' · '}
+                        <a href={phPage(f.model.id)} target="_blank" rel="noreferrer">
+                          страница модели
+                        </a>
+                      </>
+                    )}
+                  </div>
+                  <button className="pl-btn" onClick={() => upd({ model: undefined })}>
+                    Убрать модель
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="pl-note">В 3D и AR предмет показан простым боксом. Выберите фотореалистичную модель в каталоге («Фото 3D») или вставьте ссылку на свой GLB.</div>
+            )}
+            <div className="pl-row">
+              <input className="pl-grow" placeholder="https://…/model.glb" value={customModelUrl} onChange={(e) => setCustomModelUrl(e.target.value)} />
+              <button
+                className="pl-btn"
+                disabled={!/^https?:\/\/.+\.(glb|gltf)(\?.*)?$/i.test(customModelUrl.trim())}
+                onClick={() => {
+                  upd({ model: modelRefFromUrl(customModelUrl.trim()) })
+                  setCustomModelUrl('')
+                }}
+              >
+                Применить GLB
+              </button>
+            </div>
+          </div>
+          {cat?.clearance && (
+            <div className="pl-note">
+              Зоны эргономики: {Object.entries(cat.clearance).map(([k, v]) => `${k === 'front' ? 'перед' : k === 'back' ? 'сзади' : k === 'left' ? 'слева' : 'справа'} ${v} см`).join(', ')}
+            </div>
+          )}
+        </div>
+      )
+    }
+    if (selection?.kind === 'wall') {
+      const w = plan.walls.find((x) => x.id === selection.id)
+      if (!w) return null
+      const L = dist(w.a, w.b)
+      return (
+        <div>
+          <div className="pl-props-title">Стена</div>
+          <label className="pl-field">
+            <span>Длина, см</span>
+            <input type="number" min={5} step={5} value={Math.round(L)} onChange={(e) => history.apply((p) => setWallLength(p, w.id, Number(e.target.value) || L))} />
+          </label>
+          <label className="pl-field">
+            <span>Толщина, см</span>
+            <select value={w.thickness} onChange={(e) => history.apply((p) => updateWall(p, w.id, { thickness: Number(e.target.value) }))}>
+              {WALL_THICKNESSES.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="pl-note">Тяните за кружки на концах, чтобы изменить длину; соседние стены подстроятся. Тяните за тело стены — она сдвинется параллельно.</div>
+          <div className="pl-row">
+            {(['door', 'window', 'doorway'] as const).map((k) => (
+              <button
+                key={k}
+                className="pl-btn"
+                disabled={L < 100}
+                onClick={() => {
+                  let nid = ''
+                  history.apply((p) => {
+                    const r = addOpening(p, k, w.id, 0.5, k === 'door' ? 80 : k === 'window' ? 150 : 90, rooms)
+                    nid = r.id
+                    return r.plan
+                  })
+                  if (nid) setSelection({ kind: 'opening', id: nid })
+                }}
+              >
+                + {k === 'door' ? 'Дверь' : k === 'window' ? 'Окно' : 'Проём'}
+              </button>
+            ))}
+          </div>
+          <button
+            className="pl-btn danger"
+            onClick={() => {
+              history.apply((p) => deleteSelection(p, selection))
+              setSelection(null)
+            }}
+          >
+            🗑 Удалить стену
+          </button>
+        </div>
+      )
+    }
+    if (selection?.kind === 'opening') {
+      const o = plan.openings.find((x) => x.id === selection.id)
+      const w = o && plan.walls.find((x) => x.id === o.wallId)
+      if (!o || !w) return null
+      const L = dist(w.a, w.b)
+      const pos = o.t * L
+      const upd = (patch: Partial<typeof o>) => history.apply((p) => updateOpening(p, o.id, patch))
+      return (
+        <div>
+          <div className="pl-props-title">{o.kind === 'door' ? 'Дверь' : o.kind === 'window' ? 'Окно' : 'Проём'}</div>
+          <label className="pl-field">
+            <span>Тип</span>
+            <select value={o.kind} onChange={(e) => upd({ kind: e.target.value as typeof o.kind })}>
+              <option value="door">Дверь</option>
+              <option value="window">Окно</option>
+              <option value="doorway">Проём без двери</option>
+            </select>
+          </label>
+          <label className="pl-field">
+            <span>Ширина, см</span>
+            <input type="number" min={30} step={5} value={o.width} list={`pl-widths-${o.kind}`} onChange={(e) => upd({ width: Math.max(30, Number(e.target.value) || 30) })} />
+            <datalist id={`pl-widths-${o.kind}`}>
+              {OPENING_WIDTHS[o.kind].map((v) => (
+                <option key={v} value={v} />
+              ))}
+            </datalist>
+          </label>
+          <label className="pl-field pl-field-col">
+            <span>
+              Положение от начала стены: {fmtLen(pos, unit)} (до конца {fmtLen(L - pos, unit)})
+            </span>
+            <input type="range" min={o.width / 2} max={L - o.width / 2} step={1} value={pos} onChange={(e) => upd({ t: Number(e.target.value) / L })} />
+          </label>
+          <div className="pl-row">
+            <button className="pl-btn" onClick={() => upd({ t: 0.5 })}>По центру стены</button>
+            {o.kind === 'door' && (
+              <>
+                <button className="pl-btn" onClick={() => upd({ hinge: o.hinge === 'a' ? 'b' : 'a' })}>Петли с другой стороны</button>
+                <button className="pl-btn" onClick={() => upd({ side: o.side === 1 ? -1 : 1 })}>Открывать в другую сторону</button>
+              </>
+            )}
+          </div>
+          <div className="pl-note">Дверь в санузел и кладовую открывают наружу; в жилые комнаты — внутрь. Дверь не должна упираться в мебель или другую дверь.</div>
+          <button
+            className="pl-btn danger"
+            onClick={() => {
+              history.apply((p) => deleteSelection(p, selection))
+              setSelection(null)
+            }}
+          >
+            🗑 Удалить
+          </button>
+        </div>
+      )
+    }
+    if (selection?.kind === 'room') {
+      const r = rooms.find((x) => x.meta.id === selection.id)
+      if (!r) return null
+      const upd = (patch: Partial<typeof r.meta>) => history.apply((p) => updateRoomMeta(p, r.meta.id, patch))
+      return (
+        <div>
+          <div className="pl-props-title">Комната</div>
+          <label className="pl-field">
+            <span>Название</span>
+            <input value={r.meta.name} onChange={(e) => upd({ name: e.target.value })} />
+          </label>
+          <div className="pl-chips">
+            {ROOM_NAMES.map((n) => (
+              <button key={n} className={`pl-chip ${r.meta.name === n ? 'active' : ''}`} onClick={() => upd({ name: n })}>
+                {n}
+              </button>
+            ))}
+          </div>
+          <label className="pl-field">
+            <span>Пол</span>
+            <select value={r.meta.floor} onChange={(e) => upd({ floor: e.target.value as typeof r.meta.floor })}>
+              {FLOORS.map((f) => (
+                <option key={f.key} value={f.key}>
+                  {f.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="pl-stats">
+            <div>
+              <b>{fmtArea(r.area)}</b>
+              <span>площадь</span>
+            </div>
+            <div>
+              <b>{fmtLen(r.perimeter, 'm')}</b>
+              <span>периметр по осям</span>
+            </div>
+          </div>
+          <div className="pl-note">Площадь считается по внутренним граням стен — как в техпаспорте.</div>
+        </div>
+      )
+    }
+    if (selection?.kind === 'dim') {
+      const d = plan.dims.find((x) => x.id === selection.id)
+      if (!d) return null
+      return (
+        <div>
+          <div className="pl-props-title">Размерная линия</div>
+          <label className="pl-field">
+            <span>Длина</span>
+            <b>{fmtLen(dist(d.a, d.b), unit)}</b>
+          </label>
+          <label className="pl-field">
+            <span>Отступ, см</span>
+            <input type="number" step={5} value={d.offset} onChange={(e) => history.apply((p) => updateDim(p, d.id, { offset: Number(e.target.value) || 5 }))} />
+          </label>
+          <button
+            className="pl-btn danger"
+            onClick={() => {
+              history.apply((p) => deleteSelection(p, selection))
+              setSelection(null)
+            }}
+          >
+            🗑 Удалить
+          </button>
+        </div>
+      )
+    }
+    // ничего не выбрано — обзор и настройки инструмента
+    return (
+      <div>
+        {(tool === 'wall' || tool === 'room') && (
+          <div className="pl-block">
+            <div className="pl-props-title">Новые стены</div>
+            <label className="pl-field">
+              <span>Толщина, см</span>
+              <select value={wallThickness} onChange={(e) => setWallThickness(Number(e.target.value))}>
+                {WALL_THICKNESSES.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="pl-field">
+              <span>Только 0°/45°/90°</span>
+              <input type="checkbox" checked={ortho} onChange={(e) => setOrtho(e.target.checked)} />
+            </label>
+            <div className="pl-note">Наружные стены обычно 38–51 см, межквартирные 20–25, перегородки 8–12 см.</div>
+          </div>
+        )}
+        <div className="pl-props-title">План «{plan.name}»</div>
+        <div className="pl-stats">
+          <div>
+            <b>{fmtArea(totalArea)}</b>
+            <span>общая площадь</span>
+          </div>
+          <div>
+            <b>{rooms.length}</b>
+            <span>комнат</span>
+          </div>
+          <div>
+            <b>{plan.furniture.length}</b>
+            <span>объектов</span>
+          </div>
+        </div>
+        {rooms.length > 0 && (
+          <div className="pl-block">
+            {rooms.map((r) => (
+              <button key={r.meta.id} className="pl-list-item" onClick={() => focusIssueTarget({ kind: 'room', id: r.meta.id })}>
+                <span>{r.meta.name}</span>
+                <b>{fmtArea(r.area)}</b>
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="pl-block">
+          <div className="pl-props-title">Как работать</div>
+          <ol className="pl-steps">
+            <li>Нарисуйте стены: «Комната» тянет прямоугольник, «Стена» — по точкам. Замкнутые контуры сами становятся комнатами.</li>
+            <li>Поставьте двери и окна — они прилипают к стенам.</li>
+            <li>Расставьте мебель из каталога: объекты магнитятся к стенам и выравниваются друг по другу.</li>
+            <li>Откройте «Проверку» — планировщик подскажет, где не хватает проходов и что мешает дверям.</li>
+          </ol>
+        </div>
+      </div>
+    )
+  }
+
+  const filteredCatalog = CATALOG.filter((c) => (catCategory === 'all' || c.category === catCategory) && (!catQuery || c.name.toLowerCase().includes(catQuery.toLowerCase())))
+
+  const filteredPhoto = phItems.filter((a) => !catQuery || `${a.name} ${a.tags.join(' ')}`.toLowerCase().includes(catQuery.toLowerCase()))
+
+  const renderCatalog = () => (
+    <div>
+      <div className="pl-segment">
+        <button className={catMode === 'schemes' ? 'active' : ''} onClick={() => setCatMode('schemes')}>
+          Схемы
+        </button>
+        <button className={catMode === 'photo' ? 'active' : ''} onClick={() => setCatMode('photo')}>
+          Фото 3D
+        </button>
+      </div>
+      <input
+        className="pl-search"
+        placeholder={catMode === 'photo' ? 'Поиск по Poly Haven (англ.): sofa, chair, lamp…' : 'Поиск: кровать, стол, розетка…'}
+        value={catQuery}
+        onChange={(e) => setCatQuery(e.target.value)}
+      />
+      {catMode === 'photo' ? (
+        <div>
+          <div className="pl-chips">
+            {(phCats.length ? phCats : [{ name: 'furniture', count: 0 }]).slice(0, 14).map((c) => (
+              <button key={c.name} className={`pl-chip ${phCat === c.name ? 'active' : ''}`} onClick={() => setPhCat(c.name)}>
+                {c.name}
+                {c.count ? ` · ${c.count}` : ''}
+              </button>
+            ))}
+          </div>
+          {phState === 'loading' && <div className="pl-note">Загружаем каталог…</div>}
+          {phState === 'error' && <div className="pl-note">Каталог недоступен: нет связи с polyhaven.com. Попробуйте позже или вставьте ссылку на свой GLB в свойствах предмета.</div>}
+          <div className="pl-cat-grid">
+            {filteredPhoto.map((a) => (
+              <button key={a.id} className={`pl-cat-item photo ${placing?.model?.id === a.id ? 'active' : ''}`} onClick={() => pickPhoto(a)} title={a.tags.join(', ')}>
+                <img src={a.thumb} alt="" loading="lazy" />
+                <span className="pl-cat-name">{a.name}</span>
+                <span className="pl-cat-size">{a.dims ? `${a.dims.w}×${a.dims.d}×${a.dims.h}` : 'размер из модели'}</span>
+              </button>
+            ))}
+          </div>
+          <div className="pl-note">Модели Poly Haven (лицензия CC0 — свободное использование). Фото и 3D подгружаются с polyhaven.com.</div>
+        </div>
+      ) : (
+        <>
+      <div className="pl-chips">
+        <button className={`pl-chip ${catCategory === 'all' ? 'active' : ''}`} onClick={() => setCatCategory('all')}>
+          Все
+        </button>
+        {CATEGORIES.map((c) => (
+          <button key={c.key} className={`pl-chip ${catCategory === c.key ? 'active' : ''}`} onClick={() => setCatCategory(c.key)}>
+            {c.icon} {c.name}
+          </button>
+        ))}
+      </div>
+      <div className="pl-cat-grid">
+        {filteredCatalog.map((c) => {
+          const vb = c.symbol ? '-14 -14 28 28' : `${-c.w / 2 - 4} ${-c.d / 2 - 4} ${c.w + 8} ${c.d + 8}`
+          return (
+            <button key={c.type} className={`pl-cat-item ${placing?.type === c.type ? 'active' : ''}`} onClick={() => pick(c)} title={c.hint}>
+              <svg viewBox={vb} width={84} height={56} preserveAspectRatio="xMidYMid meet">
+                <Glyph item={{ id: 'p', type: c.type, x: 0, y: 0, w: c.w, d: c.d, rot: 0 }} cat={c} zoom={1} />
+              </svg>
+              <span className="pl-cat-name">{c.name}</span>
+              {!c.symbol && (
+                <span className="pl-cat-size">
+                  {c.w}×{c.d}
+                </span>
+              )}
+            </button>
+          )
+        })}
+      </div>
+        </>
+      )}
+    </div>
+  )
+
+  const renderChecks = () => (
+    <div>
+      <label className="pl-field">
+        <span>Показывать зоны эргономики на плане</span>
+        <input type="checkbox" checked={layers.ergo} onChange={() => toggleLayer('ergo')} />
+      </label>
+      {check.issues.length === 0 ? (
+        <div className="pl-ok">✅ Замечаний нет. Расставьте мебель — проверки появятся автоматически.</div>
+      ) : (
+        check.issues.map((i) => (
+          <button key={i.id} className={`pl-issue ${i.level}`} onClick={() => focusIssueTarget(i.target ?? null)}>
+            <span>{i.level === 'error' ? '⛔' : i.level === 'warn' ? '⚠️' : 'ℹ️'}</span>
+            <span>{i.text}</span>
+          </button>
+        ))
+      )}
+      <div className="pl-block">
+        <div className="pl-props-title">Что проверяется</div>
+        <ul className="pl-rules">
+          <li>Пересечения мебели между собой и со стенами.</li>
+          <li>Свободные зоны: проходы у кровати 70 см, перед шкафом 90 см, вокруг стола 75 см, перед унитазом 60 см и т. д.</li>
+          <li>Двери: сектор открывания не задевает мебель; в каждую комнату есть вход.</li>
+          <li>Кухня: рабочий треугольник холодильник–мойка–плита 4–8 м.</li>
+          <li>Спальня: изголовье у стены, не под окном, не ногами к двери.</li>
+          <li>Гостиная: расстояние диван–телевизор 2–3 м.</li>
+        </ul>
+      </div>
+    </div>
+  )
+
+  const renderHelp = () => (
+    <div className="pl-help">
+      <div className="pl-props-title">Правила дизайнеров</div>
+      <ul className="pl-rules">
+        <li><b>Проходы.</b> Основные — 90–100 см, второстепенные — 60–70 см. Меньше 60 см — уже не проход.</li>
+        <li><b>Спальня.</b> С обеих сторон двуспальной кровати 70 см. Изголовье к глухой стене, не под окно, не ногами к двери. Шкаф-купе экономит 30 см перед собой по сравнению с распашным.</li>
+        <li><b>Гостиная.</b> Диван ↔ телевизор 2–3 м для 55″. Журнальный стол в 40–45 см от дивана. Ковёр объединяет зону: передние ножки мебели на нём.</li>
+        <li><b>Столовая.</b> 60 см ширины стола на человека; 75–80 см от края стола до стены, чтобы отодвинуть стул.</li>
+        <li><b>Кухня.</b> Порядок холодильник → мойка → плита, между мойкой и плитой 60–90 см столешницы. Между рядами 120 см. Плита не у окна и не вплотную к холодильнику.</li>
+        <li><b>Санузел.</b> Перед унитазом 60 см, по бокам 20–25. Перед раковиной и ванной 70 см. Дверь наружу.</li>
+        <li><b>Двери.</b> Не бьются о мебель и друг о друга; выключатель со стороны ручки.</li>
+        <li><b>Свет и розетки.</b> Три сценария света в каждой комнате. Розетки: у кровати по 2 с каждой стороны, у дивана, на кухне каждые 60–100 см над столешницей.</li>
+        <li><b>Окна.</b> Не загораживать высокой мебелью; рабочий стол — боком к окну.</li>
+      </ul>
+      <div className="pl-props-title">Горячие клавиши</div>
+      <table className="pl-keys">
+        <tbody>
+          <tr><td>V / W / C</td><td>Выбор / Стена / Комната</td></tr>
+          <tr><td>D / N / M / L</td><td>Дверь / Окно / Размер / Рулетка</td></tr>
+          <tr><td>R, Shift+R</td><td>Повернуть на 90° (и призрак при установке)</td></tr>
+          <tr><td>Ctrl+D</td><td>Дублировать</td></tr>
+          <tr><td>Стрелки, Shift</td><td>Сдвиг на 1 см / 10 см</td></tr>
+          <tr><td>Del</td><td>Удалить</td></tr>
+          <tr><td>Ctrl+Z / Ctrl+Y</td><td>Отменить / Вернуть</td></tr>
+          <tr><td>Esc / Enter</td><td>Завершить стену, отменить инструмент</td></tr>
+          <tr><td>Колесо, пинч, пробел+мышь</td><td>Масштаб и сдвиг</td></tr>
+        </tbody>
+      </table>
+      <div className="pl-note">План сохраняется в браузере автоматически. Через «Файл» можно сохранить JSON, открыть его на другом устройстве, экспортировать PNG/SVG.</div>
+    </div>
+  )
+
+  return (
+    <div className={`pl-root ${view3d ? 'is3d' : ''}`}>
+      <header className="pl-header">
+        {onBack && (
+          <button className="pl-btn" onClick={onBack}>
+            ← Назад
+          </button>
+        )}
+        <input className="pl-name" value={plan.name} onChange={(e) => history.silent((p) => ({ ...p, name: e.target.value }))} aria-label="Название плана" />
+        <div className="pl-header-actions">
+          <button className="pl-ibtn" disabled={!history.canUndo} onClick={history.undo} title="Отменить (Ctrl+Z)">↶</button>
+          <button className="pl-ibtn" disabled={!history.canRedo} onClick={history.redo} title="Вернуть (Ctrl+Y)">↷</button>
+          <span className="pl-zoom">
+            <span className="pl-sep" />
+            <button className="pl-ibtn" onClick={() => canvasRef.current?.zoomBy(1 / 1.25)} title="Отдалить">−</button>
+            <button className="pl-ibtn wide" onClick={() => canvasRef.current?.fit()} title="Показать весь план">⤢ {Math.round(view.zoom * 100)}%</button>
+            <button className="pl-ibtn" onClick={() => canvasRef.current?.zoomBy(1.25)} title="Приблизить">+</button>
+          </span>
+          <span className="pl-sep" />
+          <button className={`pl-btn ${view3d ? 'active' : ''}`} onClick={() => setView3d((v) => !v)} title="3D-вид и AR через камеру">
+            <span className="pl-btn-text">3D / AR</span>
+            <span className="pl-btn-icon">3D</span>
+          </button>
+          <button
+            className={`pl-btn ${panel === 'checks' ? 'active' : ''}`}
+            onClick={() => {
+              setPanel('checks')
+              setPanelOpen(true)
+            }}
+          >
+            <span className="pl-btn-text">Проверка</span>
+            <span className="pl-btn-icon">✓</span>
+            {problems > 0 && <span className="pl-badge">{problems}</span>}
+          </button>
+          <button className={`pl-btn ${menu === 'layers' ? 'active' : ''}`} onClick={() => setMenu((m) => (m === 'layers' ? null : 'layers'))} title="Слои">
+            <span className="pl-btn-text">Слои</span>
+            <span className="pl-btn-icon">◫</span>
+          </button>
+          <button className={`pl-btn ${menu === 'file' ? 'active' : ''}`} onClick={() => setMenu((m) => (m === 'file' ? null : 'file'))} title="Файл">
+            <span className="pl-btn-text">Файл</span>
+            <span className="pl-btn-icon">☰</span>
+          </button>
+          <button
+            className={`pl-ibtn ${panel === 'help' ? 'active' : ''}`}
+            onClick={() => {
+              setPanel('help')
+              setPanelOpen(true)
+            }}
+            title="Справка и правила"
+          >
+            ?
+          </button>
+        </div>
+        {menu && <div className="pl-backdrop" onClick={() => setMenu(null)} />}
+        {menu === 'file' && (
+          <div className="pl-menu">
+            <div className="pl-menu-title">Новый план</div>
+            {TEMPLATES.map((t) => (
+              <button key={t.key} className="pl-menu-item" onClick={() => newFromTemplate(t.key)} title={t.desc}>
+                {t.name}
+              </button>
+            ))}
+            <div className="pl-menu-title">Файлы</div>
+            <button className="pl-menu-item" onClick={() => { downloadJson(plan); setMenu(null) }}>Сохранить план (JSON)</button>
+            <button className="pl-menu-item" onClick={() => { fileInput.current?.click(); setMenu(null) }}>Открыть план (JSON)…</button>
+            <button className="pl-menu-item" onClick={() => doExport('png')}>Экспорт картинки (PNG)</button>
+            <button className="pl-menu-item" onClick={() => doExport('svg')}>Экспорт вектора (SVG)</button>
+            <div className="pl-menu-title">Единицы на плане</div>
+            <div className="pl-row">
+              {(['cm', 'mm', 'm'] as LengthUnit[]).map((u) => (
+                <button key={u} className={`pl-chip ${unit === u ? 'active' : ''}`} onClick={() => setUnit(u)}>
+                  {u === 'cm' ? 'см' : u === 'mm' ? 'мм' : 'м'}
+                </button>
+              ))}
+            </div>
+            <div className="pl-menu-title">Шаг сетки</div>
+            <div className="pl-row">
+              {[5, 10, 25, 50].map((g) => (
+                <button key={g} className={`pl-chip ${plan.settings.grid === g ? 'active' : ''}`} onClick={() => history.silent((p) => ({ ...p, settings: { ...p.settings, grid: g } }))}>
+                  {g} см
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {menu === 'layers' && (
+          <div className="pl-menu">
+            {(
+              [
+                ['grid', 'Сетка'],
+                ['rooms', 'Полы и названия комнат'],
+                ['furniture', 'Мебель'],
+                ['electric', 'Электрика'],
+                ['labels', 'Подписи мебели'],
+                ['dims', 'Размеры'],
+                ['ergo', 'Зоны эргономики'],
+              ] as [keyof Layers, string][]
+            ).map(([k, name]) => (
+              <label key={k} className="pl-menu-item">
+                <input type="checkbox" checked={layers[k]} onChange={() => toggleLayer(k)} /> {name}
+              </label>
+            ))}
+            <label className="pl-menu-item">
+              <input type="checkbox" checked={photoMode} onChange={() => setPhotoMode((v) => !v)} /> Фото-вид моделей на плане
+            </label>
+          </div>
+        )}
+        <input ref={fileInput} type="file" accept=".json,application/json" style={{ display: 'none' }} onChange={onOpenFile} />
+      </header>
+
+      <nav className={`pl-tools ${view3d ? 'hidden' : ''}`}>
+        {TOOLS.map((t) => (
+          <button key={t.tool} className={`pl-tool ${tool === t.tool ? 'active' : ''}`} onClick={() => setTool(t.tool)} title={t.key ? `${t.name} (${t.key})` : t.name}>
+            <span className="pl-tool-icon">{t.icon}</span>
+            <span className="pl-tool-name">{t.name}</span>
+          </button>
+        ))}
+        <button className={`pl-tool ${tool === 'place' || panel === 'catalog' ? 'active' : ''}`} onClick={openCatalog} title="Каталог мебели">
+          <span className="pl-tool-icon">🛋</span>
+          <span className="pl-tool-name">Мебель</span>
+        </button>
+        <span className="pl-tools-gap" />
+        <button className={`pl-tool small ${ortho ? 'active' : ''}`} onClick={() => setOrtho((o) => !o)} title="Рисовать стены только под 0/45/90°">
+          <span className="pl-tool-icon">∟</span>
+          <span className="pl-tool-name">Орто</span>
+        </button>
+        <button className={`pl-tool small ${layers.ergo ? 'active' : ''}`} onClick={() => toggleLayer('ergo')} title="Показать зоны эргономики">
+          <span className="pl-tool-icon">◌</span>
+          <span className="pl-tool-name">Зоны</span>
+        </button>
+      </nav>
+
+      {view3d ? (
+        <Suspense fallback={<div className="pl-canvas-wrap pl3d-loading">Загружаем 3D…</div>}>
+          <View3D plan={plan} rooms={rooms} selection={selection} onSelect={onSelect} onExit={() => setView3d(false)} onToast={setToast} onShare={shareForPhone} />
+        </Suspense>
+      ) : (
+        <PlannerCanvas
+          ref={canvasRef}
+          plan={plan}
+          rooms={rooms}
+          check={check}
+          badItems={badItems}
+          history={history}
+          tool={tool}
+          onToolChange={setTool}
+          selection={selection}
+          onSelect={onSelect}
+          layers={layers}
+          unit={unit}
+          ortho={ortho}
+          wallThickness={wallThickness}
+          placing={placing}
+          view={view}
+          onViewChange={setView}
+          onHint={setHint}
+          photos={photos}
+        />
+      )}
+
+      <aside className={`pl-panel ${panelOpen ? 'open' : 'closed'}`}>
+        <div className="pl-panel-tabs">
+          {(
+            [
+              ['props', 'Свойства'],
+              ['catalog', 'Каталог'],
+              ['checks', problems ? `Проверка · ${problems}` : 'Проверка'],
+              ['help', '?'],
+            ] as [PanelTab, string][]
+          ).map(([k, name]) => (
+            <button
+              key={k}
+              className={`pl-tab ${panel === k ? 'active' : ''}`}
+              onClick={() => {
+                setPanel(k)
+                setPanelOpen(true)
+              }}
+            >
+              {name}
+            </button>
+          ))}
+          <button className="pl-tab pl-tab-toggle" onClick={() => setPanelOpen((o) => !o)} aria-label="Свернуть панель">
+            {panelOpen ? '▾' : '▴'}
+          </button>
+        </div>
+        {panelOpen && (
+          <div className="pl-panel-body">
+            {panel === 'props' && renderProps()}
+            {panel === 'catalog' && renderCatalog()}
+            {panel === 'checks' && renderChecks()}
+            {panel === 'help' && renderHelp()}
+          </div>
+        )}
+      </aside>
+
+      <footer className="pl-status">
+        <span className="pl-status-hint">{hint}</span>
+        <span className="pl-status-stats">
+          {fmtArea(totalArea)} · {rooms.length} {rooms.length === 1 ? 'комната' : rooms.length >= 2 && rooms.length <= 4 ? 'комнаты' : 'комнат'} · сетка {fmtNum(plan.settings.grid)} см
+        </span>
+      </footer>
+      {toast && <div className="pl-toast">{toast}</div>}
+      {exportJob && (
+        <div style={{ position: 'absolute', left: -100000, top: 0, width: 10, height: 10, overflow: 'hidden' }} aria-hidden>
+          <svg ref={exportSvgRef} xmlns="http://www.w3.org/2000/svg" width={exportJob.w * exportJob.z} height={exportJob.h * exportJob.z} viewBox={`${exportJob.x} ${exportJob.y} ${exportJob.w} ${exportJob.h}`}>
+            <rect x={exportJob.x} y={exportJob.y} width={exportJob.w} height={exportJob.h} fill="#fff" />
+            <Scene plan={plan} rooms={rooms} check={check} layers={{ ...layers, grid: false }} unit={unit} zoom={exportJob.z} photos={photos} />
+          </svg>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default PlannerPage
