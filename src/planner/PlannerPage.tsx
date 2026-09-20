@@ -33,7 +33,7 @@ import { dist, fmtArea, fmtLen, fmtNum, lerp, normDeg } from './geometry'
 import { getTelegramWebApp } from '../telegram'
 import { guessType, modelRefFromAsset, modelRefFromUrl, phAssets, phCategories, phDimsCm, phInfo, phPage, type PhAsset } from './polyhaven'
 import { decodePlan, parseHash, planShareUrl } from './share'
-import { DEFAULT_TRACE, calibrate, grayscaleOf, loadUnderlayImage, makeUnderlay, tracePlan, type TraceOptions } from './underlay'
+import { DEFAULT_TRACE, calibrate, grayscaleOf, loadUnderlayImage, makeUnderlay, nameFromFile, planFromImage, tracePlan, type LoadedImage, type TraceOptions } from './underlay'
 import { aiStatus, askLayout, lookupProductViaServer, recognizePlan, type AiStatus } from './ai'
 import { applyAiPlan, convertAiPlan } from './planai'
 import { applyLayout, catalogForRoom, layoutSummary, vetLayout } from './autolayout'
@@ -53,6 +53,7 @@ import { modelKey } from './polyhaven'
 import { Icon, type IconName } from './icons'
 import { Dropdown, MenuChoice, MenuGroup, MenuItem, MenuSep } from './Menu'
 import { StartDialog } from './StartDialog'
+import { AskDialog, type AskOption } from './AskDialog'
 import { isEditable, useFileIntake } from './intake'
 import './planner.css'
 
@@ -205,6 +206,10 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   // стартовый экран: при первом открытии и по «Новый…»; план из ссылки его не ждёт
   const [start, setStart] = useState(() => !hasSavedPlan() && !parseHash(location.hash).plan)
   const [saveState, setSaveState] = useState<'saved' | 'saving' | 'error'>('saved')
+  /** вопрос с вариантами поверх холста: заменить проект, подложить схему и т. п. */
+  const [ask, setAsk] = useState<{ title: string; text?: string; options: AskOption[]; onPick: (key: string) => void } | null>(null)
+  /** план, который только что построили из шаблона или схемы, чтобы отличать его от своей работы */
+  const untouched = useRef<Plan | null>(null)
   /** масштаб подложки известен: задан руками или прочитан ИИ с размеров плана */
   const [scaleKnown, setScaleKnown] = useState(false)
   const [hint, setHint] = useState('')
@@ -518,14 +523,41 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     }
   }
 
+  /**
+   * В текущем проекте есть своя работа: не чистый лист и не шаблон, который никто не трогал.
+   * Правки идут через операции, а те всегда создают новые массивы; служебные обновления
+   * (имена комнат, название, сетка) массивы геометрии не трогают — по ним и сравниваем.
+   */
+  const hasOwnWork = () => {
+    if (isEmptyPlan(plan)) return false
+    const u = untouched.current
+    return !u || u.walls !== plan.walls || u.openings !== plan.openings || u.furniture !== plan.furniture || u.dims !== plan.dims
+  }
+
+  /** новый проект (из шаблона или схемы) — через историю, чтобы Ctrl+Z вернул прежний */
+  const openFresh = (next: Plan) => {
+    history.apply(() => next)
+    untouched.current = next
+    setSelection(null)
+    setMenu(null)
+    setStart(false)
+    setTimeout(() => canvasRef.current?.fit(), 30)
+  }
+
   const newFromTemplate = (key: string) => {
     const t = TEMPLATES.find((x) => x.key === key)
     if (!t) return
-    if (!isEmptyPlan(plan) && !window.confirm('Заменить текущий план? Несохранённые изменения будут потеряны.')) return
-    history.replace(t.build())
-    setSelection(null)
-    setMenu(null)
-    setTimeout(() => canvasRef.current?.fit(), 30)
+    const go = () => openFresh(t.build())
+    if (!hasOwnWork()) return go()
+    setAsk({
+      title: 'Заменить текущий план?',
+      text: `Проект «${plan.name}» закроется. Ctrl+Z вернёт его, а Ctrl+S заранее сохранит в файл.`,
+      options: [{ key: 'replace', label: `Открыть «${t.name}»`, hint: 'вместо текущего плана', icon: 'template', primary: true }],
+      onPick: () => {
+        setAsk(null)
+        go()
+      },
+    })
   }
 
   // экспорт: рендерим сцену в скрытый SVG и сериализуем его
@@ -564,27 +596,58 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     void run()
   }, [exportJob]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  /** Картинка плана становится подложкой: с холста, из буфера, из файла — путь один */
-  const loadImageFile = async (f: File) => {
-    const img = await loadUnderlayImage(f)
-    const b = planBounds(plan)
-    const center = b ? { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 } : { x: 0, y: 0 }
-    history.apply((p) => setUnderlay(p, makeUnderlay(img, center)))
+  /**
+   * Куда девать картинку плана: 'new' — новый проект по схеме, 'underlay' — подложить
+   * под текущий план (обвести заново), 'ask' — решить по ситуации: на чистом листе
+   * и нетронутом шаблоне вопросов нет, в проект с правками спросим
+   */
+  type ImageMode = 'ask' | 'new' | 'underlay'
+  const imageMode = useRef<ImageMode>('ask')
+
+  const placeImage = (f: File, img: LoadedImage, mode: 'new' | 'underlay') => {
+    setAsk(null)
+    if (mode === 'new') {
+      openFresh(planFromImage(img, nameFromFile(f.name, TEMPLATES[0].build().name), plan.settings))
+    } else {
+      const b = planBounds(plan)
+      const center = b ? { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 } : { x: 0, y: 0 }
+      history.apply((p) => setUnderlay(p, makeUnderlay(img, center)))
+      setSelection(null)
+      setStart(false)
+    }
     setCalibrated(false)
     setScaleKnown(false)
     setLayers((l) => ({ ...l, underlay: true }))
     setPanel('props')
     setPanelOpen(true)
-    setSelection(null)
-    setStart(false)
     setView3d(false)
     setTimeout(() => canvasRef.current?.fit(), 50)
-    setToast(ai.enabled ? 'Схема загружена. Нажмите «Распознать с ИИ» в панели справа' : 'Схема загружена. Обведите стены по линиям или нарисуйте их поверх картинки')
+    const next = ai.enabled ? 'Нажмите «Распознать с ИИ» в панели справа' : 'Обведите стены по линиям или нарисуйте их поверх картинки'
+    setToast(mode === 'new' ? `Новый проект по схеме. ${next}` : `Схема подложена под план. ${next}`)
+  }
+
+  /** Картинка плана: с холста, из буфера, из файла — путь один */
+  const loadImageFile = async (f: File, mode: ImageMode = 'ask') => {
+    const img = await loadUnderlayImage(f)
+    if (mode !== 'ask') return placeImage(f, img, mode)
+    if (!hasOwnWork()) return placeImage(f, img, 'new')
+    const n = plan.furniture.length
+    const what = [rooms.length ? `${rooms.length} ${rooms.length === 1 ? 'комната' : rooms.length <= 4 ? 'комнаты' : 'комнат'}` : plan.walls.length ? 'стены' : '', n ? `${n} ${n === 1 ? 'предмет' : n <= 4 ? 'предмета' : 'предметов'}` : ''].filter(Boolean).join(' и ')
+    setAsk({
+      title: 'Схема получена',
+      text: `В проекте «${plan.name}» уже есть ${what || 'ваша работа'}. Начать новый проект по этой схеме или подложить её под текущий план?`,
+      options: [
+        { key: 'new', label: 'Новый проект по схеме', hint: 'текущий план закроется; Ctrl+Z вернёт его', icon: 'plus', primary: true },
+        { key: 'underlay', label: 'Подложить под текущий план', hint: 'стены и мебель останутся, картинка ляжет под них', icon: 'image' },
+      ],
+      onPick: (key) => placeImage(f, img, key === 'underlay' ? 'underlay' : 'new'),
+    })
   }
 
   const loadPlanFile = async (f: File) => {
     const p = await readPlanFile(f)
     history.replace(p)
+    untouched.current = null
     setSelection(null)
     setStart(false)
     setTimeout(() => canvasRef.current?.fit(), 30)
@@ -594,6 +657,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const loadPlanText = async (text: string) => {
     const p = normalizePlan(JSON.parse(text) as Partial<Plan>)
     history.replace(p)
+    untouched.current = null
     setSelection(null)
     setStart(false)
     setTimeout(() => canvasRef.current?.fit(), 30)
@@ -608,7 +672,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     e.target.value = ''
     if (!f) return
     try {
-      await loadImageFile(f)
+      await loadImageFile(f, imageMode.current)
     } catch (err) {
       setToast((err as Error).message)
     }
@@ -1247,9 +1311,21 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                   <span>Закрепить, не двигать мышью</span>
                   <input type="checkbox" checked={plan.underlay.locked} onChange={() => history.silent((p) => updateUnderlay(p, { locked: !p.underlay?.locked }))} />
                 </label>
-                <button className="pl-btn danger small" onClick={() => history.apply((p) => setUnderlay(p, undefined))}>
-                  <Icon name="trash" size={16} /> Убрать подложку
-                </button>
+                <div className="pl-row">
+                  <button
+                    className="pl-btn small"
+                    title="Подложить другую картинку под этот же план"
+                    onClick={() => {
+                      imageMode.current = 'underlay'
+                      imageInput.current?.click()
+                    }}
+                  >
+                    <Icon name="image" size={16} /> Заменить картинку
+                  </button>
+                  <button className="pl-btn danger small" onClick={() => history.apply((p) => setUnderlay(p, undefined))}>
+                    <Icon name="trash" size={16} /> Убрать подложку
+                  </button>
+                </div>
               </li>
             </ol>
             <details className="pl-details">
@@ -1790,6 +1866,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                   label="План картинкой…"
                   hint="скрин, фото"
                   onSelect={() => {
+                    imageMode.current = 'ask'
                     imageInput.current?.click()
                     setMenu(null)
                   }}
@@ -1997,13 +2074,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         recent={hadSavedPlan || !isEmptyPlan(plan) ? { name: plan.name, rooms: rooms.length, areaM2: totalArea } : null}
         aiEnabled={ai.enabled}
         onClose={() => setStart(false)}
-        onTemplate={(k) => {
-          newFromTemplate(k)
-          setStart(false)
-        }}
+        onTemplate={newFromTemplate}
         onPickFile={() => anyInput.current?.click()}
         onPaste={() => void intake.pasteFromClipboard()}
       />
+      {ask && <AskDialog title={ask.title} text={ask.text} options={ask.options} onPick={ask.onPick} onCancel={() => setAsk(null)} />}
       <footer className="pl-status">
         <span className="pl-status-hint">{aiBusy ? `✨ ${aiBusy}` : hint}</span>
         <span className="pl-status-stats">

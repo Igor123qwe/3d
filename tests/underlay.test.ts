@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { calibrate, detectWalls, joinCorners, mergeCollinear, toPixel, toPlan, tracePlan } from '../src/planner/underlay'
+import { calibrate, detectWalls, joinCorners, mergeCollinear, nameFromFile, planFromImage, toPixel, toPlan, tracePlan } from '../src/planner/underlay'
 import { buildRooms } from '../src/planner/rooms'
 import { emptyPlan, type Underlay } from '../src/planner/types'
 import { dist } from '../src/planner/geometry'
@@ -99,5 +99,34 @@ describe('калибровка масштаба', () => {
   it('вырожденная калибровка игнорируется', () => {
     expect(calibrate(base, { x: 0, y: 0 }, { x: 0, y: 0 }, 100)).toBe(base)
     expect(calibrate(base, { x: 0, y: 0 }, { x: 100, y: 0 }, 0)).toBe(base)
+  })
+})
+
+describe('новый проект по картинке', () => {
+  it('имя проекта берётся из имени файла, служебные имена — нет', () => {
+    expect(nameFromFile('квартира-87.png', 'Новая квартира')).toBe('квартира-87')
+    expect(nameFromFile('Plan 2k.JPEG', 'Новая квартира')).toBe('Plan 2k')
+    expect(nameFromFile('буфер.png', 'Новая квартира')).toBe('Новая квартира')
+    expect(nameFromFile('image.png', 'Новая квартира')).toBe('Новая квартира')
+    expect(nameFromFile('Снимок экрана 2026-09-20 в 12.00.png', 'Новая квартира')).toBe('Новая квартира')
+    expect(nameFromFile('Screenshot_20260920.png', 'Новая квартира')).toBe('Новая квартира')
+    expect(nameFromFile(undefined, 'Новая квартира')).toBe('Новая квартира')
+    expect(nameFromFile('x'.repeat(80) + '.png', 'Н')).toHaveLength(60)
+  })
+
+  it('чистый лист с подложкой по центру, настройки прежнего проекта сохраняются', () => {
+    const p = planFromImage({ src: 'data:,', w: 1000, h: 500 }, 'Схема', { grid: 5 })
+    expect(p.name).toBe('Схема')
+    expect(p.walls).toHaveLength(0)
+    expect(p.furniture).toHaveLength(0)
+    expect(p.settings.grid).toBe(5)
+    const u = p.underlay!
+    expect(u.px).toEqual({ w: 1000, h: 500 })
+    // ширина картинки считается 10 м, картинка лежит вокруг начала координат
+    expect(u.x + (u.px.w * u.scale) / 2).toBeCloseTo(0)
+    expect(u.y + (u.px.h * u.scale) / 2).toBeCloseTo(0)
+    expect(u.px.w * u.scale).toBeCloseTo(1000)
+    // без настроек — значения по умолчанию
+    expect(planFromImage({ src: 'data:,', w: 10, h: 10 }, 'Схема').settings.grid).toBe(10)
   })
 })

@@ -1,8 +1,8 @@
 // Подложка: картинка плана (скан БТИ, скрин из объявления) под чертежом.
 // Масштаб задаётся калибровкой по известному размеру, стены можно обвести
 // вручную или распознать автоматически.
-import type { Opening, Pt, Underlay, Wall } from './types'
-import { uid } from './types'
+import type { Opening, Plan, PlanSettings, Pt, Underlay, Wall } from './types'
+import { emptyPlan, uid } from './types'
 import { dist } from './geometry'
 
 /** максимальная сторона сохраняемой картинки, px: больше нет смысла, а память экономит */
@@ -534,4 +534,23 @@ export async function grayscaleOf(u: Underlay): Promise<Uint8Array> {
     gray[j] = (data[i] * 299 + data[i + 1] * 587 + data[i + 2] * 114) / 1000
   }
   return gray
+}
+
+/** Служебные имена файлов, из которых имя проекта не сделать: «буфер.png», «image.png», «Снимок экрана…» */
+const GENERIC_FILE_NAME = /^(буфер|image|img|clipboard|blob|paste|pasted|screenshot|снимок|скриншот|untitled|unnamed)/i
+
+/** Имя проекта из имени файла: «квартира-87.png» → «квартира-87»; служебные имена заменяет запасным */
+export function nameFromFile(fileName: string | undefined, fallback: string): string {
+  const stem = (fileName || '').replace(/\.[a-z0-9]{1,5}$/i, '').trim()
+  if (!stem || GENERIC_FILE_NAME.test(stem)) return fallback
+  return stem.slice(0, 60)
+}
+
+/**
+ * Новый проект по картинке: чистый лист, схема подложкой по центру.
+ * Настройки (сетка) переезжают из прежнего проекта — это выбор пользователя, а не часть плана.
+ */
+export function planFromImage(img: LoadedImage, name: string, settings?: PlanSettings): Plan {
+  const p = emptyPlan(name)
+  return { ...p, settings: { ...p.settings, ...settings }, underlay: makeUnderlay(img, { x: 0, y: 0 }) }
 }

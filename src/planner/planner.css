@@ -1375,3 +1375,86 @@
     font-size: 11px;
   }
 }
+
+/* ---------- вопрос с вариантами ---------- */
+.pl-ask-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  background: rgba(17, 24, 39, 0.45);
+  backdrop-filter: blur(3px);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+.pl-ask {
+  width: min(520px, 100%);
+  background: var(--pl-surface);
+  border-radius: 20px;
+  box-shadow: var(--pl-shadow-lg);
+  padding: 22px 24px 18px;
+  animation: pl-pop 0.16s ease-out;
+}
+.pl-ask h2 {
+  margin: 0 0 6px;
+  font-size: 19px;
+  letter-spacing: -0.01em;
+}
+.pl-ask > p {
+  margin: 0 0 16px;
+  color: var(--pl-ink-2);
+  font-size: 14px;
+  line-height: 1.45;
+}
+.pl-ask-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pl-ask-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+  padding: 12px 14px;
+  border: 1px solid var(--pl-line);
+  border-radius: var(--pl-radius-lg);
+  background: var(--pl-surface);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.pl-ask-option:hover,
+.pl-ask-option:focus-visible {
+  border-color: var(--pl-accent);
+  background: var(--pl-accent-soft);
+  outline: none;
+}
+.pl-ask-option.primary {
+  border-color: var(--pl-accent);
+}
+.pl-ask-option .pl-icon {
+  flex: none;
+  color: var(--pl-accent);
+}
+.pl-ask-option span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.pl-ask-option b {
+  font-size: 14px;
+  font-weight: 600;
+}
+.pl-ask-option small {
+  font-size: 12.5px;
+  color: var(--pl-muted);
+  line-height: 1.35;
+}
+.pl-ask-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
