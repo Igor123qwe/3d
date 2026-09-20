@@ -34,6 +34,8 @@ export const DEFAULT_RECONSTRUCT: Required<ReconstructOptions> = { interiorCm: 1
 
 /** размеры двух комнат, делящих ось, различаются больше — значит, осей две (уступ стены) */
 const JOG_CM = 15
+/** вес размерной цепочки против подписи комнаты: цепочки на плане меряют то по осям, то по граням стен, подпись комнаты честнее */
+const CHAIN_WEIGHT = 0.5
 
 /** комната, которую удалось поставить на чертёж */
 export interface PlacedRoom {
@@ -484,11 +486,11 @@ export function reconstructFromRooms(rooms: AiRoom[], u: Underlay, options: Reco
       if (dx >= dy * 4) {
         const i = nearestAxis(X, Math.min(d.a.x, d.b.x), tol)
         const j = nearestAxis(X, Math.max(d.a.x, d.b.x), tol)
-        if (i >= 0 && j >= 0 && i !== j) extrasX.push({ i, j, d: d.cm, w: 1 })
+        if (i >= 0 && j >= 0 && i !== j) extrasX.push({ i, j, d: d.cm, w: CHAIN_WEIGHT })
       } else if (dy >= dx * 4) {
         const i = nearestAxis(Y, Math.min(d.a.y, d.b.y), tol)
         const j = nearestAxis(Y, Math.max(d.a.y, d.b.y), tol)
-        if (i >= 0 && j >= 0 && i !== j) extrasY.push({ i, j, d: d.cm, w: 1 })
+        if (i >= 0 && j >= 0 && i !== j) extrasY.push({ i, j, d: d.cm, w: CHAIN_WEIGHT })
       }
     }
   }
