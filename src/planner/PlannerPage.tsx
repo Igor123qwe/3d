@@ -50,6 +50,10 @@ import {
 import type { ElectricKind, ProductRef } from './types'
 import { fetchProduct, formatPrice, typeForProduct, type ProductInfo } from './products'
 import { modelKey } from './polyhaven'
+import { Icon, type IconName } from './icons'
+import { Dropdown, MenuChoice, MenuGroup, MenuItem, MenuSep } from './Menu'
+import { StartDialog } from './StartDialog'
+import { isEditable, useFileIntake } from './intake'
 import './planner.css'
 
 const View3D = lazy(() => import('./View3D'))
@@ -100,7 +104,8 @@ const loadInitialPlan = (): Plan => {
   } catch {
     /* ignore */
   }
-  return TEMPLATES[1].build()
+  // без сохранённого плана показываем стартовый экран, а под ним — чистый лист
+  return TEMPLATES[0].build()
 }
 
 type PanelTab = 'props' | 'catalog' | 'electric' | 'checks' | 'help'
@@ -123,15 +128,15 @@ const ELECTRIC_MENU: { kind: ElectricKind; why: string; group: string }[] = [
   { kind: 'panel', why: 'автоматы и модули умного дома', group: 'Щит' },
 ]
 
-const TOOLS: { tool: Tool; icon: string; name: string; key: string }[] = [
-  { tool: 'select', icon: '⬚', name: 'Выбор', key: 'V' },
-  { tool: 'wall', icon: '╱', name: 'Стена', key: 'W' },
-  { tool: 'room', icon: '▭', name: 'Комната', key: 'C' },
-  { tool: 'door', icon: '⌐', name: 'Дверь', key: 'D' },
-  { tool: 'window', icon: '☰', name: 'Окно', key: 'N' },
-  { tool: 'doorway', icon: '⌶', name: 'Проём', key: '' },
-  { tool: 'dimension', icon: '↔', name: 'Размер', key: 'M' },
-  { tool: 'measure', icon: '📏', name: 'Рулетка', key: 'L' },
+const TOOLS: { tool: Tool; icon: IconName; name: string; key: string }[] = [
+  { tool: 'select', icon: 'select', name: 'Выбор', key: 'V' },
+  { tool: 'wall', icon: 'wall', name: 'Стена', key: 'W' },
+  { tool: 'room', icon: 'room', name: 'Комната', key: 'C' },
+  { tool: 'door', icon: 'door', name: 'Дверь', key: 'D' },
+  { tool: 'window', icon: 'window', name: 'Окно', key: 'N' },
+  { tool: 'doorway', icon: 'doorway', name: 'Проём', key: '' },
+  { tool: 'dimension', icon: 'dimension', name: 'Размер', key: 'M' },
+  { tool: 'measure', icon: 'ruler', name: 'Рулетка', key: 'L' },
 ]
 
 const COLORS = ['', '#e6edf7', '#f5e9d8', '#e6f3e8', '#e0f1f7', '#fdf1dc', '#fbe7ee', '#ececec', '#d9c9b4', '#c7d2fe', '#bbf7d0', '#fecaca', '#fde68a', '#ffffff', '#4b5563']
@@ -196,7 +201,12 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const [view, setView] = useState<View>({ x: 40, y: 40, zoom: 0.7 })
   const [panel, setPanel] = useState<PanelTab>('props')
   const [panelOpen, setPanelOpen] = useState(true)
-  const [menu, setMenu] = useState<null | 'file' | 'layers'>(null)
+  const [menu, setMenu] = useState<null | 'project' | 'view'>(null)
+  // стартовый экран: при первом открытии и по «Новый…»; план из ссылки его не ждёт
+  const [start, setStart] = useState(() => !hasSavedPlan() && !parseHash(location.hash).plan)
+  const [saveState, setSaveState] = useState<'saved' | 'saving' | 'error'>('saved')
+  /** масштаб подложки известен: задан руками или прочитан ИИ с размеров плана */
+  const [scaleKnown, setScaleKnown] = useState(false)
   const [hint, setHint] = useState('')
   const [catQuery, setCatQuery] = useState('')
   const [catCategory, setCatCategory] = useState<CategoryKey | 'all'>('all')
@@ -235,6 +245,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const topViewFailed = useRef(new Set<string>())
   const canvasRef = useRef<CanvasHandle>(null)
   const fileInput = useRef<HTMLInputElement>(null)
+  const anyInput = useRef<HTMLInputElement>(null)
   const hadSavedPlan = useRef(hasSavedPlan()).current
 
   const roomsResult = useMemo(() => buildRooms(plan), [plan.walls, plan.rooms]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -253,15 +264,18 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   // автосохранение
   const saveFailed = useRef(false)
   useEffect(() => {
+    setSaveState('saving')
     const t = setTimeout(() => {
       try {
         localStorage.setItem(LS_PLAN, JSON.stringify(plan))
         saveFailed.current = false
+        setSaveState('saved')
       } catch {
         // чаще всего это переполнение хранилища из-за картинки-подложки
+        setSaveState('error')
         if (!saveFailed.current) {
           saveFailed.current = true
-          setToast('План не помещается в память браузера. Сохраните его в файл через «Файл» и уберите подложку')
+          setToast('План не помещается в память браузера. Сохраните его в файл через «Проект» и уберите подложку')
         }
       }
     }, 400)
@@ -550,25 +564,79 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     void run()
   }, [exportJob]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  /** Картинка плана становится подложкой: с холста, из буфера, из файла — путь один */
+  const loadImageFile = async (f: File) => {
+    const img = await loadUnderlayImage(f)
+    const b = planBounds(plan)
+    const center = b ? { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 } : { x: 0, y: 0 }
+    history.apply((p) => setUnderlay(p, makeUnderlay(img, center)))
+    setCalibrated(false)
+    setScaleKnown(false)
+    setLayers((l) => ({ ...l, underlay: true }))
+    setPanel('props')
+    setPanelOpen(true)
+    setSelection(null)
+    setStart(false)
+    setView3d(false)
+    setTimeout(() => canvasRef.current?.fit(), 50)
+    setToast(ai.enabled ? 'Схема загружена. Нажмите «Распознать с ИИ» в панели справа' : 'Схема загружена. Обведите стены по линиям или нарисуйте их поверх картинки')
+  }
+
+  const loadPlanFile = async (f: File) => {
+    const p = await readPlanFile(f)
+    history.replace(p)
+    setSelection(null)
+    setStart(false)
+    setTimeout(() => canvasRef.current?.fit(), 30)
+    setToast(`Открыт план «${p.name}»`)
+  }
+
+  const loadPlanText = async (text: string) => {
+    const p = normalizePlan(JSON.parse(text) as Partial<Plan>)
+    history.replace(p)
+    setSelection(null)
+    setStart(false)
+    setTimeout(() => canvasRef.current?.fit(), 30)
+    setToast(`Вставлен план «${p.name}»`)
+  }
+
+  // перетаскивание на окно, Ctrl+V и кнопка «Вставить из буфера» — всё сюда
+  const intake = useFileIntake({ onImage: loadImageFile, onPlanFile: loadPlanFile, onPlanText: loadPlanText, onError: setToast })
+
   const onOpenImage = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]
     e.target.value = ''
     if (!f) return
     try {
-      const img = await loadUnderlayImage(f)
-      const b = planBounds(plan)
-      const center = b ? { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 } : { x: 0, y: 0 }
-      history.apply((p) => setUnderlay(p, makeUnderlay(img, center)))
-      setCalibrated(false)
-      setLayers((l) => ({ ...l, underlay: true }))
-      setPanel('props')
-      setSelection(null)
-      setTimeout(() => canvasRef.current?.fit(), 50)
-      setToast('Схема загружена. Задайте масштаб кнопкой «Калибровать», потом обведите или распознайте стены')
+      await loadImageFile(f)
     } catch (err) {
       setToast((err as Error).message)
     }
   }
+
+  /** общий выбор файла: картинка или JSON — разберёт приёмник */
+  const onOpenAny = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files ? Array.from(e.target.files) : []
+    e.target.value = ''
+    void intake.takeFiles(files)
+  }
+
+  // Ctrl+S сохраняет файл плана, Ctrl+O открывает; Ctrl+V обрабатывает приёмник
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (isEditable(e.target) || !(e.ctrlKey || e.metaKey)) return
+      if (e.code === 'KeyS') {
+        e.preventDefault()
+        downloadJson(plan)
+        setToast('План сохранён в файл')
+      } else if (e.code === 'KeyO') {
+        e.preventDefault()
+        fileInput.current?.click()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [plan])
 
   const onCalibrate = (a: Pt, b: Pt) => {
     const u = plan.underlay
@@ -582,6 +650,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     }
     history.apply((p) => (p.underlay ? { ...p, underlay: calibrate(p.underlay, a, b, cm) } : p))
     setCalibrated(true)
+    setScaleKnown(true)
     setTool('select')
     setToast(`Масштаб задан: ${(cm / 100).toFixed(2)} м на показанном отрезке`)
   }
@@ -657,6 +726,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         lost = done.furnitureDropped
         return done.plan
       })
+      if (result.report.scale.source !== 'прежняя калибровка') setScaleKnown(true)
       setSelection(null)
       noteCost('план', cost)
       setTimeout(() => canvasRef.current?.fit(), 50)
@@ -744,10 +814,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     e.target.value = ''
     if (!f) return
     try {
-      const p = await readPlanFile(f)
-      history.replace(p)
-      setSelection(null)
-      setTimeout(() => canvasRef.current?.fit(), 30)
+      await loadPlanFile(f)
     } catch (err) {
       setToast((err as Error).message)
     }
@@ -1129,50 +1196,64 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           </div>
         )}
         {plan.underlay && (
-          <div className="pl-block">
-            <div className="pl-props-title">Схема-подложка</div>
-            <div className="pl-note">
-              Масштаб: {plan.underlay.scale.toFixed(2)} см в пикселе. Ширина картинки на плане —{' '}
-              {fmtLen(plan.underlay.px.w * plan.underlay.scale, 'm')}.
-            </div>
-            <div className="pl-row">
-              <button className={`pl-btn ${tool === 'calibrate' ? 'active' : ''}`} onClick={() => setTool('calibrate')}>
-                📏 Калибровать
-              </button>
-              <button className="pl-btn" onClick={detectWallsFromImage} disabled={tracing}>
-                {tracing ? 'Распознаю…' : 'Обвести линии'}
-              </button>
-            </div>
-            {ai.enabled && (
-              <>
-                <div className="pl-row">
-                  <button className="pl-btn active" onClick={() => void recognizeWithAi()} disabled={!!aiBusy}>
-                    {aiBusy === 'Читаю план…' ? 'Читаю план…' : '✨ Распознать с ИИ'}
-                  </button>
-                </div>
-                <div className="pl-note">
-                  ИИ читает и подписи: названия комнат, площади и размерные цепочки. По ним масштаб ставится сам —
-                  калибровать вручную не нужно.
-                </div>
-              </>
-            )}
-            <label className="pl-field pl-field-col">
-              <span>Прозрачность</span>
-              <input
-                type="range"
-                min={5}
-                max={100}
-                step={5}
-                value={Math.round(plan.underlay.opacity * 100)}
-                onChange={(e) => history.silent((p) => updateUnderlay(p, { opacity: Number(e.target.value) / 100 }))}
-              />
-            </label>
-            <label className="pl-field">
-              <span>Закрепить (не двигать мышью)</span>
-              <input type="checkbox" checked={plan.underlay.locked} onChange={() => history.silent((p) => updateUnderlay(p, { locked: !p.underlay?.locked }))} />
-            </label>
-            <div className="pl-block">
-              <div className="pl-note">Настройки распознавания</div>
+          <div className="pl-block pl-stepper">
+            <div className="pl-props-title">Схема загружена</div>
+            <ol className="pl-step-list">
+              <li className={plan.walls.length ? 'done' : 'now'}>
+                <b>Получить стены</b>
+                {ai.enabled ? (
+                  <>
+                    <button className="pl-btn primary" onClick={() => void recognizeWithAi()} disabled={!!aiBusy}>
+                      <Icon name="sparkles" size={18} /> {aiBusy === 'Читаю план…' ? 'Читаю план…' : 'Распознать с ИИ'}
+                    </button>
+                    <span className="pl-note">Читает стены, двери, окна, названия комнат и размеры. Масштаб встанет по размерам с плана.</span>
+                    <button className="pl-btn ghost small" onClick={detectWallsFromImage} disabled={tracing}>
+                      {tracing ? 'Обвожу…' : 'Или обвести линии без ИИ'}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button className="pl-btn primary" onClick={detectWallsFromImage} disabled={tracing}>
+                      <Icon name="wall" size={18} /> {tracing ? 'Обвожу…' : 'Обвести стены по линиям'}
+                    </button>
+                    <span className="pl-note">Или нарисуйте стены поверх картинки инструментами слева: «Комната», «Стена».</span>
+                  </>
+                )}
+              </li>
+              <li className={scaleKnown ? 'done' : plan.walls.length ? 'now' : ''}>
+                <b>Проверить масштаб</b>
+                <span className="pl-note">
+                  Сейчас {plan.underlay.scale.toFixed(2)} см в пикселе: ширина картинки {fmtLen(plan.underlay.px.w * plan.underlay.scale, 'm')}.
+                  {scaleKnown ? ' Масштаб задан.' : ' Если размеры не сходятся — покажите один известный отрезок.'}
+                </span>
+                <button className={`pl-btn ${tool === 'calibrate' ? 'active' : ''}`} onClick={() => setTool('calibrate')}>
+                  <Icon name="calibrate" size={18} /> Задать по отрезку
+                </button>
+              </li>
+              <li>
+                <b>Подложка</b>
+                <label className="pl-field pl-field-col">
+                  <span>Прозрачность</span>
+                  <input
+                    type="range"
+                    min={5}
+                    max={100}
+                    step={5}
+                    value={Math.round(plan.underlay.opacity * 100)}
+                    onChange={(e) => history.silent((p) => updateUnderlay(p, { opacity: Number(e.target.value) / 100 }))}
+                  />
+                </label>
+                <label className="pl-field">
+                  <span>Закрепить, не двигать мышью</span>
+                  <input type="checkbox" checked={plan.underlay.locked} onChange={() => history.silent((p) => updateUnderlay(p, { locked: !p.underlay?.locked }))} />
+                </label>
+                <button className="pl-btn danger small" onClick={() => history.apply((p) => setUnderlay(p, undefined))}>
+                  <Icon name="trash" size={16} /> Убрать подложку
+                </button>
+              </li>
+            </ol>
+            <details className="pl-details">
+              <summary>Настройки обводки линий</summary>
               <label className="pl-field pl-field-col">
                 <span>Чувствительность: {trace.sensitivity}</span>
                 <input type="range" min={10} max={95} step={5} value={trace.sensitivity} onChange={(e) => setTrace((t) => ({ ...t, sensitivity: Number(e.target.value) }))} />
@@ -1185,10 +1266,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                 <span>Макс. толщина стены, см</span>
                 <NumberField value={trace.maxThicknessCm} min={10} max={150} step={5} onCommit={(v) => setTrace((t) => ({ ...t, maxThicknessCm: v }))} />
               </label>
-            </div>
-            <button className="pl-btn danger" onClick={() => history.apply((p) => setUnderlay(p, undefined))}>
-              🗑 Убрать подложку
-            </button>
+            </details>
           </div>
         )}
         <div className="pl-props-title">План «{plan.name}»</div>
@@ -1595,139 +1673,223 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     <div className={`pl-root ${view3d ? 'is3d' : ''}`}>
       <header className="pl-header">
         {onBack && (
-          <button className="pl-btn" onClick={onBack}>
-            ← Назад
+          <button className="pl-ibtn ghost" onClick={onBack} title="Назад" aria-label="Назад">
+            <Icon name="arrowLeft" />
           </button>
         )}
-        <input className="pl-name" value={plan.name} onChange={(e) => history.silent((p) => ({ ...p, name: e.target.value }))} aria-label="Название плана" />
+        <div className="pl-brand">
+          <input className="pl-name" value={plan.name} onChange={(e) => history.silent((p) => ({ ...p, name: e.target.value }))} aria-label="Название плана" title="Название плана — можно переименовать" />
+          <span className={`pl-saved ${saveState}`} title="План сохраняется в этом браузере сам">
+            {saveState === 'saving' ? 'Сохраняю…' : saveState === 'error' ? 'Не сохранилось' : 'Сохранено'}
+          </span>
+        </div>
+        <div className="pl-view-switch" role="tablist" aria-label="Вид">
+          <button role="tab" aria-selected={!view3d} className={!view3d ? 'active' : ''} onClick={() => setView3d(false)} title="Чертёж">
+            <Icon name="grid" size={16} /> 2D
+          </button>
+          <button role="tab" aria-selected={view3d} className={view3d ? 'active' : ''} onClick={() => setView3d(true)} title="Объёмный вид и AR через камеру телефона">
+            <Icon name="cube" size={16} /> 3D
+          </button>
+        </div>
         <div className="pl-header-actions">
-          <button className="pl-ibtn" disabled={!history.canUndo} onClick={history.undo} title="Отменить (Ctrl+Z)">↶</button>
-          <button className="pl-ibtn" disabled={!history.canRedo} onClick={history.redo} title="Вернуть (Ctrl+Y)">↷</button>
+          <button className="pl-ibtn ghost" disabled={!history.canUndo} onClick={history.undo} title="Отменить (Ctrl+Z)" aria-label="Отменить">
+            <Icon name="undo" />
+          </button>
+          <button className="pl-ibtn ghost" disabled={!history.canRedo} onClick={history.redo} title="Вернуть (Ctrl+Y)" aria-label="Вернуть">
+            <Icon name="redo" />
+          </button>
           <span className="pl-zoom">
             <span className="pl-sep" />
-            <button className="pl-ibtn" onClick={() => canvasRef.current?.zoomBy(1 / 1.25)} title="Отдалить">−</button>
-            <button className="pl-ibtn wide" onClick={() => canvasRef.current?.fit()} title="Показать весь план">⤢ {Math.round(view.zoom * 100)}%</button>
-            <button className="pl-ibtn" onClick={() => canvasRef.current?.zoomBy(1.25)} title="Приблизить">+</button>
+            <button className="pl-ibtn ghost" onClick={() => canvasRef.current?.zoomBy(1 / 1.25)} title="Отдалить" aria-label="Отдалить">
+              <Icon name="zoomOut" />
+            </button>
+            <button className="pl-ibtn ghost wide" onClick={() => canvasRef.current?.fit()} title="Показать весь план">
+              {Math.round(view.zoom * 100)}%
+            </button>
+            <button className="pl-ibtn ghost" onClick={() => canvasRef.current?.zoomBy(1.25)} title="Приблизить" aria-label="Приблизить">
+              <Icon name="zoomIn" />
+            </button>
           </span>
           <span className="pl-sep" />
-          <button className={`pl-btn ${view3d ? 'active' : ''}`} onClick={() => setView3d((v) => !v)} title="3D-вид и AR через камеру">
-            <span className="pl-btn-text">3D / AR</span>
-            <span className="pl-btn-icon">3D</span>
-          </button>
           <button
-            className={`pl-btn ${panel === 'checks' ? 'active' : ''}`}
+            className={`pl-btn ghost ${panel === 'checks' ? 'active' : ''}`}
             onClick={() => {
               setPanel('checks')
               setPanelOpen(true)
             }}
+            title="Проверка планировки: проходы, двери, эргономика"
           >
+            <Icon name="check" size={18} />
             <span className="pl-btn-text">Проверка</span>
-            <span className="pl-btn-icon">✓</span>
             {problems > 0 && <span className="pl-badge">{problems}</span>}
           </button>
-          <button className={`pl-btn ${menu === 'layers' ? 'active' : ''}`} onClick={() => setMenu((m) => (m === 'layers' ? null : 'layers'))} title="Слои">
-            <span className="pl-btn-text">Слои</span>
-            <span className="pl-btn-icon">◫</span>
-          </button>
-          <button className={`pl-btn ${menu === 'file' ? 'active' : ''}`} onClick={() => setMenu((m) => (m === 'file' ? null : 'file'))} title="Файл">
-            <span className="pl-btn-text">Файл</span>
-            <span className="pl-btn-icon">☰</span>
-          </button>
+          <span className="pl-menu-anchor">
+            <button className={`pl-btn ghost ${menu === 'view' ? 'active' : ''}`} onClick={() => setMenu((m) => (m === 'view' ? null : 'view'))} title="Слои, единицы, сетка" aria-haspopup="menu" aria-expanded={menu === 'view'}>
+              <Icon name="layers" size={18} />
+              <span className="pl-btn-text">Вид</span>
+            </button>
+            {menu === 'view' && (
+              <Dropdown width={280}>
+                <MenuGroup title="Слои" />
+                {(
+                  [
+                    ['grid', 'Сетка'],
+                    ['underlay', 'Схема-подложка'],
+                    ['rooms', 'Полы и названия комнат'],
+                    ['furniture', 'Мебель'],
+                    ['electric', 'Электрика'],
+                    ['labels', 'Подписи мебели'],
+                    ['dims', 'Размеры'],
+                    ['ergo', 'Зоны эргономики'],
+                  ] as [keyof Layers, string][]
+                ).map(([k, name]) => (
+                  <MenuItem key={k} checked={layers[k]} label={name} onSelect={() => toggleLayer(k)} />
+                ))}
+                <MenuItem checked={photoMode} label="Фото-вид моделей на плане" onSelect={() => setPhotoMode((v) => !v)} />
+                <MenuSep />
+                <MenuGroup title="Единицы на плане" />
+                <MenuChoice
+                  options={[
+                    { value: 'cm' as LengthUnit, label: 'см' },
+                    { value: 'mm' as LengthUnit, label: 'мм' },
+                    { value: 'm' as LengthUnit, label: 'м' },
+                  ]}
+                  value={unit}
+                  onChange={setUnit}
+                />
+                <MenuGroup title="Шаг сетки" />
+                <MenuChoice
+                  options={[5, 10, 25, 50].map((g) => ({ value: g, label: `${g} см` }))}
+                  value={plan.settings.grid}
+                  onChange={(g) => history.silent((p) => ({ ...p, settings: { ...p.settings, grid: g } }))}
+                />
+              </Dropdown>
+            )}
+          </span>
+          <span className="pl-menu-anchor">
+            <button className={`pl-btn ${menu === 'project' ? 'active' : ''}`} onClick={() => setMenu((m) => (m === 'project' ? null : 'project'))} title="Проект: новый, открыть, сохранить, экспорт" aria-haspopup="menu" aria-expanded={menu === 'project'}>
+              <Icon name="file" size={18} />
+              <span className="pl-btn-text">Проект</span>
+              <Icon name="chevronDown" size={14} className="pl-caret" />
+            </button>
+            {menu === 'project' && (
+              <Dropdown width={310}>
+                <MenuItem
+                  icon="plus"
+                  label="Новый…"
+                  hint="шаблон или чистый лист"
+                  onSelect={() => {
+                    setMenu(null)
+                    setStart(true)
+                  }}
+                />
+                <MenuSep />
+                <MenuGroup title="Загрузить" />
+                <MenuItem
+                  icon="image"
+                  label="План картинкой…"
+                  hint="скрин, фото"
+                  onSelect={() => {
+                    imageInput.current?.click()
+                    setMenu(null)
+                  }}
+                />
+                <MenuItem
+                  icon="clipboard"
+                  label="Вставить из буфера"
+                  hint="Ctrl+V"
+                  onSelect={() => {
+                    setMenu(null)
+                    void intake.pasteFromClipboard()
+                  }}
+                />
+                <MenuItem
+                  icon="file"
+                  label="Открыть файл плана…"
+                  hint="Ctrl+O"
+                  onSelect={() => {
+                    fileInput.current?.click()
+                    setMenu(null)
+                  }}
+                />
+                <MenuSep />
+                <MenuGroup title="Сохранить и поделиться" />
+                <MenuItem
+                  icon="save"
+                  label="Сохранить план в файл"
+                  hint="Ctrl+S"
+                  onSelect={() => {
+                    downloadJson(plan)
+                    setMenu(null)
+                    setToast('План сохранён в файл')
+                  }}
+                />
+                <MenuItem icon="download" label="Экспорт картинки (PNG)" onSelect={() => doExport('png')} />
+                <MenuItem icon="download" label="Экспорт вектора (SVG)" onSelect={() => doExport('svg')} />
+                <MenuItem
+                  icon="phone"
+                  label="Ссылка для телефона"
+                  hint="3D и AR"
+                  onSelect={() => {
+                    setMenu(null)
+                    void shareForPhone()
+                  }}
+                />
+              </Dropdown>
+            )}
+          </span>
           <button
-            className={`pl-ibtn ${panel === 'help' ? 'active' : ''}`}
+            className={`pl-ibtn ghost ${panel === 'help' ? 'active' : ''}`}
             onClick={() => {
               setPanel('help')
               setPanelOpen(true)
             }}
-            title="Справка и правила"
+            title="Справка и правила дизайнеров"
+            aria-label="Справка"
           >
-            ?
+            <Icon name="help" />
           </button>
         </div>
         {menu && <div className="pl-backdrop" onClick={() => setMenu(null)} />}
-        {menu === 'file' && (
-          <div className="pl-menu">
-            <div className="pl-menu-title">Новый план</div>
-            {TEMPLATES.map((t) => (
-              <button key={t.key} className="pl-menu-item" onClick={() => newFromTemplate(t.key)} title={t.desc}>
-                {t.name}
-              </button>
-            ))}
-            <div className="pl-menu-title">Файлы</div>
-            <button className="pl-menu-item" onClick={() => { downloadJson(plan); setMenu(null) }}>Сохранить план (JSON)</button>
-            <button className="pl-menu-item" onClick={() => { fileInput.current?.click(); setMenu(null) }}>Открыть план (JSON)…</button>
-            <button className="pl-menu-item" onClick={() => { imageInput.current?.click(); setMenu(null) }}>Загрузить схему картинкой…</button>
-            <button className="pl-menu-item" onClick={() => doExport('png')}>Экспорт картинки (PNG)</button>
-            <button className="pl-menu-item" onClick={() => doExport('svg')}>Экспорт вектора (SVG)</button>
-            <div className="pl-menu-title">Единицы на плане</div>
-            <div className="pl-row">
-              {(['cm', 'mm', 'm'] as LengthUnit[]).map((u) => (
-                <button key={u} className={`pl-chip ${unit === u ? 'active' : ''}`} onClick={() => setUnit(u)}>
-                  {u === 'cm' ? 'см' : u === 'mm' ? 'мм' : 'м'}
-                </button>
-              ))}
-            </div>
-            <div className="pl-menu-title">Шаг сетки</div>
-            <div className="pl-row">
-              {[5, 10, 25, 50].map((g) => (
-                <button key={g} className={`pl-chip ${plan.settings.grid === g ? 'active' : ''}`} onClick={() => history.silent((p) => ({ ...p, settings: { ...p.settings, grid: g } }))}>
-                  {g} см
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-        {menu === 'layers' && (
-          <div className="pl-menu">
-            {(
-              [
-                ['grid', 'Сетка'],
-                ['underlay', 'Схема-подложка'],
-                ['rooms', 'Полы и названия комнат'],
-                ['furniture', 'Мебель'],
-                ['electric', 'Электрика'],
-                ['labels', 'Подписи мебели'],
-                ['dims', 'Размеры'],
-                ['ergo', 'Зоны эргономики'],
-              ] as [keyof Layers, string][]
-            ).map(([k, name]) => (
-              <label key={k} className="pl-menu-item">
-                <input type="checkbox" checked={layers[k]} onChange={() => toggleLayer(k)} /> {name}
-              </label>
-            ))}
-            <label className="pl-menu-item">
-              <input type="checkbox" checked={photoMode} onChange={() => setPhotoMode((v) => !v)} /> Фото-вид моделей на плане
-            </label>
-          </div>
-        )}
         <input ref={fileInput} type="file" accept=".json,application/json" style={{ display: 'none' }} onChange={onOpenFile} />
         <input ref={imageInput} type="file" accept="image/*" style={{ display: 'none' }} onChange={onOpenImage} />
+        <input ref={anyInput} type="file" accept="image/*,.json,application/json" style={{ display: 'none' }} onChange={onOpenAny} />
       </header>
 
       <nav className={`pl-tools ${view3d ? 'hidden' : ''}`}>
         {TOOLS.map((t) => (
           <button key={t.tool} className={`pl-tool ${tool === t.tool ? 'active' : ''}`} onClick={() => setTool(t.tool)} title={t.key ? `${t.name} (${t.key})` : t.name}>
-            <span className="pl-tool-icon">{t.icon}</span>
+            <span className="pl-tool-icon">
+              <Icon name={t.icon} size={22} />
+            </span>
             <span className="pl-tool-name">{t.name}</span>
           </button>
         ))}
         {plan.underlay && (
           <button className={`pl-tool ${tool === 'calibrate' ? 'active' : ''}`} onClick={() => setTool('calibrate')} title="Задать масштаб подложки по известному размеру">
-            <span className="pl-tool-icon">📐</span>
+            <span className="pl-tool-icon">
+              <Icon name="calibrate" size={22} />
+            </span>
             <span className="pl-tool-name">Масштаб</span>
           </button>
         )}
         <button className={`pl-tool ${tool === 'place' || panel === 'catalog' ? 'active' : ''}`} onClick={openCatalog} title="Каталог мебели">
-          <span className="pl-tool-icon">🛋</span>
+          <span className="pl-tool-icon">
+            <Icon name="furniture" size={22} />
+          </span>
           <span className="pl-tool-name">Мебель</span>
         </button>
         <span className="pl-tools-gap" />
         <button className={`pl-tool small ${ortho ? 'active' : ''}`} onClick={() => setOrtho((o) => !o)} title="Рисовать стены только под 0/45/90°">
-          <span className="pl-tool-icon">∟</span>
+          <span className="pl-tool-icon">
+            <Icon name="ortho" size={20} />
+          </span>
           <span className="pl-tool-name">Орто</span>
         </button>
         <button className={`pl-tool small ${layers.ergo ? 'active' : ''}`} onClick={() => toggleLayer('ergo')} title="Показать зоны эргономики">
-          <span className="pl-tool-icon">◌</span>
+          <span className="pl-tool-icon">
+            <Icon name="zones" size={20} />
+          </span>
           <span className="pl-tool-name">Зоны</span>
         </button>
       </nav>
@@ -1765,13 +1927,12 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         <div className="pl-panel-tabs">
           {(
             [
-              ['props', 'Свойства'],
-              ['catalog', 'Каталог'],
-              ['electric', '⚡'],
-              ['checks', problems ? `Проверка · ${problems}` : 'Проверка'],
-              ['help', '?'],
-            ] as [PanelTab, string][]
-          ).map(([k, name]) => (
+              ['props', 'Свойства', 'list'],
+              ['catalog', 'Каталог', 'furniture'],
+              ['electric', 'Электрика', 'bolt'],
+              ['checks', 'Проверка', 'check'],
+            ] as [PanelTab, string, IconName][]
+          ).map(([k, name, icon]) => (
             <button
               key={k}
               className={`pl-tab ${panel === k ? 'active' : ''}`}
@@ -1779,8 +1940,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                 setPanel(k)
                 setPanelOpen(true)
               }}
+              title={name}
             >
-              {name}
+              <Icon name={icon} size={18} />
+              <span className="pl-tab-name">{name}</span>
+              {k === 'checks' && problems > 0 && <span className="pl-badge">{problems}</span>}
             </button>
           ))}
           <button className="pl-tab pl-tab-toggle" onClick={() => setPanelOpen((o) => !o)} aria-label="Свернуть панель">
@@ -1798,6 +1962,48 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         )}
       </aside>
 
+      {!view3d && !start && isEmptyPlan(plan) && !plan.underlay && (
+        <div className="pl-empty">
+          <div className="pl-empty-card">
+            <h2>Чистый лист</h2>
+            <p>Перетащите сюда картинку плана, вставьте скриншот по Ctrl+V или нарисуйте первую комнату.</p>
+            <div className="pl-empty-actions">
+              <button className="pl-btn primary" onClick={() => anyInput.current?.click()}>
+                <Icon name="upload" size={18} /> Загрузить план
+              </button>
+              <button className="pl-btn" onClick={() => setStart(true)}>
+                <Icon name="template" size={18} /> Шаблон
+              </button>
+              <button className="pl-btn" onClick={() => setTool('room')}>
+                <Icon name="room" size={18} /> Нарисовать комнату
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {intake.dragging && (
+        <div className="pl-drop">
+          <div className="pl-drop-box">
+            <Icon name="upload" size={44} stroke={1.4} />
+            <b>Отпустите, чтобы загрузить</b>
+            <span>Картинка станет подложкой для обводки, файл плана откроется</span>
+          </div>
+        </div>
+      )}
+      <StartDialog
+        open={start}
+        canClose
+        templates={TEMPLATES}
+        recent={hadSavedPlan || !isEmptyPlan(plan) ? { name: plan.name, rooms: rooms.length, areaM2: totalArea } : null}
+        aiEnabled={ai.enabled}
+        onClose={() => setStart(false)}
+        onTemplate={(k) => {
+          newFromTemplate(k)
+          setStart(false)
+        }}
+        onPickFile={() => anyInput.current?.click()}
+        onPaste={() => void intake.pasteFromClipboard()}
+      />
       <footer className="pl-status">
         <span className="pl-status-hint">{aiBusy ? `✨ ${aiBusy}` : hint}</span>
         <span className="pl-status-stats">
