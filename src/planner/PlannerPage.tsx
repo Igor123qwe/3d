@@ -34,6 +34,17 @@ import { getTelegramWebApp } from '../telegram'
 import { guessType, modelRefFromAsset, modelRefFromUrl, phAssets, phCategories, phDimsCm, phInfo, phPage, type PhAsset } from './polyhaven'
 import { decodePlan, parseHash, planShareUrl } from './share'
 import { DEFAULT_TRACE, calibrate, grayscaleOf, loadUnderlayImage, makeUnderlay, tracePlan, type TraceOptions } from './underlay'
+import {
+  DEFAULT_AUTO,
+  ELECTRIC_NAMES,
+  MOUNT_HEIGHT,
+  autoElectrics,
+  cableEstimate,
+  catalogTypeOf,
+  electricSpec,
+  type AutoElectricOptions,
+} from './electrics'
+import type { ElectricKind } from './types'
 import { modelKey } from './polyhaven'
 import './planner.css'
 
@@ -88,7 +99,25 @@ const loadInitialPlan = (): Plan => {
   return TEMPLATES[1].build()
 }
 
-type PanelTab = 'props' | 'catalog' | 'checks' | 'help'
+type PanelTab = 'props' | 'catalog' | 'electric' | 'checks' | 'help'
+
+/** приборы, которые ставят вручную из меню электрики */
+const ELECTRIC_MENU: { kind: ElectricKind; why: string; group: string }[] = [
+  { kind: 'outlet', why: 'поставлена вручную', group: 'Силовая часть' },
+  { kind: 'switch', why: 'поставлен вручную', group: 'Силовая часть' },
+  { kind: 'light', why: 'поставлен вручную', group: 'Свет' },
+  { kind: 'spot', why: 'поставлен вручную', group: 'Свет' },
+  { kind: 'wall-lamp', why: 'поставлено вручную', group: 'Свет' },
+  { kind: 'smart-outlet', why: 'управляется со смартфона', group: 'Умный дом' },
+  { kind: 'smart-switch', why: 'сценарии и управление со смартфона', group: 'Умный дом' },
+  { kind: 'switch-master', why: 'гасит весь свет одним нажатием', group: 'Умный дом' },
+  { kind: 'dimmer', why: 'регулировка яркости', group: 'Умный дом' },
+  { kind: 'curtain-motor', why: 'шторы по расписанию', group: 'Умный дом' },
+  { kind: 'motion-sensor', why: 'свет по движению', group: 'Датчики' },
+  { kind: 'leak-sensor', why: 'перекрывает воду при протечке', group: 'Датчики' },
+  { kind: 'thermostat', why: 'тёплый пол по расписанию', group: 'Датчики' },
+  { kind: 'panel', why: 'автоматы и модули умного дома', group: 'Щит' },
+]
 
 const TOOLS: { tool: Tool; icon: string; name: string; key: string }[] = [
   { tool: 'select', icon: '⬚', name: 'Выбор', key: 'V' },
@@ -177,6 +206,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const [customModelUrl, setCustomModelUrl] = useState('')
   const [trace, setTrace] = useState<TraceOptions>(DEFAULT_TRACE)
   const [tracing, setTracing] = useState(false)
+  const [auto, setAuto] = useState<AutoElectricOptions>(DEFAULT_AUTO)
   const imageInput = useRef<HTMLInputElement>(null)
   const [photoMode, setPhotoMode] = useState(() => {
     try {
@@ -514,6 +544,40 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     }
   }
 
+  const electricItems = plan.furniture.filter((f) => f.electric)
+  const spec = useMemo(() => electricSpec(plan, rooms), [plan, rooms])
+  const cable = useMemo(() => cableEstimate(plan, rooms), [plan, rooms])
+
+  const runAutoElectrics = () => {
+    if (!rooms.length) {
+      setToast('Сначала нарисуйте стены: электрика раскладывается по комнатам')
+      return
+    }
+    const items = autoElectrics(plan, rooms, auto)
+    if (!items.length) {
+      setToast('Нечего ставить: включите хотя бы одно правило')
+      return
+    }
+    const hadElectrics = electricItems.length > 0
+    if (hadElectrics && !window.confirm(`Заменить текущую электрику (${electricItems.length} точек) на ${items.length} новых?`)) return
+    history.apply((p) => ({ ...p, furniture: [...p.furniture.filter((f) => !f.electric), ...items] }))
+    setSelection(null)
+    setLayers((l) => ({ ...l, electric: true }))
+    setToast(`Расставлено точек: ${items.length}`)
+  }
+
+  const clearElectrics = () => {
+    if (!electricItems.length) return
+    if (!window.confirm(`Убрать всю электрику (${electricItems.length} точек)?`)) return
+    history.apply((p) => ({ ...p, furniture: p.furniture.filter((f) => !f.electric) }))
+    setSelection(null)
+  }
+
+  const pickElectric = (kind: ElectricKind, why: string) => {
+    const base = CATALOG_MAP[catalogTypeOf(kind)]
+    pick({ ...base, name: ELECTRIC_NAMES[kind], electric: { kind, why, height: MOUNT_HEIGHT[kind] } })
+  }
+
   const onOpenFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]
     e.target.value = ''
@@ -622,6 +686,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
               🗑 Удалить
             </button>
           </div>
+          {f.electric && (
+            <div className="pl-hint-box">
+              ⚡ {ELECTRIC_NAMES[f.electric.kind]}, высота {f.electric.height} см. Причина: {f.electric.why}.
+            </div>
+          )}
           {cat?.hint && <div className="pl-hint-box">💡 {cat.hint}</div>}
           <div className="pl-block">
             <div className="pl-props-title">3D-модель</div>
@@ -1046,6 +1115,99 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     </div>
   )
 
+  const renderElectric = () => (
+    <div>
+      <div className="pl-props-title">Автоматическая расстановка</div>
+      <div className="pl-note">
+        Точки раскладываются по правилам: розетки у изголовья кровати и дивана, над столешницей и у техники; выключатели — у дверей со стороны ручки;
+        свет — по комнатам. В санузле розетки только для техники.
+      </div>
+      {(
+        [
+          ['outlets', 'Розетки'],
+          ['switches', 'Выключатели'],
+          ['lights', 'Свет'],
+          ['smart', 'Умный дом: умные выключатели, мастер-сценарии, тёплый пол'],
+          ['curtains', 'Электрокарнизы на окна'],
+          ['motion', 'Датчики движения в коридоре и санузле'],
+          ['leak', 'Датчики протечки'],
+          ['panel', 'Щит умного дома'],
+        ] as [keyof AutoElectricOptions, string][]
+      ).map(([k, name]) => (
+        <label key={k} className="pl-field">
+          <span>{name}</span>
+          <input type="checkbox" checked={auto[k]} onChange={() => setAuto((a) => ({ ...a, [k]: !a[k] }))} />
+        </label>
+      ))}
+      <div className="pl-row">
+        <button className="pl-btn active" onClick={runAutoElectrics}>
+          ⚡ Расставить
+        </button>
+        <button className="pl-btn danger" onClick={clearElectrics} disabled={!electricItems.length}>
+          Убрать всю
+        </button>
+      </div>
+
+      <div className="pl-block">
+        <div className="pl-props-title">Поставить вручную</div>
+        {[...new Set(ELECTRIC_MENU.map((m) => m.group))].map((group) => (
+          <div key={group}>
+            <div className="pl-note">{group}</div>
+            <div className="pl-chips">
+              {ELECTRIC_MENU.filter((m) => m.group === group).map((m) => (
+                <button
+                  key={m.kind}
+                  className={`pl-chip ${placing?.electric?.kind === m.kind ? 'active' : ''}`}
+                  onClick={() => pickElectric(m.kind, m.why)}
+                  title={`${m.why}, высота ${MOUNT_HEIGHT[m.kind]} см`}
+                >
+                  {ELECTRIC_NAMES[m.kind]}
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="pl-block">
+        <div className="pl-props-title">Ведомость</div>
+        {spec.length === 0 ? (
+          <div className="pl-note">Пока пусто. Нажмите «Расставить» или выберите прибор выше.</div>
+        ) : (
+          <>
+            <table className="pl-spec">
+              <tbody>
+                {spec.map((row) => (
+                  <tr key={row.kind}>
+                    <td>{row.name}</td>
+                    <td className="num">{row.count}</td>
+                    <td className="num">{row.height} см</td>
+                    <td className="where">{row.where.join(', ')}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="pl-stats">
+              <div>
+                <b>{spec.reduce((s2, r) => s2 + r.count, 0)}</b>
+                <span>точек всего</span>
+              </div>
+              <div>
+                <b>≈{cable.meters} м</b>
+                <span>кабеля</span>
+              </div>
+              <div>
+                <b>{cable.groups}</b>
+                <span>групп в щите</span>
+              </div>
+            </div>
+            <div className="pl-note">Длина кабеля оценена по прокладке вдоль стен от щита с запасом. Точный расчёт делают по трассам.</div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+
   const renderChecks = () => (
     <div>
       <label className="pl-field">
@@ -1284,6 +1446,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             [
               ['props', 'Свойства'],
               ['catalog', 'Каталог'],
+              ['electric', '⚡'],
               ['checks', problems ? `Проверка · ${problems}` : 'Проверка'],
               ['help', '?'],
             ] as [PanelTab, string][]
@@ -1307,6 +1470,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           <div className="pl-panel-body">
             {panel === 'props' && renderProps()}
             {panel === 'catalog' && renderCatalog()}
+            {panel === 'electric' && renderElectric()}
             {panel === 'checks' && renderChecks()}
             {panel === 'help' && renderHelp()}
           </div>

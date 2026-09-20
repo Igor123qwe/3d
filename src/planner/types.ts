@@ -53,6 +53,31 @@ export interface Furniture {
   label?: string
   color?: string
   model?: ModelRef
+  /** электрическая точка: вид, высота установки и причина размещения */
+  electric?: ElectricPoint
+}
+
+export type ElectricKind =
+  | 'outlet'
+  | 'switch'
+  | 'light'
+  | 'spot'
+  | 'wall-lamp'
+  | 'smart-outlet'
+  | 'smart-switch'
+  | 'switch-master'
+  | 'dimmer'
+  | 'motion-sensor'
+  | 'leak-sensor'
+  | 'thermostat'
+  | 'curtain-motor'
+  | 'panel'
+
+/** Точка электрики: вид прибора, высота установки над полом и причина размещения */
+export interface ElectricPoint {
+  kind: ElectricKind
+  why: string
+  height: number
 }
 
 export interface RoomMeta {

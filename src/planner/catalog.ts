@@ -1,7 +1,7 @@
 // Каталог мебели и оборудования с реальными размерами и зонами эргономики.
 // Локальная система объекта: x — ширина (вправо), y — глубина (вниз).
 // «Спинка» объекта — верхняя грань (-y), «фронт» — нижняя (+y).
-import type { ModelRef } from './types'
+import type { ElectricPoint, ModelRef } from './types'
 
 export type CategoryKey =
   | 'bedroom'
@@ -64,6 +64,10 @@ export type GlyphKind =
   | 'light'
   | 'spot'
   | 'lamp'
+  | 'sensor'
+  | 'thermostat'
+  | 'curtain'
+  | 'panel'
 
 export interface Clearance {
   front?: number
@@ -96,6 +100,8 @@ export interface CatalogItem {
   h?: number
   /** фотореалистичная модель (для предметов из фотокаталога) */
   model?: ModelRef
+  /** электрическая точка: подставляется при установке прибора */
+  electric?: ElectricPoint
 }
 
 const SEATS = ['chair', 'office-chair', 'bar-stool', 'bench', 'hall-bench']
@@ -427,6 +433,69 @@ export const CATALOG: CatalogItem[] = [
   { type: 'light', name: 'Люстра / светильник', category: 'electric', w: 30, d: 30, glyph: 'light', symbol: true, z: 2, resizable: false, hint: 'Три сценария света: общий, рабочий (локальный) и акцентный.' },
   { type: 'spot', name: 'Спот', category: 'electric', w: 10, d: 10, glyph: 'spot', symbol: true, z: 2, resizable: false },
   { type: 'wall-lamp', name: 'Бра', category: 'electric', w: 12, d: 6, glyph: 'spot', wallSnap: true, symbol: true, z: 2, resizable: false },
+  {
+    type: 'motion-sensor',
+    name: 'Датчик движения',
+    category: 'electric',
+    w: 10,
+    d: 10,
+    glyph: 'sensor',
+    symbol: true,
+    z: 2,
+    resizable: false,
+    hint: 'В коридоре и санузле включает свет без выключателя. Ставят на потолке или вверху стены.',
+  },
+  {
+    type: 'leak-sensor',
+    name: 'Датчик протечки',
+    category: 'electric',
+    w: 8,
+    d: 8,
+    glyph: 'sensor',
+    symbol: true,
+    z: 2,
+    resizable: false,
+    hint: 'На полу у стиральной машины, мойки и под ванной. В паре с кранами с электроприводом перекрывает воду.',
+  },
+  {
+    type: 'thermostat',
+    name: 'Термостат тёплого пола',
+    category: 'electric',
+    w: 10,
+    d: 4,
+    glyph: 'thermostat',
+    wallSnap: true,
+    symbol: true,
+    z: 2,
+    resizable: false,
+    hint: 'На высоте выключателя, не над источником тепла. Датчик пола закладывают в гофре между витками кабеля.',
+  },
+  {
+    type: 'curtain-motor',
+    name: 'Электрокарниз',
+    category: 'electric',
+    w: 20,
+    d: 6,
+    glyph: 'curtain',
+    wallSnap: true,
+    symbol: true,
+    z: 2,
+    resizable: false,
+    hint: 'Розетку под карниз выводят у потолка сбоку от окна, заранее: потом штробить придётся по чистовой отделке.',
+  },
+  {
+    type: 'panel',
+    name: 'Щит умного дома',
+    category: 'electric',
+    w: 40,
+    d: 12,
+    glyph: 'panel',
+    wallSnap: true,
+    symbol: true,
+    z: 2,
+    resizable: false,
+    hint: 'Автоматы, УЗО и модули умного дома. Закладывайте запас модулей: реле и диммеры добавляются позже.',
+  },
 
   // ---------- Разное ----------
   { type: 'radiator', name: 'Радиатор', category: 'misc', w: 80, d: 10, glyph: 'radiator', wallSnap: true, hint: 'Не закрывайте радиатор глухой мебелью — потери тепла до 20 %.' },
@@ -511,6 +580,11 @@ const HEIGHTS: Record<string, [number, number?]> = {
   'kid-wardrobe': [190],
   'toy-box': [45],
   'kid-rug': [1],
+  'motion-sensor': [8, 220],
+  'leak-sensor': [4, 2],
+  thermostat: [10, 90],
+  'curtain-motor': [8, 250],
+  panel: [50, 140],
   outlet: [8, 30],
   switch: [8, 90],
   light: [40, 230],

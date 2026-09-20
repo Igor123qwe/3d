@@ -147,6 +147,7 @@ export function addFurniture(plan: Plan, cat: CatalogItem, x: number, y: number,
     rot: normDeg(rot),
     ...(cat.h ? { h: cat.h } : {}),
     ...(cat.model ? { model: cat.model, label: cat.name } : {}),
+    ...(cat.electric ? { electric: cat.electric, label: cat.name } : {}),
   }
   return { plan: { ...plan, furniture: [...plan.furniture, f] }, id }
 }

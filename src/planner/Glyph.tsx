@@ -342,6 +342,43 @@ export const Glyph: React.FC<Props> = ({ item, cat = CATALOG_MAP[item.type], zoo
           <circle cx={0} cy={0} r={1.8} fill="#333" />
         </g>
       )
+    case 'sensor':
+      return (
+        <g transform={`scale(${1 / zoom})`}>
+          <circle cx={0} cy={0} r={6} fill="#fff" {...S} />
+          <path d="M -3.2 2.4 A 4 4 0 0 1 3.2 2.4" fill="none" {...S} />
+          <path d="M -5.4 4.6 A 7 7 0 0 1 5.4 4.6" fill="none" {...THIN} />
+          <circle cx={0} cy={-1.5} r={1.4} fill="#333" />
+        </g>
+      )
+    case 'thermostat':
+      return (
+        <g transform={`scale(${1 / zoom})`}>
+          <rect x={-6} y={-6} width={12} height={12} rx={2.5} fill="#fff" {...S} />
+          <circle cx={0} cy={0} r={3.2} fill="none" {...S} />
+          <line x1={0} y1={0} x2={0} y2={-3.2} {...S} />
+          <line x1={0} y1={0} x2={2.4} y2={1.6} {...THIN} />
+        </g>
+      )
+    case 'curtain':
+      return (
+        <g transform={`scale(${1 / zoom})`}>
+          <line x1={-10} y1={-3} x2={10} y2={-3} {...S} />
+          <path d="M -8 -3 q 2 5 0 9 M -4 -3 q 2 5 0 9 M 0 -3 q 2 5 0 9" fill="none" {...THIN} />
+          <path d="M 5 2 l 5 0 l -1.6 -1.8 M 10 2 l -1.6 1.8" fill="none" {...S} />
+        </g>
+      )
+    case 'panel':
+      return (
+        <g transform={`scale(${1 / zoom})`}>
+          <rect x={-11} y={-7} width={22} height={14} rx={1.5} fill="#fff" {...S} />
+          <line x1={-11} y1={-2} x2={11} y2={-2} {...THIN} />
+          {[-8, -4, 0, 4, 8].map((x) => (
+            <line key={x} x1={x} y1={-6} x2={x} y2={-3} {...THIN} />
+          ))}
+          <line x1={-8} y1={3} x2={8} y2={3} {...THIN} />
+        </g>
+      )
     case 'box':
     default:
       return body(2)
