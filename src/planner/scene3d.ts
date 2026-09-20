@@ -7,6 +7,7 @@ import { openingGeom } from './checks'
 import { wallsAtNode } from './snapping'
 import { add, angleDeg, dist, mul, norm, perp, pointInPoly, sub } from './geometry'
 import { loadModel } from './models'
+import { buildFurnitureMesh, SHARED_MATERIAL } from './furniture3d'
 
 export const M = 0.01
 export const WALL_H = 270
@@ -31,14 +32,19 @@ export interface SceneOpts {
 /** пометка «ресурсы общие с кэшем моделей» — такое поддерево освобождать нельзя */
 const SHARED = 'sharedModel'
 
+/** материалы библиотеки мебели общие для всех предметов — их освобождать нельзя */
+function freeMaterial(m: THREE.Material): void {
+  if (!m.userData?.[SHARED_MATERIAL]) m.dispose()
+}
+
 function disposeObject(o: THREE.Object3D): void {
   if (o.userData?.[SHARED]) return
   for (const child of [...o.children]) disposeObject(child)
   const m = o as THREE.Mesh
   if (m.geometry) m.geometry.dispose()
   const mat = m.material as THREE.Material | THREE.Material[] | undefined
-  if (Array.isArray(mat)) mat.forEach((x) => x.dispose())
-  else mat?.dispose()
+  if (Array.isArray(mat)) mat.forEach(freeMaterial)
+  else if (mat) freeMaterial(mat)
 }
 
 export function disposeGroup(g: THREE.Object3D): void {
@@ -172,6 +178,15 @@ function placeholderFor(f: Furniture, h: number, elev: number, color: THREE.Colo
     mesh.position.y = (elev + h / 2) * M
     holder.add(mesh)
     return holder
+  }
+  // параметрическая модель по виду предмета; если её нет — габаритный короб
+  if (!ghost && cat?.glyph) {
+    const shaped = buildFurnitureMesh(cat.glyph, f.w * M, f.d * M, h * M, color)
+    if (shaped) {
+      shaped.position.y = elev * M
+      holder.add(shaped)
+      return holder
+    }
   }
   const geom = new THREE.BoxGeometry(f.w * M, h * M, f.d * M)
   const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ color, roughness: 0.8, transparent: ghost, opacity: ghost ? 0.6 : 1 }))

@@ -15,30 +15,39 @@ const clamp = (v: number, lo: number, hi: number): number => Math.min(Math.max(v
 const part = (size: number, k: number, lo: number, hi: number): number => clamp(size * k, Math.min(lo, size * 0.35), Math.min(hi, size * 0.45))
 
 // ---------- материалы ----------
+/** метка общего материала: такие материалы переживают пересборку сцены и не освобождаются вместе с ней */
+export const SHARED_MATERIAL = 'sharedMaterial'
+
+/** пометить материал как общий для всех предметов */
+function shared<T extends THREE.Material>(m: T): T {
+  m.userData[SHARED_MATERIAL] = true
+  return m
+}
+
 // Общие материалы модуля: создаются один раз и после создания не мутируются.
 const MAT = {
   /** дерево — опоры, стволы */
-  wood: new THREE.MeshStandardMaterial({ color: 0xb98d5c, roughness: 0.7 }),
+  wood: shared(new THREE.MeshStandardMaterial({ color: 0xb98d5c, roughness: 0.7 })),
   /** металл — ручки, ножки, смесители */
-  metal: new THREE.MeshStandardMaterial({ color: 0xb9bec6, roughness: 0.3, metalness: 0.85 }),
+  metal: shared(new THREE.MeshStandardMaterial({ color: 0xb9bec6, roughness: 0.3, metalness: 0.85 })),
   /** тёмный пластик — цоколи, рамы, техника */
-  dark: new THREE.MeshStandardMaterial({ color: 0x2a2d33, roughness: 0.55, metalness: 0.15 }),
+  dark: shared(new THREE.MeshStandardMaterial({ color: 0x2a2d33, roughness: 0.55, metalness: 0.15 })),
   /** экран телевизора, стеклокерамика плиты */
-  screen: new THREE.MeshStandardMaterial({ color: 0x0d1014, roughness: 0.2, metalness: 0.2 }),
+  screen: shared(new THREE.MeshStandardMaterial({ color: 0x0d1014, roughness: 0.2, metalness: 0.2 })),
   /** стекло — душевые перегородки, люк стиральной машины */
-  glass: new THREE.MeshPhysicalMaterial({ color: 0xcfe4f2, roughness: 0.05, metalness: 0, transparent: true, opacity: 0.26, side: THREE.DoubleSide }),
+  glass: shared(new THREE.MeshPhysicalMaterial({ color: 0xcfe4f2, roughness: 0.05, metalness: 0, transparent: true, opacity: 0.26, side: THREE.DoubleSide })),
   /** белая керамика — сантехника */
-  ceramic: new THREE.MeshStandardMaterial({ color: 0xf6f7f5, roughness: 0.15 }),
+  ceramic: shared(new THREE.MeshStandardMaterial({ color: 0xf6f7f5, roughness: 0.15 })),
   /** камень — кухонные столешницы */
-  stone: new THREE.MeshStandardMaterial({ color: 0xd5d1c8, roughness: 0.4 }),
+  stone: shared(new THREE.MeshStandardMaterial({ color: 0xd5d1c8, roughness: 0.4 })),
   /** бельё, подушки */
-  linen: new THREE.MeshStandardMaterial({ color: 0xfbfaf6, roughness: 0.92 }),
+  linen: shared(new THREE.MeshStandardMaterial({ color: 0xfbfaf6, roughness: 0.92 })),
   /** зеркальная поверхность */
-  mirror: new THREE.MeshStandardMaterial({ color: 0xe2ecf4, roughness: 0.03, metalness: 1 }),
+  mirror: shared(new THREE.MeshStandardMaterial({ color: 0xe2ecf4, roughness: 0.03, metalness: 1 })),
   /** листва растения */
-  leaf: new THREE.MeshStandardMaterial({ color: 0x4e8a46, roughness: 0.85 }),
+  leaf: shared(new THREE.MeshStandardMaterial({ color: 0x4e8a46, roughness: 0.85 })),
   /** земля в горшке */
-  soil: new THREE.MeshStandardMaterial({ color: 0x4a3a2c, roughness: 1 }),
+  soil: shared(new THREE.MeshStandardMaterial({ color: 0x4a3a2c, roughness: 1 })),
 }
 
 /** кэш материалов основного цвета: ключ — строка «цвет|оттенок|шероховатость» */
@@ -52,7 +61,7 @@ function tint(color: THREE.Color, k = 1, roughness = 0.82): THREE.MeshStandardMa
   const c = color.clone()
   if (k < 1) c.multiplyScalar(k)
   else if (k > 1) c.lerp(WHITE, Math.min(1, k - 1))
-  const mat = new THREE.MeshStandardMaterial({ color: c, roughness, metalness: 0.02 })
+  const mat = shared(new THREE.MeshStandardMaterial({ color: c, roughness, metalness: 0.02 }))
   tintCache.set(key, mat)
   return mat
 }
@@ -803,9 +812,14 @@ function shower(w: number, d: number, h: number, color: THREE.Color): THREE.Grou
   const px = -w * 0.28
   const pz = -d / 2 + t + Math.min(0.02, d * 0.05)
   const armLen = Math.max(Math.min(0.16, d * 0.3, d / 2 - pz - hr), EPS)
+  const ar = Math.min(0.012, hr * 0.3)
+  const hh = Math.min(0.022, wallH * 0.1)
+  // у низкого габарита кронштейн и лейка не должны вылезать за верх
+  const armY = Math.min(tray + wallH * 0.86, h - ar)
+  const headY = Math.max(tray + hh / 2, Math.min(tray + wallH * 0.82, armY - ar - hh / 2))
   g.add(cyl(Math.min(0.013, hr * 0.3), Math.min(0.013, hr * 0.3), wallH * 0.52, 12, MAT.metal, px, tray + wallH * 0.3, pz))
-  g.add(cylZ(Math.min(0.012, hr * 0.3), armLen, 12, MAT.metal, px, tray + wallH * 0.86, pz + armLen / 2))
-  g.add(cyl(hr, hr * 0.85, Math.min(0.022, wallH * 0.1), 20, MAT.metal, px, tray + wallH * 0.82, pz + armLen))
+  g.add(cylZ(ar, armLen, 12, MAT.metal, px, armY, pz + armLen / 2))
+  g.add(cyl(hr, hr * 0.85, hh, 20, MAT.metal, px, headY, pz + armLen))
   return g
 }
 

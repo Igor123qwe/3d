@@ -782,7 +782,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                 </div>
               </div>
             ) : (
-              <div className="pl-note">В 3D и AR предмет показан простым боксом. Выберите фотореалистичную модель в каталоге («Фото 3D») или вставьте ссылку на свой GLB.</div>
+              <div className="pl-note">В 3D и AR предмет показан встроенной моделью по своим габаритам. Нужна фотореалистичная — выберите её в каталоге («Фото 3D») или вставьте ссылку на свой GLB.</div>
             )}
             <div className="pl-row">
               <input className="pl-grow" placeholder="https://…/model.glb" value={customModelUrl} onChange={(e) => setCustomModelUrl(e.target.value)} />
