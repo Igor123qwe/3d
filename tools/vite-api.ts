@@ -4,7 +4,7 @@
 // показывал бы приложение без серверной части. Плагин переводит запрос Node
 // в стандартный Request, зовёт обработчик и пишет обратно его Response —
 // ровно так же, как это делает Vercel.
-import type { Connect, Plugin, ViteDevServer } from 'vite'
+import { loadEnv, type Connect, type Plugin, type ViteDevServer } from 'vite'
 import type { ServerResponse } from 'node:http'
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -71,6 +71,13 @@ export function apiDev(): Plugin {
     apply: 'serve',
     configResolved(cfg) {
       root = cfg.root
+      // Vite сам в process.env ничего не кладёт, а серверные функции читают
+      // ключ именно оттуда. Без этого .env локально был бы бесполезен, хотя
+      // на Vercel те же переменные работают.
+      const env = loadEnv(cfg.mode, cfg.envDir || root, '')
+      for (const [key, value] of Object.entries(env)) {
+        if (process.env[key] === undefined) process.env[key] = value
+      }
     },
     configureServer(server) {
       server.middlewares.use(middleware(server, root))
