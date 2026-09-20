@@ -464,8 +464,8 @@ export function reconstructFromRooms(rooms: AiRoom[], u: Underlay, options: Reco
   const specOf = (r: Rect): AxisSpec => ({
     dw: r.w + t + (sideIsExterior(r, 'left') ? extra : 0) + (sideIsExterior(r, 'right') ? extra : 0),
     dh: r.h + t + (sideIsExterior(r, 'top') ? extra : 0) + (sideIsExterior(r, 'bottom') ? extra : 0),
-    ww: r.wLabelled ? 1 : 0.05,
-    wh: r.hLabelled ? 1 : 0.05,
+    ww: r.wLabelled ? 1 : 0.02,
+    wh: r.hLabelled ? 1 : 0.02,
     wExact: r.wLabelled,
     hExact: r.hLabelled,
   })

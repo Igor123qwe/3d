@@ -212,6 +212,20 @@ export interface ConvertResult {
   report: ConvertReport
 }
 
+/**
+ * Толщины стен для чертежа по числам: если модель назвала толщины стен с
+ * картинки, наружные и перегородки берутся по медианам, иначе — типовые 40 и 10.
+ * От этого зависит, сойдётся ли сумма комнат с размерной цепочкой по осям.
+ */
+export function wallThicknesses(ai: AiPlan): { exteriorCm?: number; interiorCm?: number } {
+  const thick = ai.walls.filter((w) => w.thicknessCm >= 20).map((w) => w.thicknessCm)
+  const thin = ai.walls.filter((w) => w.thicknessCm < 20).map((w) => w.thicknessCm)
+  const out: { exteriorCm?: number; interiorCm?: number } = {}
+  if (thick.length >= 2) out.exteriorCm = roundThickness(robustMedian(thick))
+  if (thin.length >= 2) out.interiorCm = roundThickness(robustMedian(thin))
+  return out
+}
+
 /** сколько подписанных комнат попало внутрь замкнутых контуров */
 function closedRooms(walls: Wall[], ai: AiPlan, u: Underlay): number {
   if (!walls.length || !ai.rooms.length) return 0
@@ -251,7 +265,7 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
   // 4. чертёж заново по числам, если модель дала комнаты прямоугольниками;
   //    побеждает вариант, где замкнулось больше комнат, при равенстве — числа
   const dimSpans = ai.dimensions.map((d) => ({ a: toPlanPt(u, { x: d.x1 * px.w, y: d.y1 * px.h }), b: toPlanPt(u, { x: d.x2 * px.w, y: d.y2 * px.h }), cm: d.cm }))
-  const rebuilt = ai.rooms.some(canRebuildFrom) ? reconstructFromRooms(ai.rooms, u, {}, dimSpans) : null
+  const rebuilt = ai.rooms.some(canRebuildFrom) ? reconstructFromRooms(ai.rooms, u, wallThicknesses(ai), dimSpans) : null
   const closedByNumbers = rebuilt ? rebuilt.rooms.filter((r) => r.haveM2 !== undefined).length : 0
   const byNumbers = !!rebuilt && closedByNumbers > 0 && closedByNumbers >= closedRooms(walls, ai, u)
   const method: ConvertMethod = byNumbers ? 'по размерам комнат' : 'по линиям стен'
