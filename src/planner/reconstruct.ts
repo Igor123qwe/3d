@@ -1,0 +1,461 @@
+// Чертёж с нуля по числам с плана.
+//
+// Обводка линий и даже стены от модели со зрением дают кривой чертёж: координаты
+// с картинки модель называет приблизительно, а растр видит выноски и штриховку.
+// Зато числа на плане БТИ модель читает надёжно: размеры у стен («3.72»),
+// площади в комнатах («13.9»). Здесь чертёж строится заново именно из чисел:
+//
+// 1. Каждая комната — прямоугольник с размерами из подписей; площадь сверяет
+//    и при нужде поправляет. Положение — примерно по картинке.
+// 2. Грани соседних комнат сводятся в общие оси стен: где у одной комнаты
+//    правая стена, там у соседки левая.
+// 3. Оси подгоняются методом наименьших квадратов так, чтобы расстояния между
+//    ними равнялись подписанным размерам. Картинка только удерживает чертёж
+//    на месте, числа решают.
+// 4. Из осей собираются стены: между двумя комнатами — перегородка, с одной
+//    комнатой — наружная стена. Комнаты находятся обычным способом по контуру,
+//    и их площади сверяются с подписанными — это и есть отчёт о точности.
+import type { AiBox, AiRoom, AiSide } from './aicontract'
+import type { Pt, Underlay, Wall } from './types'
+import { uid } from './types'
+import { buildRooms } from './rooms'
+import { pointInPoly } from './geometry'
+
+export interface ReconstructOptions {
+  /** толщина перегородок между комнатами, см */
+  interiorCm?: number
+  /** толщина наружных стен, см */
+  exteriorCm?: number
+  /** ближе скольких сантиметров грани комнат считаются одной осью стены */
+  snapCm?: number
+}
+
+export const DEFAULT_RECONSTRUCT: Required<ReconstructOptions> = { interiorCm: 10, exteriorCm: 40, snapCm: 25 }
+
+/** размеры двух комнат, делящих ось, различаются больше — значит, осей две (уступ стены) */
+const JOG_CM = 15
+
+/** комната, которую удалось поставить на чертёж */
+export interface PlacedRoom {
+  name: string
+  kind?: string
+  /** точка внутри — по ней комната узнаётся после перестройки стен */
+  anchor: Pt
+  /** оси стен вокруг комнаты, см */
+  rect: { x1: number; y1: number; x2: number; y2: number }
+  wantM2?: number
+  /** площадь получившейся комнаты; нет — контур не замкнулся */
+  haveM2?: number
+}
+
+export interface AreaFit {
+  /** средняя точность по подписанным площадям, 0..1 */
+  accuracy: number
+  /** комнаты, где расхождение заметно, от худшей */
+  off: { name: string; wantM2: number; haveM2: number }[]
+  samples: number
+}
+
+export interface ReconstructResult {
+  walls: Wall[]
+  rooms: PlacedRoom[]
+  /** комнаты, что не удалось поставить: без размеров, слишком узкие */
+  skipped: string[]
+  areaFit: AreaFit | null
+}
+
+/** Комната, по которой можно строить: есть прямоугольник на картинке */
+export const canRebuildFrom = (r: AiRoom): r is AiRoom & { box: AiBox } => !!r.box
+
+/**
+ * Сантиметры в пикселе по размерам комнат: подписанная ширина делится на
+ * ширину прямоугольника в пикселях. Каждая подпись — отдельная оценка.
+ */
+export function scaleSamplesFromRooms(rooms: AiRoom[], px: { w: number; h: number }): number[] {
+  const out: number[] = []
+  for (const r of rooms) {
+    if (!r.box) continue
+    const bw = (r.box.x2 - r.box.x1) * px.w
+    const bh = (r.box.y2 - r.box.y1) * px.h
+    if (r.widthCm && bw >= 12) out.push(r.widthCm / bw)
+    if (r.depthCm && bh >= 12) out.push(r.depthCm / bh)
+    // без размеров выручает площадь: корень из отношения площадей
+    if (!r.widthCm && !r.depthCm && r.areaM2 && bw >= 12 && bh >= 12) out.push(Math.sqrt((r.areaM2 * 1e4) / (bw * bh)))
+  }
+  return out
+}
+
+interface Rect {
+  spec: AiRoom & { box: AiBox }
+  cx: number
+  cy: number
+  /** внутренние размеры, см, и откуда они: из подписи или с картинки */
+  w: number
+  h: number
+  wLabelled: boolean
+  hLabelled: boolean
+  /** индексы осей после сведения */
+  xi: number
+  xj: number
+  yi: number
+  yj: number
+}
+
+const toPlan = (u: Underlay, px: Pt): Pt => ({ x: u.x + px.x * u.scale, y: u.y + px.y * u.scale })
+
+/** Внутренние размеры комнаты: подписи важнее картинки, площадь — судья */
+function sizeRoom(r: AiRoom & { box: AiBox }, u: Underlay): Omit<Rect, 'xi' | 'xj' | 'yi' | 'yj'> {
+  const bw = (r.box.x2 - r.box.x1) * u.px.w * u.scale
+  const bh = (r.box.y2 - r.box.y1) * u.px.h * u.scale
+  let w = r.widthCm ?? bw
+  let h = r.depthCm ?? bh
+  const wLabelled = !!r.widthCm
+  const hLabelled = !!r.depthCm
+  if (r.areaM2) {
+    const k = (r.areaM2 * 1e4) / (w * h)
+    // подписи вдоль стен бывают частичными («3.72» — только до выступа), площадь честнее
+    if (k < 0.85 || k > 1.18) {
+      if (wLabelled && !hLabelled) h = (r.areaM2 * 1e4) / w
+      else if (hLabelled && !wLabelled) w = (r.areaM2 * 1e4) / h
+      else {
+        const q = Math.sqrt(k)
+        w *= q
+        h *= q
+      }
+    }
+  }
+  const c = toPlan(u, { x: ((r.box.x1 + r.box.x2) / 2) * u.px.w, y: ((r.box.y1 + r.box.y2) / 2) * u.px.h })
+  return { spec: r, cx: c.x, cy: c.y, w, h, wLabelled, hLabelled }
+}
+
+interface Axis {
+  /** положение оси, см */
+  pos: number[]
+  /** исходное положение по картинке — держит чертёж на месте */
+  seed: number[]
+}
+
+/**
+ * Свести близкие грани в общие оси; вернуть индекс оси для каждой грани.
+ * Грани, чьё положение известно по подписи, сводятся с жёстким допуском:
+ * подпись точнее картинки, и уступ стены в 30 см для них — две разные оси.
+ */
+function cluster(values: number[], snap: number, exact?: boolean[], tight = JOG_CM): { index: number[]; seed: number[] } {
+  const order = values.map((v, i) => i).sort((a, b) => values[a] - values[b])
+  const index = new Array<number>(values.length)
+  const seed: number[] = []
+  let start = -Infinity
+  let last = -Infinity
+  let lastExact = false
+  let sum = 0
+  let n = 0
+  const flush = () => {
+    if (n) seed.push(sum / n)
+    sum = 0
+    n = 0
+  }
+  for (const i of order) {
+    const v = values[i]
+    const isExact = !!exact?.[i]
+    const tol = isExact && lastExact ? tight : snap
+    // новая ось: далеко от предыдущей грани или кластер стал шире полутора допусков
+    if (v - last > tol || v - start > snap * 1.5) {
+      flush()
+      start = v
+    }
+    index[i] = seed.length
+    last = v
+    lastExact = isExact
+    sum += v
+    n++
+  }
+  flush()
+  return { index, seed }
+}
+
+interface Constraint {
+  i: number
+  j: number
+  d: number
+  w: number
+}
+
+/**
+ * Подогнать оси под размеры: минимизируем сумму w·(pos[j] − pos[i] − d)²,
+ * слабо удерживая оси у положений с картинки. Гаусс–Зейдель сходится быстро:
+ * осей на плане квартиры десятки, не тысячи.
+ */
+export function fitAxis(seed: number[], constraints: Constraint[], hold = 0.02, iterations = 400): number[] {
+  const pos = seed.slice()
+  const n = pos.length
+  const byAxis: Constraint[][] = Array.from({ length: n }, () => [])
+  for (const c of constraints) {
+    if (c.i === c.j || c.i < 0 || c.j < 0 || c.i >= n || c.j >= n) continue
+    byAxis[c.i].push(c)
+    byAxis[c.j].push(c)
+  }
+  for (let it = 0; it < iterations; it++) {
+    let moved = 0
+    for (let k = 0; k < n; k++) {
+      let num = hold * seed[k]
+      let den = hold
+      for (const c of byAxis[k]) {
+        if (c.j === k) num += c.w * (pos[c.i] + c.d)
+        else num += c.w * (pos[c.j] - c.d)
+        den += c.w
+      }
+      const next = num / den
+      moved = Math.max(moved, Math.abs(next - pos[k]))
+      pos[k] = next
+    }
+    if (moved < 0.01) break
+  }
+  return pos
+}
+
+interface AxisSpec {
+  dw: number
+  dh: number
+  ww: number
+  wh: number
+  wExact: boolean
+  hExact: boolean
+}
+
+/** одна комната вдоль одной оси: расстояние между её гранями и вес этой подписи */
+interface Span {
+  d: number
+  w: number
+  exact: boolean
+}
+
+/**
+ * Оси по одному направлению: сначала подгонка, потом починка сведения.
+ *
+ * Картинка шумит на ±10–15 см, а уступ стены бывает 30: грань легко прилипает
+ * не к той оси. Числа это выдают — у такой комнаты размер не сходится. Поэтому
+ * для комнат с большим расхождением пробуем перевесить грань на соседнюю ось
+ * или на новую и оставляем, если сумма расхождений заметно упала. Потом оси,
+ * оказавшиеся почти в одном месте, сливаются, если числа не против.
+ *
+ * index — ось каждой грани (грань 2m — низ комнаты m, 2m+1 — верх); меняется на месте.
+ */
+export function optimizeAxes(index: number[], seed: number[], raw: number[], spans: Span[], o: Required<ReconstructOptions>): number[] {
+  const cons = (): Constraint[] => spans.map((s, m) => ({ i: index[m * 2], j: index[m * 2 + 1], d: s.d, w: s.w }))
+  const fit = () => fitAxis(seed, cons())
+  const residual = (pos: number[], m: number) => (index[m * 2] === index[m * 2 + 1] ? 1e4 : pos[index[m * 2 + 1]] - pos[index[m * 2]] - spans[m].d)
+  const total = (pos: number[]) => spans.reduce((sum, s, m) => sum + s.w * residual(pos, m) ** 2, 0)
+  const NEW_AXIS_GAIN = JOG_CM * JOG_CM
+
+  let pos = fit()
+  let best = total(pos)
+  /** один проход по комнатам с расхождением; новая ось — только когда разрешена */
+  const pass = (allowNew: boolean): boolean => {
+    const order = spans.map((_, m) => m).sort((a, b) => Math.abs(residual(pos, b)) - Math.abs(residual(pos, a)))
+    for (const m of order) {
+      if (Math.abs(residual(pos, m)) < 3) continue
+      for (const e of [m * 2, m * 2 + 1]) {
+        const other = e === m * 2 ? m * 2 + 1 : m * 2
+        // где грань должна быть по подписи, если противоположная ось стоит верно
+        const want = spans[m].exact ? pos[index[other]] + (e === m * 2 ? -spans[m].d : spans[m].d) : raw[e]
+        const cur = index[e]
+        const candidates = seed
+          .map((_, k) => k)
+          .filter((k) => k !== cur && k !== index[other] && Math.abs(pos[k] - want) <= o.snapCm * 1.5)
+          .sort((a, b) => Math.abs(pos[a] - want) - Math.abs(pos[b] - want))
+        if (allowNew && spans[m].exact) candidates.push(-1)
+        for (const k of candidates) {
+          const fresh = k === -1
+          if (fresh) seed.push(want)
+          index[e] = fresh ? seed.length - 1 : k
+          const next = fit()
+          const score = total(next)
+          if (best - score > (fresh ? NEW_AXIS_GAIN : 1)) {
+            pos = next
+            best = score
+            return true
+          }
+          index[e] = cur
+          if (fresh) seed.pop()
+        }
+      }
+    }
+    return false
+  }
+  // сначала перевешиваем грани на уже известные оси, и только когда это
+  // не помогает — заводим новую: два нулевых решения, выбираем без лишней стены
+  for (let round = 0; round < 12; round++) {
+    if (pass(false)) continue
+    if (!pass(true)) break
+  }
+
+  // слить оси, оказавшиеся почти в одном месте: две стены в пяти сантиметрах — не чертёж
+  for (let k1 = 0; k1 < seed.length; k1++) {
+    for (let k2 = k1 + 1; k2 < seed.length; k2++) {
+      if (Math.abs(pos[k1] - pos[k2]) > JOG_CM) continue
+      const moved = index.map((k, e) => (k === k2 ? e : -1)).filter((e) => e >= 0)
+      if (!moved.length) continue
+      for (const e of moved) index[e] = k1
+      const clash = spans.some((_, m) => index[m * 2] === index[m * 2 + 1])
+      const next = clash ? null : fit()
+      if (next && total(next) - best <= NEW_AXIS_GAIN) {
+        pos = next
+        best = total(next)
+      } else {
+        for (const e of moved) index[e] = k2
+      }
+    }
+  }
+  return pos
+}
+
+/** перекрытие отрезков [a1,a2] и [b1,b2] */
+const overlap = (a1: number, a2: number, b1: number, b2: number): number => Math.max(0, Math.min(a2, b2) - Math.max(a1, b1))
+
+/**
+ * Построить стены по комнатам. Подложка уже в нужном масштабе: scale — см в пикселе.
+ */
+export function reconstructFromRooms(rooms: AiRoom[], u: Underlay, options: ReconstructOptions = {}): ReconstructResult {
+  const o = { ...DEFAULT_RECONSTRUCT, ...options }
+  const skipped: string[] = []
+  const sized = rooms.filter(canRebuildFrom).map((r) => sizeRoom(r, u))
+  // комната уже полуметра — ниша или шкаф, а не комната: осей ей не хватит
+  const rects = sized.filter((r) => {
+    const ok = r.w >= 60 && r.h >= 60
+    if (!ok) skipped.push(r.spec.name)
+    return ok
+  }) as Rect[]
+  if (!rects.length) return { walls: [], rooms: [], skipped, areaFit: null }
+
+  // 1. грани → оси по картинке. Расстояние между осями = внутренний размер + перегородка
+  const t = o.interiorCm
+  const rawX = rects.flatMap((r) => [r.cx - r.w / 2 - t / 2, r.cx + r.w / 2 + t / 2])
+  const rawY = rects.flatMap((r) => [r.cy - r.h / 2 - t / 2, r.cy + r.h / 2 + t / 2])
+  const cx = cluster(rawX, o.snapCm)
+  const cy = cluster(rawY, o.snapCm)
+
+  // 2. какие стороны наружные: рядом нет комнаты. Смотрим по картинке, а не по осям:
+  //    ошибка сведения граней не должна превращать перегородку в наружную стену
+  const extra = (o.exteriorCm - o.interiorCm) / 2
+  const near = (a: number, b: number) => Math.abs(a - b) <= o.snapCm * 1.5
+  const sideIsExterior = (r: Rect, side: AiSide): boolean => {
+    const along = side === 'left' || side === 'right' ? r.h : r.w
+    const [l, rr, tp, bt] = [r.cx - r.w / 2, r.cx + r.w / 2, r.cy - r.h / 2, r.cy + r.h / 2]
+    let covered = 0
+    for (const s of rects) {
+      if (s === r) continue
+      const [sl, sr, st, sb] = [s.cx - s.w / 2, s.cx + s.w / 2, s.cy - s.h / 2, s.cy + s.h / 2]
+      if (side === 'left' && near(sr, l)) covered += overlap(tp, bt, st, sb)
+      if (side === 'right' && near(sl, rr)) covered += overlap(tp, bt, st, sb)
+      if (side === 'top' && near(sb, tp)) covered += overlap(l, rr, sl, sr)
+      if (side === 'bottom' && near(st, bt)) covered += overlap(l, rr, sl, sr)
+    }
+    return covered < along / 2
+  }
+
+  // 3. оси под размеры. Подпись весит как пять оценок с картинки
+  const specs: AxisSpec[] = rects.map((r) => ({
+    dw: r.w + t + (sideIsExterior(r, 'left') ? extra : 0) + (sideIsExterior(r, 'right') ? extra : 0),
+    dh: r.h + t + (sideIsExterior(r, 'top') ? extra : 0) + (sideIsExterior(r, 'bottom') ? extra : 0),
+    ww: r.wLabelled || r.spec.areaM2 ? 1 : 0.2,
+    wh: r.hLabelled || r.spec.areaM2 ? 1 : 0.2,
+    wExact: r.wLabelled,
+    hExact: r.hLabelled,
+  }))
+  const X = optimizeAxes(cx.index, cx.seed, rawX, specs.map((c) => ({ d: c.dw, w: c.ww, exact: c.wExact })), o)
+  const Y = optimizeAxes(cy.index, cy.seed, rawY, specs.map((c) => ({ d: c.dh, w: c.wh, exact: c.hExact })), o)
+  rects.forEach((r, k) => {
+    r.xi = cx.index[k * 2]
+    r.xj = cx.index[k * 2 + 1]
+    r.yi = cy.index[k * 2]
+    r.yj = cy.index[k * 2 + 1]
+  })
+
+  // узкая комната, у которой обе грани слиплись в одну ось, на чертёж не встанет
+  const placed = rects.filter((r) => {
+    const ok = r.xi !== r.xj && r.yi !== r.yj
+    if (!ok) skipped.push(r.spec.name)
+    return ok
+  })
+  if (!placed.length) return { walls: [], rooms: [], skipped, areaFit: null }
+
+  // 4. стены: по каждой оси — отрезки между соседними поперечными осями,
+  //    толщина по тому, сколько комнат прилегает
+  const walls: Wall[] = []
+  const line = (vertical: boolean, k: number) => {
+    const at = vertical ? X[k] : Y[k]
+    const near = placed.filter((r) => (vertical ? r.xi === k || r.xj === k : r.yi === k || r.yj === k))
+    if (!near.length) return
+    const marks = [...new Set(near.flatMap((r) => (vertical ? [Y[r.yi], Y[r.yj]] : [X[r.xi], X[r.xj]])))].sort((a, b) => a - b)
+    let run: { from: number; to: number; th: number } | null = null
+    const flush = () => {
+      if (run && run.to - run.from >= 5) {
+        walls.push(
+          vertical
+            ? { id: uid('w'), a: { x: at, y: run.from }, b: { x: at, y: run.to }, thickness: run.th }
+            : { id: uid('w'), a: { x: run.from, y: at }, b: { x: run.to, y: at }, thickness: run.th },
+        )
+      }
+      run = null
+    }
+    for (let m = 0; m < marks.length - 1; m++) {
+      const s0 = marks[m]
+      const s1 = marks[m + 1]
+      const covers = (r: Rect) => (vertical ? Y[r.yi] <= s0 + 0.5 && Y[r.yj] >= s1 - 0.5 : X[r.xi] <= s0 + 0.5 && X[r.xj] >= s1 - 0.5)
+      const before = near.some((r) => (vertical ? r.xj === k : r.yj === k) && covers(r))
+      const after = near.some((r) => (vertical ? r.xi === k : r.yi === k) && covers(r))
+      const th = before && after ? o.interiorCm : before || after ? o.exteriorCm : 0
+      if (!th) {
+        flush()
+        continue
+      }
+      if (run && run.th === th && Math.abs(run.to - s0) < 0.5) run.to = s1
+      else {
+        flush()
+        run = { from: s0, to: s1, th }
+      }
+    }
+    flush()
+  }
+  for (let k = 0; k < X.length; k++) line(true, k)
+  for (let k = 0; k < Y.length; k++) line(false, k)
+
+  // 5. комнаты по контуру и сверка площадей
+  const { rooms: built } = buildRooms({ version: 1, name: '', walls, openings: [], furniture: [], rooms: [], dims: [], settings: { grid: 10 } })
+  const out: PlacedRoom[] = []
+  const taken = new Set<number>()
+  for (const r of placed) {
+    const rect = { x1: X[r.xi], y1: Y[r.yi], x2: X[r.xj], y2: Y[r.yj] }
+    const anchor = { x: (rect.x1 + rect.x2) / 2, y: (rect.y1 + rect.y2) / 2 }
+    const idx = built.findIndex((b, i) => !taken.has(i) && pointInPoly(anchor, b.polygon))
+    if (idx >= 0) taken.add(idx)
+    out.push({ name: r.spec.name, kind: r.spec.kind, anchor, rect, wantM2: r.spec.areaM2, haveM2: idx >= 0 ? built[idx].area : undefined })
+  }
+  const checked = out.filter((r) => r.wantM2 && r.haveM2 !== undefined) as (PlacedRoom & { wantM2: number; haveM2: number })[]
+  let areaFit: AreaFit | null = null
+  if (checked.length) {
+    const errs = checked.map((r) => Math.abs(r.haveM2 - r.wantM2) / r.wantM2)
+    const off = checked
+      .map((r, i) => ({ name: r.name, wantM2: r.wantM2, haveM2: r.haveM2, err: errs[i] }))
+      .filter((r) => r.err > 0.08)
+      .sort((a, b) => b.err - a.err)
+      .map(({ name, wantM2, haveM2 }) => ({ name, wantM2, haveM2 }))
+    areaFit = { accuracy: Math.max(0, 1 - errs.reduce((a, b) => a + b, 0) / errs.length), off, samples: checked.length }
+  }
+  return { walls, rooms: out, skipped, areaFit }
+}
+
+/** Точка на стене комнаты: side — какая стена, at — доля вдоль неё */
+export function pointOnSide(rect: PlacedRoom['rect'], side: AiSide, at: number): Pt {
+  const t = Math.min(1, Math.max(0, at))
+  switch (side) {
+    case 'top':
+      return { x: rect.x1 + (rect.x2 - rect.x1) * t, y: rect.y1 }
+    case 'bottom':
+      return { x: rect.x1 + (rect.x2 - rect.x1) * t, y: rect.y2 }
+    case 'left':
+      return { x: rect.x1, y: rect.y1 + (rect.y2 - rect.y1) * t }
+    case 'right':
+      return { x: rect.x2, y: rect.y1 + (rect.y2 - rect.y1) * t }
+  }
+}

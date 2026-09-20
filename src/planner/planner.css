@@ -1405,6 +1405,7 @@
   color: var(--pl-ink-2);
   font-size: 14px;
   line-height: 1.45;
+  white-space: pre-line;
 }
 .pl-ask-options {
   display: flex;

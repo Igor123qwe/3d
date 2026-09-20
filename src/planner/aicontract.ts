@@ -20,18 +20,39 @@ export interface AiWall {
   thicknessCm: number
 }
 
+export type AiSide = 'top' | 'right' | 'bottom' | 'left'
+
 export interface AiOpening {
   kind: AiOpeningKind
   x: number
   y: number
   widthCm: number
+  /** в какой стене какой комнаты: точнее, чем точка на картинке */
+  room?: string
+  side?: AiSide
+  /** положение вдоль этой стены, 0..1 слева направо или сверху вниз */
+  at?: number
+}
+
+/** прямоугольник внутренней части комнаты, доли картинки */
+export interface AiBox {
+  x1: number
+  y1: number
+  x2: number
+  y2: number
 }
 
 export interface AiRoom {
   name: string
+  /** тип помещения, если по подписи не понять («5ж» — жилая) */
+  kind?: string
   areaM2?: number
   x: number
   y: number
+  box?: AiBox
+  /** размеры комнаты, подписанные на плане: по горизонтали и по вертикали */
+  widthCm?: number
+  depthCm?: number
 }
 
 /** размерная цепочка с плана: по ней чертёж встаёт в масштаб */
@@ -86,7 +107,16 @@ export function checkAiPlan(data: unknown): AiPlan {
     const kind = String(o.kind ?? '').toLowerCase()
     if (x === null || y === null) continue
     if (kind !== 'door' && kind !== 'window' && kind !== 'doorway') continue
-    openings.push({ kind, x, y, widthCm: inRange(o.width_cm ?? o.widthCm ?? o.width, 30, 400) ?? (kind === 'window' ? 140 : 90) })
+    const op: AiOpening = { kind, x, y, widthCm: inRange(o.width_cm ?? o.widthCm ?? o.width, 30, 400) ?? (kind === 'window' ? 140 : 90) }
+    const side = String(o.side ?? '').toLowerCase()
+    const room = typeof o.room === 'string' ? o.room.trim().slice(0, 40) : ''
+    const at = inRange(o.at, 0, 1)
+    if (room && (side === 'top' || side === 'right' || side === 'bottom' || side === 'left') && at !== null) {
+      op.room = room
+      op.side = side
+      op.at = at
+    }
+    openings.push(op)
   }
 
   const rooms: AiRoom[] = []
@@ -95,7 +125,26 @@ export function checkAiPlan(data: unknown): AiPlan {
     const x = unit(r.x), y = unit(r.y)
     const name = typeof r.name === 'string' ? r.name.trim().slice(0, 40) : ''
     if (x === null || y === null || !name) continue
-    rooms.push({ name, areaM2: inRange(r.area_m2 ?? r.areaM2 ?? r.area, 0.5, 500) ?? undefined, x, y })
+    const room: AiRoom = { name, areaM2: inRange(r.area_m2 ?? r.areaM2 ?? r.area, 0.5, 500) ?? undefined, x, y }
+    if (typeof r.kind === 'string' && r.kind.trim()) room.kind = r.kind.trim().slice(0, 30)
+    const b = (r.box ?? r.bbox ?? r.rect) as Record<string, unknown> | undefined
+    if (b && typeof b === 'object') {
+      const x1 = unit(b.x1), y1 = unit(b.y1), x2 = unit(b.x2), y2 = unit(b.y2)
+      // прямоугольник уже процента картинки — это не комната, а ошибка
+      if (x1 !== null && y1 !== null && x2 !== null && y2 !== null && x2 - x1 >= 0.01 && y2 - y1 >= 0.01) {
+        room.box = { x1, y1, x2, y2 }
+      }
+    }
+    // размеры на плане БТИ — в метрах с сотыми («3.72»); в мм — четыре цифры; просим см, но страхуемся
+    const size = (v: unknown): number | undefined => {
+      const n = inRange(v, 0.5, 5000)
+      if (n === null) return undefined
+      const cm = n < 30 ? n * 100 : n > 1500 ? n / 10 : n
+      return cm >= 50 && cm <= 3000 ? Math.round(cm) : undefined
+    }
+    room.widthCm = size(r.width_cm ?? r.widthCm ?? r.width)
+    room.depthCm = size(r.depth_cm ?? r.depthCm ?? r.depth ?? r.height_cm)
+    rooms.push(room)
   }
 
   const dimensions: AiDimension[] = []
@@ -108,7 +157,8 @@ export function checkAiPlan(data: unknown): AiPlan {
     dimensions.push({ x1, y1, x2, y2, cm })
   }
 
-  if (!walls.length) throw new Error('стен не найдено')
+  // без стен годится только ответ, по которому чертёж строится из комнат
+  if (!walls.length && !rooms.some((r) => r.box)) throw new Error('стен не найдено')
   return { walls, openings, rooms, dimensions, note: typeof d.note === 'string' ? d.note.slice(0, 500) : undefined }
 }
 

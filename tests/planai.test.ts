@@ -10,6 +10,7 @@ import {
   robustMedian,
   roundThickness,
   scaleFromDimensions,
+  scaleFromLabels,
   weldEnds,
 } from '../src/planner/planai'
 
@@ -234,5 +235,76 @@ describe('замена чертежа распознанным', () => {
     // старые размерные линии относились к прежнему чертежу
     expect(done.plan.dims).toHaveLength(0)
     expect(done.plan.underlay?.scale).toBeCloseTo(1, 2)
+  })
+})
+
+describe('чертёж заново по числам', () => {
+  // две комнаты рядом: 400 × 500 и 300 × 500 см, картинка 1000 × 800 при 1 см в пикселе
+  const rooms: AiPlan['rooms'] = [
+    { name: 'Гостиная', areaM2: 20, widthCm: 400, depthCm: 500, box: { x1: 0.1, y1: 0.15, x2: 0.5, y2: 0.775 }, x: 0.3, y: 0.46 },
+    { name: '2', kind: 'жилая', areaM2: 15, widthCm: 300, depthCm: 500, box: { x1: 0.51, y1: 0.15, x2: 0.81, y2: 0.775 }, x: 0.66, y: 0.46 },
+  ]
+
+  it('без стен от модели чертёж всё равно строится, масштаб — по размерам комнат', () => {
+    const ai: AiPlan = { walls: [], openings: [], rooms, dimensions: [] }
+    // подложка в неверном масштабе: размеры комнат его поправят
+    const r = convertAiPlan(ai, underlay(2))
+    expect(r.report.method).toBe('по размерам комнат')
+    expect(r.report.scale.source).toBe('размеры комнат')
+    expect(r.report.scale.cmPerPx).toBeCloseTo(1, 2)
+    expect(r.rooms.map((m) => m.name).sort()).toEqual(['2', 'Гостиная'])
+    expect(r.rooms.find((m) => m.name === '2')?.floor).toBe('laminate')
+    expect(r.report.areaFit?.accuracy ?? 0).toBeGreaterThan(0.97)
+    expect(r.report.roomsSkipped).toEqual([])
+    // наружный контур и одна перегородка
+    expect(r.walls.filter((w) => w.thickness === 40).length).toBeGreaterThanOrEqual(4)
+    expect(r.walls.filter((w) => w.thickness === 10)).toHaveLength(1)
+  })
+
+  it('проём по комнате и стороне садится на нужную стену', () => {
+    const ai: AiPlan = {
+      walls: [],
+      dimensions: [],
+      rooms,
+      openings: [
+        { kind: 'door', x: 0.5, y: 0.4, widthCm: 90, room: 'Гостиная', side: 'right', at: 0.5 },
+        { kind: 'window', x: 0.3, y: 0.15, widthCm: 150, room: 'Гостиная', side: 'top', at: 0.5 },
+        // без комнаты — по точке на картинке, как раньше
+        { kind: 'window', x: 0.66, y: 0.15, widthCm: 150 },
+      ],
+    }
+    const r = convertAiPlan(ai, underlay(1))
+    expect(r.openings).toHaveLength(3)
+    const wallOf = (i: number) => r.walls.find((w) => w.id === r.openings[i].wallId)!
+    // дверь — в перегородке (вертикальная тонкая стена)
+    expect(wallOf(0).thickness).toBe(10)
+    expect(wallOf(0).a.x).toBeCloseTo(wallOf(0).b.x, 5)
+    // окна — в верхней наружной стене
+    expect(wallOf(1).thickness).toBe(40)
+    expect(wallOf(1).a.y).toBeCloseTo(wallOf(1).b.y, 5)
+    expect(wallOf(2).id).toBe(wallOf(1).id)
+  })
+
+  it('масштаб по всем числам разом: цепочки и размеры комнат в одной медиане', () => {
+    const ai: AiPlan = { walls: [], openings: [], rooms, dimensions: [{ x1: 0.1, y1: 0.05, x2: 0.5, y2: 0.05, cm: 400 }] }
+    const fit = scaleFromLabels(ai, px)
+    expect(fit?.source).toBe('размеры на плане')
+    expect(fit?.samples).toBe(5)
+    expect(fit?.cmPerPx).toBeCloseTo(1, 2)
+  })
+
+  it('если по стенам замкнулось больше комнат, чем по числам, — берутся стены', () => {
+    // прямоугольник стен замыкает единственную комнату; прямоугольник-комната — ниша уже полуметра, по числам ничего
+    const ai = boxPlan({ rooms: [{ name: 'Ниша', x: 0.5, y: 0.5, box: { x1: 0.5, y1: 0.5, x2: 0.52, y2: 0.6 }, widthCm: 20, depthCm: 80 }] })
+    const r = convertAiPlan(ai, underlay(1))
+    expect(r.report.method).toBe('по линиям стен')
+    expect(r.walls).toHaveLength(4)
+  })
+
+  it('пол по типу комнаты, когда название — номер', () => {
+    expect(floorFor('6', 'санузел')).toBe('tile')
+    expect(floorFor('5ж', 'жилая')).toBe('laminate')
+    expect(floorFor('3', 'кладовая')).toBe('plain')
+    expect(floorFor('Кухня')).toBe('tile')
   })
 })

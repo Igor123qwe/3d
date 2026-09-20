@@ -11,12 +11,16 @@
 //    выравниваются по осям, близкие концы сводятся в один узел, толщина
 //    округляется до стандартной. Без этого стены не смыкаются и комнаты не
 //    находятся.
+// 3. Если модель прочитала комнаты с размерами, чертёж строится заново по
+//    числам (reconstruct.ts), а стены с картинки остаются запасным путём:
+//    берётся тот вариант, где замкнулось больше комнат.
 import type { AiDimension, AiPlan } from './aicontract'
 import type { Opening, Plan, Pt, RoomMeta, Underlay, Wall } from './types'
 import { uid } from './types'
 import { MIN_WALL_LENGTH, WALL_THICKNESSES } from './ops'
 import { buildRooms } from './rooms'
 import { closestOnSeg, dist, pointInPoly } from './geometry'
+import { canRebuildFrom, pointOnSide, reconstructFromRooms, scaleSamplesFromRooms, type AreaFit } from './reconstruct'
 
 export interface ConvertOptions {
   /** не трогать масштаб: пользователь уже откалибровал подложку руками */
@@ -29,21 +33,31 @@ export interface ConvertOptions {
 
 export const DEFAULT_CONVERT: Required<ConvertOptions> = { keepScale: false, weldCm: 12, axisTolDeg: 6 }
 
+export type ScaleSource = 'размерные цепочки' | 'размеры комнат' | 'размеры на плане' | 'площади комнат' | 'прежняя калибровка'
+
 export interface ScaleFit {
   /** сантиметров в пикселе картинки */
   cmPerPx: number
-  source: 'размерные цепочки' | 'площади комнат' | 'прежняя калибровка'
+  source: ScaleSource
   /** по скольким подписям посчитано */
   samples: number
 }
 
+export type ConvertMethod = 'по размерам комнат' | 'по линиям стен'
+
 export interface ConvertReport {
   scale: ScaleFit
+  /** как построен чертёж: заново по числам или по стенам с картинки */
+  method: ConvertMethod
   walls: number
   openings: number
   /** проёмы, которым не нашлось стены */
   openingsDropped: number
   rooms: number
+  /** сверка площадей с подписанными, когда чертёж построен по числам */
+  areaFit: AreaFit | null
+  /** комнаты, которые не удалось поставить по числам */
+  roomsSkipped: string[]
   note?: string
 }
 
@@ -68,8 +82,7 @@ export function robustMedian(values: number[]): number {
   return near[Math.floor(near.length / 2)]
 }
 
-/** Сколько сантиметров в пикселе по размерным цепочкам */
-export function scaleFromDimensions(dims: AiDimension[], px: { w: number; h: number }): ScaleFit | null {
+function dimensionSamples(dims: AiDimension[], px: { w: number; h: number }): number[] {
   const values: number[] = []
   for (const d of dims) {
     const len = pxLen(d, px)
@@ -77,8 +90,28 @@ export function scaleFromDimensions(dims: AiDimension[], px: { w: number; h: num
     if (len < 12) continue
     values.push(d.cm / len)
   }
+  return values
+}
+
+/** Сколько сантиметров в пикселе по размерным цепочкам */
+export function scaleFromDimensions(dims: AiDimension[], px: { w: number; h: number }): ScaleFit | null {
+  const values = dimensionSamples(dims, px)
   if (values.length < 2) return null
   return { cmPerPx: robustMedian(values), source: 'размерные цепочки', samples: values.length }
+}
+
+/**
+ * Масштаб по всем числам с плана разом: размерные цепочки и размеры комнат —
+ * одни и те же подписи, прочитанные двумя способами. Вместе оценок больше,
+ * и одна ошибка чтения тонет в медиане.
+ */
+export function scaleFromLabels(ai: AiPlan, px: { w: number; h: number }): ScaleFit | null {
+  const dims = dimensionSamples(ai.dimensions, px)
+  const rooms = scaleSamplesFromRooms(ai.rooms, px)
+  const all = [...dims, ...rooms]
+  if (all.length < 2) return null
+  const source: ScaleSource = dims.length && rooms.length ? 'размеры на плане' : dims.length ? 'размерные цепочки' : 'размеры комнат'
+  return { cmPerPx: robustMedian(all), source, samples: all.length }
 }
 
 /**
@@ -179,6 +212,16 @@ export interface ConvertResult {
   report: ConvertReport
 }
 
+/** сколько подписанных комнат попало внутрь замкнутых контуров */
+function closedRooms(walls: Wall[], ai: AiPlan, u: Underlay): number {
+  if (!walls.length || !ai.rooms.length) return 0
+  const { rooms } = buildRooms(emptyPlan(walls))
+  return ai.rooms.filter((r) => {
+    const p = toPlanPt(u, { x: r.x * u.px.w, y: r.y * u.px.h })
+    return rooms.some((room) => pointInPoly(p, room.polygon))
+  }).length
+}
+
 /** Собрать чертёж из ответа модели */
 export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOptions = {}): ConvertResult {
   const o = { ...DEFAULT_CONVERT, ...options }
@@ -187,15 +230,15 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
   // 1. масштаб
   let fit: ScaleFit = { cmPerPx: underlay.scale, source: 'прежняя калибровка', samples: 0 }
   if (!o.keepScale) {
-    const byDims = scaleFromDimensions(ai.dimensions, px)
-    if (byDims) fit = byDims
+    const byLabels = scaleFromLabels(ai, px)
+    if (byLabels) fit = byLabels
   }
   let u: Underlay = { ...underlay, scale: fit.cmPerPx }
 
-  // 2. стены при выбранном масштабе
+  // 2. стены по линиям с картинки при выбранном масштабе
   let walls = buildWalls(ai, u, o)
 
-  // 3. если размерных цепочек не было, площади комнат уточняют масштаб
+  // 3. если чисел на плане не было, площади комнат уточняют масштаб
   if (!o.keepScale && fit.source === 'прежняя калибровка') {
     const byAreas = scaleFromAreas(walls, ai, u, u.scale)
     if (byAreas) {
@@ -205,11 +248,24 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
     }
   }
 
-  // 4. проёмы садятся на ближайшую стену
+  // 4. чертёж заново по числам, если модель дала комнаты прямоугольниками;
+  //    побеждает вариант, где замкнулось больше комнат, при равенстве — числа
+  const rebuilt = ai.rooms.some(canRebuildFrom) ? reconstructFromRooms(ai.rooms, u) : null
+  const closedByNumbers = rebuilt ? rebuilt.rooms.filter((r) => r.haveM2 !== undefined).length : 0
+  const byNumbers = !!rebuilt && closedByNumbers > 0 && closedByNumbers >= closedRooms(walls, ai, u)
+  const method: ConvertMethod = byNumbers ? 'по размерам комнат' : 'по линиям стен'
+  if (byNumbers && rebuilt) walls = rebuilt.walls
+
+  // 5. проёмы садятся на ближайшую стену; по числам — на нужную стену нужной комнаты
   const openings: Opening[] = []
   let dropped = 0
   for (const op of ai.openings) {
-    const p = toPlanPt(u, { x: op.x * px.w, y: op.y * px.h })
+    let p: Pt | null = null
+    if (byNumbers && rebuilt && op.room && op.side && op.at !== undefined) {
+      const room = rebuilt.rooms.find((r) => r.name === op.room)
+      if (room) p = pointOnSide(room.rect, op.side, op.at)
+    }
+    if (!p) p = toPlanPt(u, { x: op.x * px.w, y: op.y * px.h })
     const hit = nearestWall(walls, p)
     // проём дальше полуметра от любой стены — это ошибка распознавания
     if (!hit || hit.d > 50) {
@@ -227,17 +283,24 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
     openings.push({ id: uid('o'), kind: op.kind, wallId: hit.wall.id, t, width, hinge: 'a', side: 1 })
   }
 
-  // 5. названия комнат по точкам внутри
-  const probe = emptyPlan(walls)
-  const { rooms: built } = buildRooms(probe)
+  // 6. названия комнат
   const metas: RoomMeta[] = []
-  for (const r of ai.rooms) {
-    const p = toPlanPt(u, { x: r.x * px.w, y: r.y * px.h })
-    const room = built.find((b) => pointInPoly(p, b.polygon))
-    if (!room) continue
-    // на одну комнату одна подпись
-    if (metas.some((m) => pointInPoly(m.anchor, room.polygon))) continue
-    metas.push({ id: uid('rm'), anchor: p, name: r.name, floor: floorFor(r.name) })
+  if (byNumbers && rebuilt) {
+    for (const r of rebuilt.rooms) {
+      if (r.haveM2 === undefined) continue
+      metas.push({ id: uid('rm'), anchor: r.anchor, name: r.name, floor: floorFor(r.name, r.kind) })
+    }
+  } else {
+    const probe = emptyPlan(walls)
+    const { rooms: built } = buildRooms(probe)
+    for (const r of ai.rooms) {
+      const p = toPlanPt(u, { x: r.x * px.w, y: r.y * px.h })
+      const room = built.find((b) => pointInPoly(p, b.polygon))
+      if (!room) continue
+      // на одну комнату одна подпись
+      if (metas.some((m) => pointInPoly(m.anchor, room.polygon))) continue
+      metas.push({ id: uid('rm'), anchor: p, name: r.name, floor: floorFor(r.name, r.kind) })
+    }
   }
 
   return {
@@ -247,10 +310,13 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
     underlay: u,
     report: {
       scale: fit,
+      method,
       walls: walls.length,
       openings: openings.length,
       openingsDropped: dropped,
       rooms: metas.length,
+      areaFit: byNumbers && rebuilt ? rebuilt.areaFit : null,
+      roomsSkipped: byNumbers && rebuilt ? [...rebuilt.skipped, ...rebuilt.rooms.filter((r) => r.haveM2 === undefined).map((r) => r.name)] : [],
       note: ai.note,
     },
   }
@@ -278,14 +344,15 @@ function nearestWall(walls: Wall[], p: Pt): { wall: Wall; t: number; d: number }
   return best
 }
 
-/** Пол по названию комнаты: плитка в мокрых зонах, ламинат в жилых */
-export function floorFor(name: string): RoomMeta['floor'] {
-  const n = name.toLowerCase()
+/** Пол по названию комнаты (или её типу, если название — номер «5ж»): плитка в мокрых зонах, ламинат в жилых */
+export function floorFor(name: string, kind?: string): RoomMeta['floor'] {
+  const n = `${kind ?? ''} ${name}`.toLowerCase()
   if (/ванн|санузел|туалет|душ|уборн/.test(n)) return 'tile'
   if (/кухн/.test(n)) return 'tile'
   if (/лодж|балкон|тамбур/.test(n)) return 'concrete'
   if (/коридор|прихож|холл/.test(n)) return 'tile'
-  if (/гостин|зал|комнат|спальн|кабинет|детск/.test(n)) return 'laminate'
+  if (/кладов|гардероб/.test(n)) return 'plain'
+  if (/гостин|зал|комнат|спальн|кабинет|детск|жил/.test(n)) return 'laminate'
   return 'laminate'
 }
 

@@ -778,25 +778,41 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         return
       }
       const r = result.report
-      const ok = window.confirm(
-        `Распознано: стен ${r.walls}, проёмов ${r.openings}, комнат ${r.rooms}.\n` +
-          `Масштаб — ${r.scale.source} (${r.scale.cmPerPx.toFixed(2)} см в пикселе).\n\n` +
-          'Заменить текущий чертёж распознанным? Мебель внутри новых комнат останется на месте.',
-      )
-      if (!ok) return
-      let lost = 0
-      history.apply((prev) => {
-        const done = applyAiPlan(prev, result)
-        lost = done.furnitureDropped
-        return done.plan
+      const lines = [`Стен ${r.walls}, проёмов ${r.openings}, комнат ${r.rooms}. Масштаб — ${r.scale.source} (${r.scale.cmPerPx.toFixed(2)} см в пикселе).`]
+      if (r.method === 'по размерам комнат') {
+        lines.push(
+          r.areaFit
+            ? `Чертёж построен заново по размерам с плана: площади комнат сходятся на ${Math.round(r.areaFit.accuracy * 100)} %.`
+            : 'Чертёж построен заново по прямоугольникам комнат; площадей на плане нет, сверить не с чем.',
+        )
+        for (const off of r.areaFit?.off.slice(0, 4) ?? []) lines.push(`• ${off.name}: на плане ${fmtNum(off.wantM2)} м², получилось ${fmtNum(off.haveM2)} м²`)
+        if (r.roomsSkipped.length) lines.push(`Не удалось поставить: ${r.roomsSkipped.join(', ')}.`)
+      } else {
+        lines.push('Чертёж собран по линиям стен с картинки: размеров комнат модель не прочитала, поэтому точность ниже — проверьте масштаб.')
+      }
+      if (r.note) lines.push(`Модель: ${r.note}`)
+      lines.push('Мебель внутри новых комнат останется на месте.')
+      setAsk({
+        title: 'Распознано',
+        text: lines.join('\n'),
+        options: [{ key: 'apply', label: 'Заменить чертёж распознанным', hint: 'прежний вернёт Ctrl+Z', icon: 'check', primary: true }],
+        onPick: () => {
+          setAsk(null)
+          let lost = 0
+          history.apply((prev) => {
+            const done = applyAiPlan(prev, result)
+            lost = done.furnitureDropped
+            return done.plan
+          })
+          if (result.report.scale.source !== 'прежняя калибровка') setScaleKnown(true)
+          setSelection(null)
+          setTimeout(() => canvasRef.current?.fit(), 50)
+          const dropped = r.openingsDropped ? `, отброшено проёмов ${r.openingsDropped}` : ''
+          const moved = lost ? `. Убрано предметов вне комнат: ${lost}` : ''
+          setToast(`Готово: стен ${r.walls}, проёмов ${r.openings}, комнат ${r.rooms}${dropped}${moved}. Проверьте и поправьте`)
+        },
       })
-      if (result.report.scale.source !== 'прежняя калибровка') setScaleKnown(true)
-      setSelection(null)
       noteCost('план', cost)
-      setTimeout(() => canvasRef.current?.fit(), 50)
-      const dropped = r.openingsDropped ? `, отброшено проёмов ${r.openingsDropped}` : ''
-      const moved = lost ? `. Убрано предметов вне комнат: ${lost}` : ''
-      setToast(`Готово: стен ${r.walls}, проёмов ${r.openings}, комнат ${r.rooms}${dropped}${moved}. Проверьте и поправьте`)
     } catch (e) {
       setToast(`Распознать не вышло: ${(e as Error).message}`)
     } finally {
@@ -1270,7 +1286,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                     <button className="pl-btn primary" onClick={() => void recognizeWithAi()} disabled={!!aiBusy}>
                       <Icon name="sparkles" size={18} /> {aiBusy === 'Читаю план…' ? 'Читаю план…' : 'Распознать с ИИ'}
                     </button>
-                    <span className="pl-note">Читает стены, двери, окна, названия комнат и размеры. Масштаб встанет по размерам с плана.</span>
+                    <span className="pl-note">Читает размеры и площади комнат, двери и окна — и строит чертёж заново по числам с плана. Масштаб встанет сам.</span>
                     <button className="pl-btn ghost small" onClick={detectWallsFromImage} disabled={tracing}>
                       {tracing ? 'Обвожу…' : 'Или обвести линии без ИИ'}
                     </button>
@@ -1280,7 +1296,10 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                     <button className="pl-btn primary" onClick={detectWallsFromImage} disabled={tracing}>
                       <Icon name="wall" size={18} /> {tracing ? 'Обвожу…' : 'Обвести стены по линиям'}
                     </button>
-                    <span className="pl-note">Или нарисуйте стены поверх картинки инструментами слева: «Комната», «Стена».</span>
+                    <span className="pl-note">
+                      Обводка — грубый черновик: цифры на плане она не читает, а выноски и штриховку принимает за стены. Точнее — «Распознать с ИИ»: чертёж строится
+                      заново по размерам с плана. Для этого нужен ключ ROUTERAI_API_KEY в .env (см. README). Или нарисуйте стены поверх картинки: «Комната», «Стена».
+                    </span>
                   </>
                 )}
               </li>
