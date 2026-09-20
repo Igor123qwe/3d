@@ -98,7 +98,7 @@ export interface CatalogItem {
   model?: ModelRef
 }
 
-const SEATS = ['chair', 'stool', 'office-chair', 'bar-stool', 'bench']
+const SEATS = ['chair', 'office-chair', 'bar-stool', 'bench', 'hall-bench']
 
 export const CATALOG: CatalogItem[] = [
   // ---------- Гостиная ----------
