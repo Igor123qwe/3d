@@ -22,6 +22,8 @@
   },
   "include": [
     "src",
-    "tests"
+    "tests",
+    "api",
+    "tools"
   ]
 }

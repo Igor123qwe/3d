@@ -1,8 +1,9 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { apiDev } from './tools/vite-api'
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), apiDev()],
   server: {
     port: 5173,
   },

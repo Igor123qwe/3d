@@ -3,5 +3,10 @@
   "framework": "vite",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
-  "rewrites": [{ "source": "/planner", "destination": "/planner.html" }]
+  "rewrites": [
+    {
+      "source": "/planner",
+      "destination": "/planner.html"
+    }
+  ]
 }

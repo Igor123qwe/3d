@@ -51,6 +51,8 @@ export interface Furniture {
   h?: number
   flip?: boolean
   label?: string
+  /** почему предмет стоит именно тут — пояснение от расстановщика */
+  note?: string
   color?: string
   model?: ModelRef
   /** электрическая точка: вид, высота установки и причина размещения */

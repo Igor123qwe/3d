@@ -535,6 +535,27 @@
   color: #6b7280;
   font-size: 11.5px;
 }
+.pl-spec td.pl-spec-models {
+  color: #6b7280;
+  font-size: 11px;
+  text-align: right;
+  word-break: break-word;
+}
+
+/* строка комнаты: название с площадью и кнопка расстановки рядом */
+.pl-room-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.pl-room-row .pl-list-item {
+  flex: 1;
+  min-width: 0;
+}
+.pl-room-row .pl-room-ai {
+  padding: 4px 8px;
+  line-height: 1;
+}
 
 /* ---------- статус ---------- */
 .pl-status {

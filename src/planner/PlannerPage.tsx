@@ -34,6 +34,9 @@ import { getTelegramWebApp } from '../telegram'
 import { guessType, modelRefFromAsset, modelRefFromUrl, phAssets, phCategories, phDimsCm, phInfo, phPage, type PhAsset } from './polyhaven'
 import { decodePlan, parseHash, planShareUrl } from './share'
 import { DEFAULT_TRACE, calibrate, grayscaleOf, loadUnderlayImage, makeUnderlay, tracePlan, type TraceOptions } from './underlay'
+import { aiStatus, askLayout, lookupProductViaServer, recognizePlan, type AiStatus } from './ai'
+import { applyAiPlan, convertAiPlan } from './planai'
+import { applyLayout, catalogForRoom, layoutSummary, vetLayout } from './autolayout'
 import {
   DEFAULT_AUTO,
   ELECTRIC_NAMES,
@@ -207,6 +210,13 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const [customModelUrl, setCustomModelUrl] = useState('')
   const [trace, setTrace] = useState<TraceOptions>(DEFAULT_TRACE)
   const [tracing, setTracing] = useState(false)
+  /** масштаб подложки задан руками — распознавание его не переопределяет */
+  const [calibrated, setCalibrated] = useState(false)
+  // состояние ИИ: приходит с сервера, потому что ключ живёт только там
+  const [ai, setAi] = useState<AiStatus>({ enabled: false, tasks: [], spentToday: null })
+  const [aiBusy, setAiBusy] = useState('')
+  /** что и сколько стоил последний вызов — чтобы расходы не были сюрпризом */
+  const [aiLast, setAiLast] = useState('')
   const [auto, setAuto] = useState<AutoElectricOptions>(DEFAULT_AUTO)
   const [productUrl, setProductUrl] = useState('')
   const [product, setProduct] = useState<ProductInfo | null>(null)
@@ -438,6 +448,15 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     setProductState('loading')
     setProductError('')
     try {
+      // Сервер читает страницу напрямую — без публичных читалок и их капризов,
+      // а чего не нашлось в разметке, добирает дешёвой моделью.
+      if (ai.enabled) {
+        const res = await lookupProductViaServer(url)
+        setProduct(res.product)
+        setProductState('idle')
+        if (res.ai && !res.ai.error) noteCost('товар', res.ai)
+        return
+      }
       const info = await fetchProduct(url)
       setProduct(info)
       setProductState('idle')
@@ -540,6 +559,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       const b = planBounds(plan)
       const center = b ? { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 } : { x: 0, y: 0 }
       history.apply((p) => setUnderlay(p, makeUnderlay(img, center)))
+      setCalibrated(false)
       setLayers((l) => ({ ...l, underlay: true }))
       setPanel('props')
       setSelection(null)
@@ -561,6 +581,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       return
     }
     history.apply((p) => (p.underlay ? { ...p, underlay: calibrate(p.underlay, a, b, cm) } : p))
+    setCalibrated(true)
     setTool('select')
     setToast(`Масштаб задан: ${(cm / 100).toFixed(2)} м на показанном отрезке`)
   }
@@ -590,6 +611,97 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       setToast((err as Error).message)
     } finally {
       setTracing(false)
+    }
+  }
+
+  // Состояние ИИ спрашиваем один раз: серверная часть может отсутствовать вовсе
+  // (например, на GitHub Pages), и тогда все кнопки ИИ просто не показываются.
+  useEffect(() => {
+    let alive = true
+    void aiStatus().then((st) => {
+      if (alive) setAi(st)
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  const noteCost = (what: string, cost: { model: string; costRub: number }) => {
+    const price = cost.costRub > 0 ? `, ${cost.costRub.toFixed(2)} ₽` : ''
+    setAiLast(`${what}: ${cost.model}${price}`)
+  }
+
+  /** Прочитать подложку моделью: стены, проёмы, названия комнат и масштаб разом */
+  const recognizeWithAi = async () => {
+    const u = plan.underlay
+    if (!u || aiBusy) return
+    setAiBusy('Читаю план…')
+    try {
+      const { plan: read, ai: cost } = await recognizePlan(u.src)
+      // масштаб не трогаем, если пользователь уже откалибровал подложку руками
+      const result = convertAiPlan(read, u, { keepScale: calibrated })
+      if (!result.walls.length) {
+        setToast('Модель не нашла стен на картинке')
+        return
+      }
+      const r = result.report
+      const ok = window.confirm(
+        `Распознано: стен ${r.walls}, проёмов ${r.openings}, комнат ${r.rooms}.\n` +
+          `Масштаб — ${r.scale.source} (${r.scale.cmPerPx.toFixed(2)} см в пикселе).\n\n` +
+          'Заменить текущий чертёж распознанным? Мебель внутри новых комнат останется на месте.',
+      )
+      if (!ok) return
+      let lost = 0
+      history.apply((prev) => {
+        const done = applyAiPlan(prev, result)
+        lost = done.furnitureDropped
+        return done.plan
+      })
+      setSelection(null)
+      noteCost('план', cost)
+      setTimeout(() => canvasRef.current?.fit(), 50)
+      const dropped = r.openingsDropped ? `, отброшено проёмов ${r.openingsDropped}` : ''
+      const moved = lost ? `. Убрано предметов вне комнат: ${lost}` : ''
+      setToast(`Готово: стен ${r.walls}, проёмов ${r.openings}, комнат ${r.rooms}${dropped}${moved}. Проверьте и поправьте`)
+    } catch (e) {
+      setToast(`Распознать не вышло: ${(e as Error).message}`)
+    } finally {
+      setAiBusy('')
+    }
+  }
+
+  /** Расставить мебель в комнате руками дизайнера, но проверить геометрией */
+  const runAiLayout = async (roomId: string) => {
+    const room = rooms.find((r) => r.meta.id === roomId)
+    if (!room || aiBusy) return
+    setAiBusy(`Расставляю: ${room.meta.name}…`)
+    try {
+      const openings = plan.openings.flatMap((op) => {
+        const wall = plan.walls.find((w) => w.id === op.wallId)
+        if (!wall) return []
+        const c = lerp(wall.a, wall.b, op.t)
+        return [{ kind: op.kind, x: c.x, y: c.y, width: op.width }]
+      })
+      const { items, ai: cost } = await askLayout({
+        polygon: room.polygon.map((p) => ({ x: p.x, y: p.y })),
+        openings,
+        room: room.meta.name,
+        areaM2: room.area,
+        catalog: catalogForRoom(room.meta.name, CATALOG),
+      })
+      const checks = vetLayout(items, room, plan)
+      const accepted = checks.filter((c) => c.ok).length
+      if (!accepted) {
+        setToast(`Ничего не подошло. ${layoutSummary(checks)}`)
+        return
+      }
+      history.apply((prev) => applyLayout(prev, checks))
+      noteCost('расстановка', cost)
+      setToast(`${room.meta.name}: ${layoutSummary(checks)}`)
+    } catch (e) {
+      setToast(`Расставить не вышло: ${(e as Error).message}`)
+    } finally {
+      setAiBusy('')
     }
   }
 
@@ -757,6 +869,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
               ⚡ {ELECTRIC_NAMES[f.electric.kind]}, высота {f.electric.height} см. Причина: {f.electric.why}.
             </div>
           )}
+          {f.note && <div className="pl-hint-box">✨ {f.note}</div>}
           {cat?.hint && <div className="pl-hint-box">💡 {cat.hint}</div>}
           <div className="pl-block">
             <div className="pl-props-title">3D-модель</div>
@@ -1027,9 +1140,22 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                 📏 Калибровать
               </button>
               <button className="pl-btn" onClick={detectWallsFromImage} disabled={tracing}>
-                {tracing ? 'Распознаю…' : '✨ Распознать стены'}
+                {tracing ? 'Распознаю…' : 'Обвести линии'}
               </button>
             </div>
+            {ai.enabled && (
+              <>
+                <div className="pl-row">
+                  <button className="pl-btn active" onClick={() => void recognizeWithAi()} disabled={!!aiBusy}>
+                    {aiBusy === 'Читаю план…' ? 'Читаю план…' : '✨ Распознать с ИИ'}
+                  </button>
+                </div>
+                <div className="pl-note">
+                  ИИ читает и подписи: названия комнат, площади и размерные цепочки. По ним масштаб ставится сам —
+                  калибровать вручную не нужно.
+                </div>
+              </>
+            )}
             <label className="pl-field pl-field-col">
               <span>Прозрачность</span>
               <input
@@ -1083,11 +1209,29 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         {rooms.length > 0 && (
           <div className="pl-block">
             {rooms.map((r) => (
-              <button key={r.meta.id} className="pl-list-item" onClick={() => focusIssueTarget({ kind: 'room', id: r.meta.id })}>
-                <span>{r.meta.name}</span>
-                <b>{fmtArea(r.area)}</b>
-              </button>
+              <div key={r.meta.id} className="pl-room-row">
+                <button className="pl-list-item" onClick={() => focusIssueTarget({ kind: 'room', id: r.meta.id })}>
+                  <span>{r.meta.name}</span>
+                  <b>{fmtArea(r.area)}</b>
+                </button>
+                {ai.enabled && (
+                  <button
+                    className="pl-btn pl-room-ai"
+                    title={`Расставить мебель: ${r.meta.name}`}
+                    onClick={() => void runAiLayout(r.meta.id)}
+                    disabled={!!aiBusy}
+                  >
+                    ✨
+                  </button>
+                )}
+              </div>
             ))}
+            {ai.enabled && (
+              <div className="pl-note">
+                «✨» расставит мебель в комнате по правилам эргономики. Всё, что не помещается, перекрывает дверь или
+                наезжает на соседний предмет, отбрасывается — в план попадает только проверенное.
+              </div>
+            )}
           </div>
         )}
         <div className="pl-block">
@@ -1386,6 +1530,37 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
 
   const renderHelp = () => (
     <div className="pl-help">
+      <div className="pl-props-title">Помощь ИИ</div>
+      {ai.enabled ? (
+        <>
+          <div className="pl-note">
+            Под каждую задачу — своя модель: на дешёвую работу дешёвая, дорогая включается, только если дешёвая не
+            справилась. Ключ хранится на сервере и в браузер не попадает.
+          </div>
+          <table className="pl-spec">
+            <tbody>
+              {ai.tasks.map((t) => (
+                <tr key={t.task}>
+                  <td>{t.about}</td>
+                  <td className="pl-spec-models">{t.models.join(' → ')}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {ai.spentToday && (
+            <div className="pl-note">
+              Потрачено за сутки: {ai.spentToday.rub.toFixed(2)} ₽ за {ai.spentToday.calls} вызовов
+              {ai.spentToday.limitRub > 0 ? ` из лимита ${ai.spentToday.limitRub} ₽` : ''}.
+            </div>
+          )}
+          {aiLast && <div className="pl-note">Последний вызов — {aiLast}.</div>}
+        </>
+      ) : (
+        <div className="pl-note">
+          ИИ не подключён, и всё работает без него: стены обводятся по линиям картинки, товар читается публичными
+          читалками, мебель ставится вручную. Чтобы включить, добавьте на сервере ключ ROUTERAI_API_KEY.
+        </div>
+      )}
       <div className="pl-props-title">Правила дизайнеров</div>
       <ul className="pl-rules">
         <li><b>Проходы.</b> Основные — 90–100 см, второстепенные — 60–70 см. Меньше 60 см — уже не проход.</li>
@@ -1624,7 +1799,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       </aside>
 
       <footer className="pl-status">
-        <span className="pl-status-hint">{hint}</span>
+        <span className="pl-status-hint">{aiBusy ? `✨ ${aiBusy}` : hint}</span>
         <span className="pl-status-stats">
           {fmtArea(totalArea)} · {rooms.length} {rooms.length === 1 ? 'комната' : rooms.length >= 2 && rooms.length <= 4 ? 'комнаты' : 'комнат'} · сетка {fmtNum(plan.settings.grid)} см
         </span>

@@ -16,8 +16,8 @@ export interface ProductInfo {
   price?: number
   currency?: string
   dims?: ProductDims
-  /** что удалось вытащить автоматически — показываем пользователю */
-  source: 'разметка страницы' | 'текст страницы' | 'ничего не найдено'
+  /** откуда взялись данные — показываем пользователю: разметка, текст, ИИ или их сочетание */
+  source: string
 }
 
 const CM: Record<string, number> = { мм: 0.1, см: 1, м: 100, mm: 0.1, cm: 1, m: 100 }
@@ -82,7 +82,7 @@ const decode = (s: string): string =>
     .replace(/&gt;/g, '>')
     .trim()
 
-const stripTags = (html: string): string =>
+export const stripTags = (html: string): string =>
   decode(
     html
       .replace(/<script[\s\S]*?<\/script>/gi, ' ')
