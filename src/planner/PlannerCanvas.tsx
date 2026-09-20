@@ -80,6 +80,12 @@ export interface CanvasProps {
   photos?: Record<string, string>
   /** пользователь показал отрезок известной длины на подложке */
   onCalibrate?: (a: Pt, b: Pt) => void
+  /** линии, найденные на картинке подложки: магнит при обводке */
+  imageLines?: Guide[]
+  /** клик внутри комнаты на картинке */
+  onRoomPick?: (p: Pt) => void
+  /** четыре угла наружных стен на фото */
+  onCorners?: (pts: Pt[]) => void
 }
 
 type Drag =
@@ -105,7 +111,7 @@ const isEditable = (t: EventTarget | null) => {
 }
 
 export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) => {
-  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view, onViewChange, onHint, photos, onCalibrate } = props
+  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view, onViewChange, onHint, photos, onCalibrate, imageLines, onRoomPick, onCorners } = props
   const svgRef = useRef<SVGSVGElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({ w: 800, h: 600 })
@@ -116,6 +122,8 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   const [dimStart, setDimStart] = useState<Pt | null>(null)
   const [measure, setMeasure] = useState<{ a: Pt; b: Pt; live: boolean } | null>(null)
   const [calibA, setCalibA] = useState<Pt | null>(null)
+  const [cornerPts, setCornerPts] = useState<Pt[]>([])
+  useEffect(() => setCornerPts([]), [tool])
   const [hover, setHover] = useState<Selection>(null)
   const [ghost, setGhost] = useState<{ x: number; y: number; rot: number } | null>(null)
   const [ghostRot, setGhostRot] = useState(0)
@@ -263,9 +271,15 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           ? 'Клик — вторая точка известного размера, потом введите его длину'
           : 'Покажите на подложке отрезок с известным размером: клик — первая точка'
         break
+      case 'roomPick':
+        text = 'Кликните внутри комнаты на картинке — стены вокруг неё появятся сами. Esc — выйти'
+        break
+      case 'corners':
+        text = `Угол ${cornerPts.length + 1} из 4: кликайте по углам наружных стен на фото в любом порядке. Esc — сначала`
+        break
     }
     onHint(text)
-  }, [tool, selection, draft.length, placing, dimStart, measure?.live, calibA, onHint])
+  }, [tool, selection, draft.length, placing, dimStart, measure?.live, calibA, cornerPts.length, onHint])
 
   // ---------- вспомогательные ----------
   const handlePositions = (f: Furniture) => {
@@ -318,7 +332,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       switch (tool) {
         case 'wall': {
           const last = draftRef.current[draftRef.current.length - 1] ?? null
-          const s = snapWallPoint(raw, p.walls, { grid: g, tol, ortho, last })
+          const s = snapWallPoint(raw, p.walls, { grid: g, tol, ortho, last, lines: imageLines })
           setCursor({ p: s.p, kind: s.kind })
           setGuides(s.guides)
           break
@@ -327,12 +341,18 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         case 'dimension':
         case 'measure':
         case 'calibrate': {
-          const s = snapWallPoint(raw, p.walls, { grid: g, tol, ortho: false })
+          const s = snapWallPoint(raw, p.walls, { grid: g, tol, ortho: false, lines: imageLines })
           setCursor({ p: s.p, kind: s.kind })
           setGuides(s.guides)
           if (tool === 'measure') setMeasure((m) => (m && m.live ? { ...m, b: s.p } : m))
           break
         }
+        case 'roomPick':
+        case 'corners':
+          // по картинке кликают как есть: привязки к сетке и стенам тут только мешают
+          setCursor({ p: raw, kind: 'free' })
+          setGuides([])
+          break
         case 'door':
         case 'window':
         case 'doorway': {
@@ -362,7 +382,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         case 'wall': {
           const d = draftRef.current
           const last = d[d.length - 1] ?? null
-          const s = snapWallPoint(raw, p.walls, { grid: g, tol, ortho, last })
+          const s = snapWallPoint(raw, p.walls, { grid: g, tol, ortho, last, lines: imageLines })
           if (!last) {
             setDraft([s.p])
             return
@@ -409,7 +429,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           return
         }
         case 'dimension': {
-          const s = snapWallPoint(raw, p.walls, { grid: g, tol, ortho: false })
+          const s = snapWallPoint(raw, p.walls, { grid: g, tol, ortho: false, lines: imageLines })
           if (!dimStart) setDimStart(s.p)
           else {
             const a = dimStart
@@ -419,7 +439,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           return
         }
         case 'measure': {
-          const s = snapWallPoint(raw, p.walls, { grid: g, tol, ortho: false })
+          const s = snapWallPoint(raw, p.walls, { grid: g, tol, ortho: false, lines: imageLines })
           setMeasure((m) => (!m || !m.live ? { a: s.p, b: s.p, live: true } : { ...m, b: s.p, live: false }))
           return
         }
@@ -431,9 +451,20 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           }
           return
         }
+        case 'roomPick':
+          onRoomPick?.(raw)
+          return
+        case 'corners': {
+          const next = [...cornerPts, raw]
+          if (next.length >= 4) {
+            setCornerPts([])
+            onCorners?.(next)
+          } else setCornerPts(next)
+          return
+        }
       }
     },
-    [tool, tol, ortho, wallThickness, history, rooms, placing, ghostRot, dimStart, calibA, onCalibrate, onSelect, onToolChange, onHint, finishDraft],
+    [tool, tol, ortho, wallThickness, history, rooms, placing, ghostRot, dimStart, calibA, cornerPts, onCalibrate, onRoomPick, onCorners, onSelect, onToolChange, onHint, finishDraft, imageLines],
   )
 
   // ---------- указатель ----------
@@ -462,7 +493,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       return
     }
     if (tool === 'room') {
-      const s = snapWallPoint(raw, plan.walls, { grid, tol, ortho: false })
+      const s = snapWallPoint(raw, plan.walls, { grid, tol, ortho: false, lines: imageLines })
       drag.current = { kind: 'room', a: s.p }
       setRoomDraft({ a: s.p, b: s.p })
       return
@@ -576,7 +607,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         return
       }
       case 'room': {
-        const s = snapWallPoint(raw, plan.walls, { grid, tol, ortho: false })
+        const s = snapWallPoint(raw, plan.walls, { grid, tol, ortho: false, lines: imageLines })
         setRoomDraft({ a: d.a, b: s.p })
         setGuides(s.guides)
         return
@@ -606,7 +637,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         return
       }
       case 'node': {
-        const s = snapWallPoint(raw, d.plan0.walls, { grid, tol, ortho: false, exclude: (p) => eq(p, d.from, 0.75) })
+        const s = snapWallPoint(raw, d.plan0.walls, { grid, tol, ortho: false, exclude: (p) => eq(p, d.from, 0.75), lines: imageLines })
         setGuides(s.guides)
         history.preview(moveNodes(d.plan0, [{ from: d.from, to: s.p }]))
         return
@@ -667,7 +698,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       case 'room': {
         setRoomDraft(null)
         setGuides([])
-        const s = snapWallPoint(raw, plan.walls, { grid, tol, ortho: false })
+        const s = snapWallPoint(raw, plan.walls, { grid, tol, ortho: false, lines: imageLines })
         history.apply((pl) => addRect(pl, d.a, s.p, wallThickness))
         return
       }
@@ -708,6 +739,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         if (draftRef.current.length) finishDraft()
         else if (dimStart) setDimStart(null)
         else if (measure) setMeasure(null)
+        else if (cornerPts.length) setCornerPts([])
         else if (tool !== 'select') onToolChange('select')
         else onSelect(null)
         return
@@ -902,7 +934,28 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
             </g>
           )}
 
+          {/* углы для выпрямления фото */}
+          {cornerPts.length > 0 && (
+            <g pointerEvents="none">
+              <polyline points={[...cornerPts, ...(cursor ? [cursor.p] : [])].map((p) => `${p.x},${p.y}`).join(' ')} fill="none" stroke="#d946ef" strokeWidth={1.5} strokeDasharray="5 4" {...NS} />
+              {cornerPts.map((p, i) => (
+                <g key={i}>
+                  <circle cx={p.x} cy={p.y} r={6 / zoom} fill="#fff" stroke="#d946ef" strokeWidth={2} {...NS} />
+                  <text x={p.x} y={p.y - 10 / zoom} fontSize={11 / zoom} textAnchor="middle" fill="#a21caf" fontWeight={600}>
+                    {i + 1}
+                  </text>
+                </g>
+              ))}
+            </g>
+          )}
+
           {/* маркер курсора при рисовании */}
+          {cursor && (tool === 'roomPick' || tool === 'corners') && (
+            <g pointerEvents="none">
+              <line x1={cursor.p.x - 10 / zoom} y1={cursor.p.y} x2={cursor.p.x + 10 / zoom} y2={cursor.p.y} stroke="#d946ef" strokeWidth={1.5} {...NS} />
+              <line x1={cursor.p.x} y1={cursor.p.y - 10 / zoom} x2={cursor.p.x} y2={cursor.p.y + 10 / zoom} stroke="#d946ef" strokeWidth={1.5} {...NS} />
+            </g>
+          )}
           {cursor && (tool === 'wall' || tool === 'room' || tool === 'dimension' || tool === 'measure' || tool === 'calibrate') && (
             <g pointerEvents="none">
               <circle cx={cursor.p.x} cy={cursor.p.y} r={(cursor.kind === 'endpoint' ? 7 : 4) / zoom} fill="none" stroke={cursor.kind === 'endpoint' ? '#f43f5e' : ACCENT} strokeWidth={1.5} {...NS} />

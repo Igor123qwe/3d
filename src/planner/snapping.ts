@@ -41,6 +41,8 @@ export interface WallSnapOpts {
   last?: Pt | null
   /** исключить концы стен (например, перетаскиваемый узел) */
   exclude?: (p: Pt) => boolean
+  /** линии, найденные на картинке подложки: магнит при обводке, слабее настоящих стен */
+  lines?: Guide[]
 }
 
 export function wallEndpoints(walls: Wall[]): Pt[] {
@@ -64,6 +66,20 @@ export function snapWallPoint(raw: Pt, walls: Wall[], o: WallSnapOpts): PointSna
     }
   }
   if (best) return { p: { ...best }, guides, kind: 'endpoint' }
+
+  // 1б. концы линий на картинке: угол стены на фото — тоже узел, но настоящие стены важнее
+  if (o.lines?.length) {
+    for (const l of o.lines) {
+      for (const e of [l.a, l.b]) {
+        const d = dist(raw, e)
+        if (d < bestD) {
+          bestD = d
+          best = e
+        }
+      }
+    }
+    if (best) return { p: { ...best }, guides, kind: 'endpoint' }
+  }
 
   let p: Pt = { ...raw }
   let lockX = false
@@ -96,9 +112,10 @@ export function snapWallPoint(raw: Pt, walls: Wall[], o: WallSnapOpts): PointSna
     }
   }
 
-  // 3. примыкание к существующей стене (Т-стык)
-  for (const w of walls) {
-    if (o.exclude && (o.exclude(w.a) || o.exclude(w.b))) continue
+  // 3. примыкание к существующей стене (Т-стык); линии с картинки — тем же правилом, после стен
+  const targets: { a: Pt; b: Pt; real: boolean }[] = [...walls.map((w) => ({ a: w.a, b: w.b, real: true })), ...(o.lines ?? []).map((l) => ({ a: l.a, b: l.b, real: false }))]
+  for (const w of targets) {
+    if (w.real && o.exclude && (o.exclude(w.a) || o.exclude(w.b))) continue
     const wl = dist(w.a, w.b)
     if (wl < 1) continue
     const dir = norm(sub(w.b, w.a))

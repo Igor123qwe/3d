@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { Layers, LengthUnit, Plan, Pt, Selection, Tool } from './types'
+import type { Layers, LengthUnit, Plan, Pt, Selection, Tool, Underlay } from './types'
 import { CATALOG, CATALOG_MAP, CATEGORIES, FLOORS, ROOM_NAMES, dims3d, type CatalogItem, type CategoryKey } from './catalog'
 import { usePlanHistory } from './store'
 import { buildRooms } from './rooms'
@@ -24,6 +24,8 @@ import {
   updateFurniture,
   updateOpening,
   setUnderlay,
+  scalePlan,
+  addRect,
   updateRoomMeta,
   updateUnderlay,
   updateWall,
@@ -33,7 +35,9 @@ import { dist, fmtArea, fmtLen, fmtNum, lerp, normDeg } from './geometry'
 import { getTelegramWebApp } from '../telegram'
 import { guessType, modelRefFromAsset, modelRefFromUrl, phAssets, phCategories, phDimsCm, phInfo, phPage, type PhAsset } from './polyhaven'
 import { decodePlan, parseHash, planShareUrl } from './share'
-import { DEFAULT_TRACE, calibrate, grayscaleOf, loadUnderlayImage, makeUnderlay, nameFromFile, planFromImage, tracePlan, type LoadedImage, type TraceOptions } from './underlay'
+import { DEFAULT_TRACE, calibrate, detectWalls, grayscaleOf, joinCorners, loadUnderlayImage, makeUnderlay, mergeCollinear, nameFromFile, planFromImage, toPixel, toPlan, tracePlan, type LoadedImage, type TraceOptions } from './underlay'
+import { cleanRaster, distanceToInk, dominantAngle, floodRoom, grayToImage, rotateImage, warpToRect, type CleanResult } from './raster'
+import type { Guide } from './snapping'
 import { aiStatus, askLayout, lookupProductViaServer, recognizePlan, type AiStatus } from './ai'
 import { applyAiPlan, convertAiPlan } from './planai'
 import { applyLayout, catalogForRoom, layoutSummary, vetLayout } from './autolayout'
@@ -224,6 +228,12 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const [phState, setPhState] = useState<'idle' | 'loading' | 'error'>('idle')
   const [customModelUrl, setCustomModelUrl] = useState('')
   const [trace, setTrace] = useState<TraceOptions>(DEFAULT_TRACE)
+  /** магнит к линиям картинки при рисовании стен, комнат и размеров */
+  const [magnet, setMagnet] = useState(true)
+  /** линии, найденные на подложке, в пикселях картинки; в план переводятся по текущему положению подложки */
+  const [imageLinesPx, setImageLinesPx] = useState<Guide[]>([])
+  /** очищенный растр подложки: считается один раз на картинку и служит обводке, комнате по клику и магниту */
+  const rasterRef = useRef<{ src: string; gray: Uint8Array; clean: CleanResult; d2: Float32Array | null } | null>(null)
   const [tracing, setTracing] = useState(false)
   /** масштаб подложки задан руками — распознавание его не переопределяет */
   const [calibrated, setCalibrated] = useState(false)
@@ -719,13 +729,179 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     setToast(`Масштаб задан: ${(cm / 100).toFixed(2)} м на показанном отрезке`)
   }
 
+  /** Очищенный растр текущей подложки; пересчитывается только при смене картинки */
+  const ensureRaster = async (u: Underlay) => {
+    const cur = rasterRef.current
+    if (cur && cur.src === u.src) return cur
+    const gray = await grayscaleOf(u)
+    const clean = cleanRaster(gray, u.px.w, u.px.h)
+    const next = { src: u.src, gray, clean, d2: null }
+    rasterRef.current = next
+    return next
+  }
+
+  // линии на картинке для магнита: считаем при смене подложки, в фоне
+  useEffect(() => {
+    const u = plan.underlay
+    if (!u) {
+      setImageLinesPx([])
+      return
+    }
+    let alive = true
+    void ensureRaster(u)
+      .then((r) => {
+        if (!alive) return
+        const px = (cm: number) => Math.max(2, Math.round(cm / u.scale))
+        const found = detectWalls(r.clean.gray, u.px.w, u.px.h, { threshold: 128, minLength: px(40), minThickness: 2, maxThickness: px(60) })
+        const segs = mergeCollinear(joinCorners(found, px(12)), px(12))
+        setImageLinesPx(segs.map((sg) => ({ a: sg.a, b: sg.b })))
+      })
+      .catch(() => setImageLinesPx([]))
+    return () => {
+      alive = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plan.underlay?.src])
+
+  const imageLines = useMemo<Guide[] | undefined>(() => {
+    const u = plan.underlay
+    if (!u || !magnet || !u.visible || !layers.underlay || !imageLinesPx.length) return undefined
+    return imageLinesPx.map((l) => ({ a: toPlan(u, l.a), b: toPlan(u, l.b) }))
+  }, [plan.underlay, magnet, layers.underlay, imageLinesPx])
+
+  /** Заменить картинку подложки, сохранив масштаб и центр */
+  const replaceUnderlayImage = (img: LoadedImage) => {
+    history.apply((p) => {
+      const u = p.underlay
+      if (!u) return p
+      const cx = u.x + (u.px.w * u.scale) / 2
+      const cy = u.y + (u.px.h * u.scale) / 2
+      return { ...p, underlay: { ...u, src: img.src, px: { w: img.w, h: img.h }, x: cx - (img.w * u.scale) / 2, y: cy - (img.h * u.scale) / 2 } }
+    })
+  }
+
+  /** Повернуть фото так, чтобы стены легли по осям */
+  const levelImage = async () => {
+    const u = plan.underlay
+    if (!u || tracing) return
+    setTracing(true)
+    try {
+      const r = await ensureRaster(u)
+      const angle = dominantAngle(r.gray, u.px.w, u.px.h)
+      if (Math.abs(angle) < 0.3) {
+        setToast(`Картинка и так ровная: наклон ${angle.toFixed(1)}°`)
+        return
+      }
+      const img = await rotateImage(u.src, -angle)
+      replaceUnderlayImage(img)
+      setToast(`Повернул на ${(-angle).toFixed(1)}°: линии стен легли по осям`)
+    } catch (err) {
+      setToast((err as Error).message)
+    } finally {
+      setTracing(false)
+    }
+  }
+
+  /** Убрать тени, блики и мелкие метки: белая бумага, чёрные линии */
+  const cleanPhoto = async () => {
+    const u = plan.underlay
+    if (!u || tracing) return
+    setTracing(true)
+    try {
+      const r = await ensureRaster(u)
+      replaceUnderlayImage(grayToImage(r.clean.gray, u.px.w, u.px.h))
+      setToast('Фото очищено: фон выровнен, цифры и засечки убраны. Ctrl+Z вернёт оригинал')
+    } catch (err) {
+      setToast((err as Error).message)
+    } finally {
+      setTracing(false)
+    }
+  }
+
+  /** Четыре угла наружных стен → перспектива фото исправлена */
+  const onCorners = async (pts: Pt[]) => {
+    const u = plan.underlay
+    if (!u) return
+    setTracing(true)
+    try {
+      const img = await warpToRect(u.src, pts.map((p) => toPixel(u, p)))
+      replaceUnderlayImage(img)
+      // пиксели теперь другие — прежний масштаб больше не факт
+      setCalibrated(false)
+      setScaleKnown(false)
+      setTool('select')
+      setTimeout(() => canvasRef.current?.fit(), 50)
+      setToast('Фото выпрямлено по четырём углам. Теперь задайте масштаб или распознайте план')
+    } catch (err) {
+      setToast((err as Error).message)
+    } finally {
+      setTracing(false)
+    }
+  }
+
+  /** Комната по клику: заливка по очищенному растру, стены вокруг */
+  const onRoomPick = async (p: Pt) => {
+    const u = plan.underlay
+    if (!u) return
+    try {
+      const r = await ensureRaster(u)
+      if (!r.d2) r.d2 = distanceToInk(r.clean.bin)
+      // дверной проём до 90 см закрывается радиусом в полпроёма
+      const closePx = Math.min(80, Math.max(3, Math.round(45 / u.scale)))
+      const box = floodRoom(r.d2, u.px.w, u.px.h, toPixel(u, p), closePx)
+      if (!box) {
+        setToast('Вокруг этой точки нет замкнутого контура: линии на картинке прерываются или комната открыта наружу. Обведите её инструментом «Комната»')
+        return
+      }
+      const t = wallThickness
+      // рамка по внутренним граням → оси стен на полтолщины наружу
+      let a = toPlan(u, { x: box.x1, y: box.y1 })
+      let b = toPlan(u, { x: box.x2, y: box.y2 })
+      a = { x: a.x - t / 2, y: a.y - t / 2 }
+      b = { x: b.x + t / 2, y: b.y + t / 2 }
+      // общая стена с уже нарисованной комнатой: грань липнет к её оси
+      const tol = Math.max(15, t * 1.5)
+      const snapTo = (v: number, axis: 'x' | 'y') => {
+        let best = v
+        let bestD = tol
+        for (const w of plan.walls) {
+          const aligned = axis === 'x' ? Math.abs(w.a.x - w.b.x) < 1 : Math.abs(w.a.y - w.b.y) < 1
+          if (!aligned) continue
+          const d = Math.abs(w.a[axis] - v)
+          if (d < bestD) {
+            bestD = d
+            best = w.a[axis]
+          }
+        }
+        return Math.round(best)
+      }
+      a = { x: snapTo(a.x, 'x'), y: snapTo(a.y, 'y') }
+      b = { x: snapTo(b.x, 'x'), y: snapTo(b.y, 'y') }
+      if (b.x - a.x < 20 || b.y - a.y < 20) {
+        setToast('Слишком маленькая область для комнаты')
+        return
+      }
+      history.apply((pl) => addRect(pl, a, b, t))
+      const w = b.x - a.x
+      const h = b.y - a.y
+      setToast(
+        box.fill < 0.75
+          ? `Комната ${fmtLen(w, unit)} × ${fmtLen(h, unit)} не прямоугольная: поставил рамку, поправьте стены. Следующий клик — ещё комната`
+          : `Комната ${fmtLen(w, unit)} × ${fmtLen(h, unit)}. Кликните в следующую или Esc`,
+      )
+    } catch (err) {
+      setToast((err as Error).message)
+    }
+  }
+
   const detectWallsFromImage = async () => {
     const u = plan.underlay
     if (!u || tracing) return
     setTracing(true)
     try {
-      const gray = await grayscaleOf(u)
-      const { walls, openings } = tracePlan(gray, u, trace)
+      // обводим очищенный растр: без теней и цифр линий-призраков меньше
+      const r = await ensureRaster(u)
+      const { walls, openings } = tracePlan(r.clean.gray, u, trace)
       if (!walls.length) {
         setToast('Стены не найдены: попробуйте поднять чувствительность или уменьшить минимальную длину')
         return
@@ -1210,6 +1386,33 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
               ))}
             </select>
           </label>
+          {plan.underlay && (
+            <div className="pl-block">
+              <label className="pl-field" title="Площадь этой комнаты, подписанная на плане: весь чертёж и подложка подгонятся под неё">
+                <span>На плане, м²</span>
+                <NumberField
+                  value={Math.round(r.area * 10) / 10}
+                  min={0.5}
+                  max={500}
+                  step={0.1}
+                  onCommit={(want) => {
+                    const k = Math.sqrt(want / r.area)
+                    if (!Number.isFinite(k) || k < 0.5 || k > 2) {
+                      setToast('Площадь отличается больше чем вдвое: похоже, это не та комната')
+                      return
+                    }
+                    if (Math.abs(k - 1) < 0.002) return
+                    const c = r.polygon.reduce((acc, p) => ({ x: acc.x + p.x / r.polygon.length, y: acc.y + p.y / r.polygon.length }), { x: 0, y: 0 })
+                    history.apply((p) => scalePlan(p, k, c))
+                    setScaleKnown(true)
+                    setCalibrated(true)
+                    setToast(`Масштаб подогнан под ${fmtNum(want)} м²: чертёж и подложка умножены на ${k.toFixed(3)}`)
+                  }}
+                />
+              </label>
+              <div className="pl-note">Введите площадь с плана — масштаб встанет по ней. Точнее, чем по отрезку: площадь на плане БТИ подписана всегда.</div>
+            </div>
+          )}
           <div className="pl-stats">
             <div>
               <b>{fmtArea(r.area)}</b>
@@ -1279,6 +1482,21 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           <div className="pl-block pl-stepper">
             <div className="pl-props-title">Схема загружена</div>
             <ol className="pl-step-list">
+              <li className={plan.walls.length ? 'done' : ''}>
+                <b>Подготовить фото</b>
+                <span className="pl-note">Скан или скрин — можно пропустить. Фото с телефона: тени, наклон и перспектива мешают распознаванию — исправьте прямо здесь.</span>
+                <div className="pl-row">
+                  <button className="pl-btn small" onClick={() => void levelImage()} disabled={tracing} title="Повернуть картинку так, чтобы линии стен легли по осям">
+                    <Icon name="ortho" size={16} /> Выровнять
+                  </button>
+                  <button className={`pl-btn small ${tool === 'corners' ? 'active' : ''}`} onClick={() => setTool(tool === 'corners' ? 'select' : 'corners')} disabled={tracing} title="Кликните по четырём углам наружных стен — перспектива фото исправится">
+                    <Icon name="corners" size={16} /> Выпрямить по 4 углам
+                  </button>
+                  <button className="pl-btn small" onClick={() => void cleanPhoto()} disabled={tracing} title="Убрать тени и блики, мелкие цифры и засечки">
+                    <Icon name="sparkles" size={16} /> Очистить
+                  </button>
+                </div>
+              </li>
               <li className={plan.walls.length ? 'done' : 'now'}>
                 <b>Получить стены</b>
                 {ai.enabled ? (
@@ -1287,14 +1505,23 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                       <Icon name="sparkles" size={18} /> {aiBusy === 'Читаю план…' ? 'Читаю план…' : 'Распознать с ИИ'}
                     </button>
                     <span className="pl-note">Читает размеры и площади комнат, двери и окна — и строит чертёж заново по числам с плана. Масштаб встанет сам.</span>
-                    <button className="pl-btn ghost small" onClick={detectWallsFromImage} disabled={tracing}>
-                      {tracing ? 'Обвожу…' : 'Или обвести линии без ИИ'}
-                    </button>
+                    <div className="pl-row">
+                      <button className={`pl-btn small ${tool === 'roomPick' ? 'active' : ''}`} onClick={() => setTool(tool === 'roomPick' ? 'select' : 'roomPick')} title="Кликните внутри комнаты на картинке — стены вокруг неё появятся сами">
+                        <Icon name="wand" size={16} /> Комната по клику
+                      </button>
+                      <button className="pl-btn ghost small" onClick={detectWallsFromImage} disabled={tracing}>
+                        {tracing ? 'Обвожу…' : 'Обвести линии без ИИ'}
+                      </button>
+                    </div>
                   </>
                 ) : (
                   <>
-                    <button className="pl-btn primary" onClick={detectWallsFromImage} disabled={tracing}>
-                      <Icon name="wall" size={18} /> {tracing ? 'Обвожу…' : 'Обвести стены по линиям'}
+                    <button className={`pl-btn primary ${tool === 'roomPick' ? 'active' : ''}`} onClick={() => setTool(tool === 'roomPick' ? 'select' : 'roomPick')} title="Кликните внутри комнаты на картинке — стены вокруг неё появятся сами">
+                      <Icon name="wand" size={18} /> Комната по клику
+                    </button>
+                    <span className="pl-note">Самый надёжный путь без ИИ: клик внутри каждой комнаты на картинке — по комнате за клик, общие стены сходятся сами.</span>
+                    <button className="pl-btn small" onClick={detectWallsFromImage} disabled={tracing}>
+                      <Icon name="wall" size={16} /> {tracing ? 'Обвожу…' : 'Или обвести все линии разом'}
                     </button>
                     <span className="pl-note">
                       Обводка — грубый черновик: цифры на плане она не читает, а выноски и штриховку принимает за стены. Точнее — «Распознать с ИИ»: чертёж строится
@@ -1329,6 +1556,10 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                 <label className="pl-field">
                   <span>Закрепить, не двигать мышью</span>
                   <input type="checkbox" checked={plan.underlay.locked} onChange={() => history.silent((p) => updateUnderlay(p, { locked: !p.underlay?.locked }))} />
+                </label>
+                <label className="pl-field" title="При рисовании стен, комнат и размеров точки липнут к линиям, найденным на картинке">
+                  <span>Магнит к линиям картинки{imageLinesPx.length ? ` (${imageLinesPx.length})` : ''}</span>
+                  <input type="checkbox" checked={magnet} onChange={() => setMagnet((m) => !m)} />
                 </label>
                 <div className="pl-row">
                   <button
@@ -1962,12 +2193,20 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           </button>
         ))}
         {plan.underlay && (
-          <button className={`pl-tool ${tool === 'calibrate' ? 'active' : ''}`} onClick={() => setTool('calibrate')} title="Задать масштаб подложки по известному размеру">
-            <span className="pl-tool-icon">
-              <Icon name="calibrate" size={22} />
-            </span>
-            <span className="pl-tool-name">Масштаб</span>
-          </button>
+          <>
+            <button className={`pl-tool ${tool === 'roomPick' ? 'active' : ''}`} onClick={() => setTool('roomPick')} title="Комната по клику на картинке">
+              <span className="pl-tool-icon">
+                <Icon name="wand" size={22} />
+              </span>
+              <span className="pl-tool-name">По клику</span>
+            </button>
+            <button className={`pl-tool ${tool === 'calibrate' ? 'active' : ''}`} onClick={() => setTool('calibrate')} title="Задать масштаб подложки по известному размеру">
+              <span className="pl-tool-icon">
+                <Icon name="calibrate" size={22} />
+              </span>
+              <span className="pl-tool-name">Масштаб</span>
+            </button>
+          </>
         )}
         <button className={`pl-tool ${tool === 'place' || panel === 'catalog' ? 'active' : ''}`} onClick={openCatalog} title="Каталог мебели">
           <span className="pl-tool-icon">
@@ -2016,6 +2255,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           onHint={setHint}
           photos={photos}
           onCalibrate={onCalibrate}
+          imageLines={imageLines}
+          onRoomPick={(p) => void onRoomPick(p)}
+          onCorners={(pts) => void onCorners(pts)}
         />
       )}
 

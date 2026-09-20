@@ -176,6 +176,10 @@ export type Tool =
   | 'dimension'
   | 'measure'
   | 'calibrate'
+  /** клик внутри комнаты на картинке — комната по заливке */
+  | 'roomPick'
+  /** четыре угла наружных стен на фото — выпрямить перспективу */
+  | 'corners'
 
 export type LengthUnit = 'cm' | 'mm' | 'm'
 

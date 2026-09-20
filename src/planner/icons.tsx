@@ -50,6 +50,8 @@ export type IconName =
   | 'pencil'
   | 'history'
   | 'search'
+  | 'wand'
+  | 'corners'
 
 const PATHS: Record<IconName, React.ReactNode> = {
   select: <path d="M5 3l14 8-6 2-3 6z" />,
@@ -96,6 +98,19 @@ const PATHS: Record<IconName, React.ReactNode> = {
     <>
       <rect x="2" y="9" width="20" height="6" rx="1" transform="rotate(-45 12 12)" />
       <path d="M9 15l1.5-1.5M12 12l1.5-1.5M15 9l1.5-1.5" />
+    </>
+  ),
+  wand: (
+    <>
+      <path d="M4 20L15 9" />
+      <path d="M14 4l1 2 2 1-2 1-1 2-1-2-2-1 2-1z" />
+      <path d="M19 12l.7 1.3L21 14l-1.3.7L19 16l-.7-1.3L17 14l1.3-.7z" />
+    </>
+  ),
+  corners: (
+    <>
+      <path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" />
+      <path d="M8 8l8 1-1 7-8-1z" />
     </>
   ),
   calibrate: (

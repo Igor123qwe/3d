@@ -23,25 +23,53 @@ export function addWall(plan: Plan, a: Pt, b: Pt, thickness: number): Plan {
   return { ...plan, walls: [...plan.walls, { id: uid('w'), a: { ...a }, b: { ...b }, thickness }] }
 }
 
+/**
+ * Прямоугольник из четырёх стен. Там, где новая стена ложится на уже нарисованную
+ * (общая стена двух комнат, в том числе частично — Т-стык), добавляется только
+ * непокрытый остаток: дублей и наложений не бывает, а комнаты замыкаются.
+ */
 export function addRect(plan: Plan, a: Pt, b: Pt, thickness: number): Plan {
   const x0 = Math.min(a.x, b.x)
   const x1 = Math.max(a.x, b.x)
   const y0 = Math.min(a.y, b.y)
   const y1 = Math.max(a.y, b.y)
   if (x1 - x0 < 20 || y1 - y0 < 20) return plan
-  const pts: Pt[] = [
-    { x: x0, y: y0 },
-    { x: x1, y: y0 },
-    { x: x1, y: y1 },
-    { x: x0, y: y1 },
-  ]
+  const EPS = 0.75
   let p = plan
-  for (let i = 0; i < 4; i++) {
-    const s = pts[i]
-    const e = pts[(i + 1) % 4]
-    // не дублируем стену, если такая уже есть
-    const exists = p.walls.some((w) => (eq(w.a, s, 0.75) && eq(w.b, e, 0.75)) || (eq(w.a, e, 0.75) && eq(w.b, s, 0.75)))
-    if (!exists) p = addWall(p, s, e, thickness)
+  const edges: { vertical: boolean; at: number; from: number; to: number }[] = [
+    { vertical: false, at: y0, from: x0, to: x1 },
+    { vertical: true, at: x1, from: y0, to: y1 },
+    { vertical: false, at: y1, from: x0, to: x1 },
+    { vertical: true, at: x0, from: y0, to: y1 },
+  ]
+  for (const e of edges) {
+    // участки, уже занятые стенами на той же оси
+    const covered: [number, number][] = []
+    for (const w of p.walls) {
+      const vertical = Math.abs(w.a.x - w.b.x) <= EPS
+      const horizontal = Math.abs(w.a.y - w.b.y) <= EPS
+      if (e.vertical ? !vertical : !horizontal) continue
+      const at = e.vertical ? w.a.x : w.a.y
+      if (Math.abs(at - e.at) > EPS) continue
+      const lo = e.vertical ? Math.min(w.a.y, w.b.y) : Math.min(w.a.x, w.b.x)
+      const hi = e.vertical ? Math.max(w.a.y, w.b.y) : Math.max(w.a.x, w.b.x)
+      if (hi <= e.from + EPS || lo >= e.to - EPS) continue
+      covered.push([Math.max(lo, e.from), Math.min(hi, e.to)])
+    }
+    covered.sort((u, v) => u[0] - v[0])
+    let cursor = e.from
+    const gaps: [number, number][] = []
+    for (const [lo, hi] of covered) {
+      if (lo > cursor + EPS) gaps.push([cursor, lo])
+      cursor = Math.max(cursor, hi)
+    }
+    if (cursor < e.to - EPS) gaps.push([cursor, e.to])
+    for (const [lo, hi] of gaps) {
+      if (hi - lo < 2) continue
+      const s = e.vertical ? { x: e.at, y: lo } : { x: lo, y: e.at }
+      const t = e.vertical ? { x: e.at, y: hi } : { x: hi, y: e.at }
+      p = addWall(p, s, t, thickness)
+    }
   }
   return p
 }
@@ -223,3 +251,21 @@ export function deleteSelection(plan: Plan, sel: Selection): Plan {
 }
 
 export const isEmptyPlan = (p: Plan): boolean => p.walls.length === 0 && p.furniture.length === 0 && p.dims.length === 0
+
+/**
+ * Масштабировать чертёж вокруг точки: стены, мебель (положения, не размеры),
+ * размерные линии, якоря комнат и подложку. Нужно, когда план обведён по
+ * картинке в неверном масштабе, а потом стала известна площадь комнаты.
+ */
+export function scalePlan(plan: Plan, k: number, origin: Pt): Plan {
+  if (!Number.isFinite(k) || k <= 0 || Math.abs(k - 1) < 1e-9) return plan
+  const s = (p: Pt): Pt => ({ x: origin.x + (p.x - origin.x) * k, y: origin.y + (p.y - origin.y) * k })
+  return {
+    ...plan,
+    walls: plan.walls.map((w) => ({ ...w, a: s(w.a), b: s(w.b) })),
+    furniture: plan.furniture.map((f) => ({ ...f, ...s({ x: f.x, y: f.y }) })),
+    dims: plan.dims.map((d) => ({ ...d, a: s(d.a), b: s(d.b) })),
+    rooms: plan.rooms.map((r) => ({ ...r, anchor: s(r.anchor) })),
+    underlay: plan.underlay ? { ...plan.underlay, ...s({ x: plan.underlay.x, y: plan.underlay.y }), scale: plan.underlay.scale * k } : plan.underlay,
+  }
+}

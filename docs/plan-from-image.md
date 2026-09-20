@@ -1,0 +1,61 @@
+# План по картинке: как делают лидеры и что сделано здесь
+
+Разбор сделан в сентябре 2026 по справкам и блогам сервисов, форумам пользователей
+и свежим работам по векторизации планов. Ссылки — в конце.
+
+## Как это устроено у лидеров
+
+| Сервис | Что делает с картинкой | Масштаб | Ограничения, о которых пишут сами |
+|---|---|---|---|
+| **Planner 5D** — «Upload a plan» | Распознаёт стены, окна, двери и базовую мебель; обработка от 10 минут до 24 часов | Только если на плане подписаны размеры: без них «план нельзя воспроизвести в нужных размерах» | Снимать строго сверху, «наклонённые планы дают проблемы», лишнее вырезать в графическом редакторе до загрузки |
+| **RoomSketcher** — «AI Convert» | За секунды превращает чертёж в редактируемый план | Обязательно показать одну известную длину — шаг пропустить нельзя | Только компьютерные чертежи, наброски от руки не поддерживаются; текст, штампы и рамки «сбивают ИИ» — обрезать |
+| **Coohom / Homestyler** | Автораспознавание стен, дверей и окон за 30–60 с | Две точки с известным расстоянием | Фото с телефона дают «перспективные искажения и провал распознавания», загружайте оригиналы; движок «читает все линии как стены»: засечки размеров, контуры мебели, электрика |
+| **Floorplanner** | Картинка — только фон для ручной обводки, авто-распознавания нет | Одна известная стена | Повернуть, обрезать, исправить перспективу внутри нельзя — «правьте снаружи и загружайте заново» |
+| **magicplan** | «Import & Draw»: обводка поверх JPG; автоматика только со сканером LiDAR | Вручную | Только JPG; оцифровка бумажного плана по фото — в списке пожеланий |
+| **Sweet Home 3D** | Фоновая картинка через мастер | Линия известной длины в мастере | На форуме — темы про неверный масштаб и пропорции фона |
+| **Remplanner / Планоплан** | Загрузка плана БТИ и ручная обводка стен с маркерами проёмов | Вручную | В отзывах: «реальных размеров не получите» |
+
+Сквозные темы форумов и справок: неверный масштаб, перспектива с телефона,
+выноски и текст, принятые за стены, «а потом всё равно всё поправлять руками».
+
+## Что говорит наука
+
+- На реальных сканах (CubiCasa5K) **детекция** стен по картам узлов и осевых линий
+  с последующей сборкой графа точнее, чем выдача координат последовательностью
+  (+2,7…+5,1 F1 по стенам). Правильная метрика качества — **стоимость правки**:
+  сколько ручной работы нужно, чтобы довести черновик до ума.
+- **FloorplanVLM** (2026): VLM выдаёт план сразу структурированным JSON, 92,5 % IoU
+  по наружным стенам, но «пиксельную точность» приходится добирать обучением с
+  подкреплением — модели со зрением хорошо понимают топологию и подписи, а
+  координаты называют примерно.
+
+Отсюда наш выбор: модель читает **числа и структуру** (размеры, площади, какая дверь
+в какой стене), а геометрию строит детерминированный код — точно по числам.
+
+## Что сделано здесь и чем лучше
+
+| Тема | У лидеров | Здесь |
+|---|---|---|
+| Фото с телефона | «Снимайте сверху, правьте в редакторе» | Внутри: **Выровнять** (поворот по линиям стен, ядро Шарра, точность ~0,1°), **Выпрямить по 4 углам** (гомография), **Очистить** (выравнивание фона от теней, удаление цифр и засечек) |
+| Автоматика | Стены с картинки, «все линии — стены» | **ИИ читает числа, чертёж строится заново по размерам** с проверкой площадей; стены с картинки — запасной путь |
+| Полуавтомат | Нет | **Комната по клику**: клик внутри комнаты на картинке — стены вокруг неё; дверные проёмы закрываются по расстоянию до линий, общие стены сходятся сами |
+| Обводка руками | Как есть | **Магнит к линиям картинки**: при рисовании стен, комнат и размеров точки липнут к линиям, найденным на фото |
+| Масштаб | Одна известная длина | Известный отрезок **или площадь комнаты** (на плане БТИ она подписана всегда), а с ИИ — сам по всем числам |
+| Что получилось | Тишина | Диалог «Распознано»: сколько стен и комнат, откуда масштаб, на сколько процентов сошлись площади и где нет |
+
+Честно о пределах: комнаты по клику и по числам — прямоугольники (эркер и скос
+правятся руками); ИИ должен прочитать цифры — на бликах и размытии он ошибается,
+и в диалоге это видно по проценту; выравнивание фона не спасает сильно
+недоэкспонированное фото.
+
+## Источники
+
+- Planner 5D: [How to Upload a Floor Plan](https://support.planner5d.com/en/articles/14434484-how-to-upload-a-floor-plan), [Processing Time](https://support.planner5d.com/en/articles/13205006-upload-a-plan-processing-time), [Using Upload a Plan Feature](https://support.planner5d.com/en/articles/7458952-using-upload-a-plan-feature)
+- RoomSketcher: [AI Convert](https://help.roomsketcher.com/hc/en-us/articles/31885247016605-Can-I-Import-a-Blueprint-and-Let-AI-Create-My-Floor-Plan-Use-RoomSketcher-s-AI-Convert), [Why Didn't My AI Convert Work?](https://help.roomsketcher.com/hc/en-us/articles/35537884534429-Why-Didn-t-My-AI-Convert-Work), [Tips for Preparing Your Blueprints](https://help.roomsketcher.com/hc/en-us/articles/360001708977-Tips-for-Preparing-Your-Blueprints-for-RoomSketcher)
+- Coohom: [Requirements for uploading images](https://www.coohom.com/helpcenter/requirements-for-uploading-copy-images-to-generate-floor-plans), [Create a floor plan from image](https://www.coohom.com/article/creating-floor-plans-from-images), [PDF floor plan to 3D fails? 8 checks](https://www.coohom.com/article/how-to-turn-pdf-floor-plans-into-3d-for-free-306524)
+- Homestyler: [Create accurate floor plans from photos](https://www.homestyler.com/article/trends/create-accurate-floor-plans-from-photos)
+- Floorplanner: [Coohom о загрузке плана в Floorplanner](https://www.coohom.com/article/how-to-upload-a-2d-floor-plan-to-floorplanner), [Editor Manual](http://cdn.floorplanner.com/static/brochures/Floorplanner+editor+manual+version+180219.pdf)
+- magicplan: [Import and Digitalize an Existing Floor Plan](https://help.magicplan.app/import-and-digitalize-an-existing-floor-plan), [Feature request: digitize paper plans](https://magicplan.canny.io/feature-requests/p/digitize-paper-floor-plans-by-taking-a-photo-or-import-a-pdf)
+- Sweet Home 3D: [Users Guide](https://www.sweethome3d.com/users-guide/), [форум: Scaling issue for the background image](https://www.sweethome3d.com/support/forum/viewthread_thread,10464)
+- Remplanner: [отзывы на irecommend](https://irecommend.ru/content/sait-remplannerru), [otzovik](https://otzovik.com/review_12573533.html); [тест редакции INMYROOM](https://www.inmyroom.ru/posts/13528-test-redakcii-kakimi-onlajn-servisami-po-planirovke-polzovatsya)
+- Наука: [When Should a Network Emit Geometry, and When Should It Detect It? (2026)](https://arxiv.org/abs/2608.25608), [FloorplanVLM (2026)](https://arxiv.org/abs/2602.06507), [CubiCasa5K](https://github.com/cubicasa/cubicasa5k), [Raster-to-Vector: Revisiting Floorplan Transformation](https://www.researchgate.net/publication/322059565_Raster-to-Vector_Revisiting_Floorplan_Transformation)
