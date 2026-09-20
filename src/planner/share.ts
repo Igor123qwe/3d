@@ -50,10 +50,16 @@ export async function decodePlan(encoded: string): Promise<Plan | null> {
 
 export type ShareMode = '2d' | '3d' | 'ar'
 
+/** адрес страницы планировщика с учётом подпапки развёртывания (GitHub Pages и т. п.) */
+export function plannerUrl(): string {
+  const base = (import.meta.env?.BASE_URL ?? '/').replace(/\/+$/, '')
+  return new URL(`${base}/planner.html`, location.href).href
+}
+
 /** ссылка на отдельную страницу планировщика с планом внутри */
 export async function planShareUrl(plan: Plan, mode: ShareMode): Promise<string> {
   const encoded = await encodePlan(plan)
-  return `${location.origin}/planner.html#mode=${mode}&plan=${encoded}`
+  return `${plannerUrl()}#mode=${mode}&plan=${encoded}`
 }
 
 export function parseHash(hash: string): { mode?: ShareMode; plan?: string } {

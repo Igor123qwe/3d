@@ -6,7 +6,7 @@ export default defineConfig({
   server: {
     port: 5173,
   },
-  base: '/',
+  base: process.env.BASE_PATH || '/',
   build: {
     rollupOptions: {
       input: {
