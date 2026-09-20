@@ -5,7 +5,7 @@
 //   node tools/models.mjs                  # все модели, от дешёвых к дорогим
 //   node tools/models.mjs --vision         # только те, что читают картинки
 //   node tools/models.mjs --find gemini    # поиск по названию
-//   node tools/models.mjs --json           # сырой ответ роутера
+//   node tools/models.mjs --json           # сырой ответ роутера целиком
 //
 // Ключ берётся из ROUTERAI_API_KEY или из файла .env рядом с проектом.
 import { readFileSync } from 'node:fs'
@@ -57,17 +57,27 @@ if (!rows.length) {
   process.exit(1)
 }
 
-/** цена за миллион токенов: у роутеров она бывает за токен, в рублях или в долларах */
+/**
+ * Цена за миллион токенов.
+ * Роутеры считают по-разному: за токен или сразу за миллион. Единицу берём из
+ * pricing_units, а не из величины числа: у дорогих моделей цена за токен уже
+ * больше любого порога, и угадывание по размеру числа врёт.
+ */
 function price(m, which) {
   const p = m.pricing ?? m.price ?? {}
-  const raw = which === 'in' ? (p.prompt ?? p.input ?? p.prompt_rub ?? p.input_rub) : (p.completion ?? p.output ?? p.completion_rub ?? p.output_rub)
-  const n = Number(raw)
+  const key = which === 'in' ? ['prompt', 'input', 'prompt_rub', 'input_rub'] : ['completion', 'output', 'completion_rub', 'output_rub']
+  const found = key.find((k) => p[k] !== undefined)
+  const n = Number(found ? p[found] : undefined)
   if (!Number.isFinite(n)) return null
-  // за токен цена всегда микроскопическая — переводим к миллиону
-  return n < 0.001 ? n * 1_000_000 : n
+  const unit = (m.pricing_units ?? {})[found]
+  if (unit === 'token') return n * 1_000_000
+  if (unit) return n
+  // единица не подписана: за токен цена всегда сильно меньше единицы
+  return n < 0.01 ? n * 1_000_000 : n
 }
 
-const currency = JSON.stringify(rows[0]?.pricing ?? {}).includes('rub') ? '₽' : '$'
+// Валюта в ответе не подписана: routerai считает в рублях, остальные обычно в долларах
+const currency = /routerai/i.test(base) || JSON.stringify(rows[0]?.pricing ?? {}).includes('rub') ? '₽' : '$'
 
 /** читает ли модель картинки */
 function vision(m) {
@@ -79,11 +89,24 @@ function vision(m) {
 
 const ctx = (m) => m.context_length ?? m.context ?? m.max_context_tokens ?? m.top_provider?.context_length ?? null
 
-let list = rows.map((m) => ({
+/** умеет ли модель отдавать строгий JSON: без этого дешёвая модель чаще мажет */
+const structured = (m) => {
+  const p = m.supported_parameters
+  return Array.isArray(p) && (p.includes('structured_outputs') || p.includes('response_format'))
+}
+
+/** выдаёт ли модель текст: генераторы картинок, озвучка и эмбеддинги нам не подходят */
+const textOut = (m) => {
+  const out = m.architecture?.output_modalities ?? m.output_modalities
+  return !Array.isArray(out) || out.includes('text')
+}
+
+let list = rows.filter(textOut).map((m) => ({
   id: m.id ?? m.name ?? '?',
   in: price(m, 'in'),
   out: price(m, 'out'),
   vision: vision(m),
+  json: structured(m),
   ctx: ctx(m),
 }))
 
@@ -100,16 +123,20 @@ const fmt = (v) => (v === null ? '—' : v >= 100 ? v.toFixed(0) : v.toFixed(2))
 const thousands = (v) => (v === null ? '—' : v >= 1000 ? `${Math.round(v / 1000)}k` : String(v))
 
 console.log(`Роутер: ${base}. Моделей: ${rows.length}${list.length !== rows.length ? `, подходит ${list.length}` : ''}\n`)
-console.log(`${'модель'.padEnd(width)}  ${`вход ${currency}/1М`.padStart(12)}  ${`выход ${currency}/1М`.padStart(13)}  зрение  контекст`)
-console.log('─'.repeat(width + 48))
+console.log(`${'модель'.padEnd(width)}  ${`вход ${currency}/1М`.padStart(12)}  ${`выход ${currency}/1М`.padStart(13)}  зрение  JSON  контекст`)
+console.log('─'.repeat(width + 54))
 for (const m of shown) {
-  console.log(`${m.id.padEnd(width)}  ${fmt(m.in).padStart(12)}  ${fmt(m.out).padStart(13)}  ${(m.vision ? 'да' : '—').padStart(6)}  ${thousands(m.ctx).padStart(8)}`)
+  console.log(
+    `${m.id.padEnd(width)}  ${fmt(m.in).padStart(12)}  ${fmt(m.out).padStart(13)}  ` +
+      `${(m.vision ? 'да' : '—').padStart(6)}  ${(m.json ? 'да' : '—').padStart(4)}  ${thousands(m.ctx).padStart(8)}`,
+  )
 }
 if (list.length > shown.length) console.log(`\n…и ещё ${list.length - shown.length}. Покажите все: --limit ${list.length}`)
 
 // готовые строки для .env: самые дешёвые под каждую задачу
-const cheapVision = list.filter((m) => m.vision && m.in !== null).slice(0, 3)
-const cheapText = list.filter((m) => m.in !== null).slice(0, 3)
+// в цепочки идут только модели со строгим JSON: остальные слишком часто отвечают текстом
+const cheapVision = list.filter((m) => m.vision && m.json && m.in !== null).slice(0, 3)
+const cheapText = list.filter((m) => m.json && m.in !== null).slice(0, 3)
 if (cheapVision.length && cheapText.length && !find && !has('--vision')) {
   console.log('\nМожно взять так (от дешёвой к дорогой):\n')
   console.log(`AI_MODEL_PLAN=${cheapVision.map((m) => m.id).join(',')}`)

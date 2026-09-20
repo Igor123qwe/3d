@@ -28,48 +28,51 @@ export interface TaskSpec {
   about: string
 }
 
-// Умолчания подобраны по принципу «дешёвая модель на простую задачу».
+// Умолчания подобраны по реальному прайсу роутера (₽ за 1 млн токенов, вход/выход)
+// и по принципу «дешёвая модель на простую задачу».
 // Любую цепочку можно переопределить переменной окружения AI_MODEL_<ЗАДАЧА>,
-// перечислив модели через запятую. Реальный список моделей роутера — GET /api/ai?models=1.
+// перечислив модели через запятую. Актуальные цены — `npm run models`.
 const TASKS: Record<AiTask, TaskSpec> = {
   // Чтение плана БТИ с картинки — единственная по-настоящему сложная задача.
+  // 10,9/43,8 → 21,9/96,3 → 218,9/1094,6. Вторая в цепочке заточена под OCR
+  // и разбор документов, третья включается, только если и она не справилась.
   plan: {
     vision: true,
     maxTokens: 8000,
     timeoutMs: 120_000,
-    chain: ['google/gemini-2.5-flash', 'openai/gpt-5-mini', 'anthropic/claude-sonnet-5'],
+    chain: ['google/gemini-2.5-flash-lite', 'qwen/qwen3-vl-235b-a22b-instruct', 'anthropic/claude-sonnet-5'],
     about: 'Читает план с картинки: стены, двери, окна, подписи комнат и размеры',
   },
-  // Вытащить название, цену и габариты из текста страницы — работа для дешёвой модели.
+  // Вытащить название, цену и габариты из текста страницы. 4,5/9,0 → 5,5/43,8 → 10,9/43,8.
   product: {
     vision: false,
     maxTokens: 700,
     timeoutMs: 45_000,
-    chain: ['google/gemini-2.5-flash-lite', 'openai/gpt-5-nano', 'deepseek/deepseek-chat'],
+    chain: ['deepseek/deepseek-v4-flash', 'openai/gpt-5-nano', 'google/gemini-2.5-flash-lite'],
     about: 'Достаёт из страницы магазина название, цену и габариты',
   },
-  // Расстановка мебели требует рассуждения, но текста мало.
+  // Расстановка мебели требует рассуждения, но текста мало. 4,5/9,0 → 9,0/30,1 → 27,4/218,9.
   layout: {
     vision: false,
     maxTokens: 4000,
     timeoutMs: 90_000,
-    chain: ['deepseek/deepseek-chat', 'openai/gpt-5-mini', 'anthropic/claude-sonnet-5'],
+    chain: ['deepseek/deepseek-v4-flash', 'z-ai/glm-5.3-flash', 'openai/gpt-5-mini'],
     about: 'Расставляет мебель в комнате по правилам эргономики',
   },
-  // Отнести товар к типу каталога — самая дешёвая модель из возможных.
+  // Отнести товар к типу каталога — самая дешёвая модель из возможных. 2,2/4,4 → 5,5/8,8.
   classify: {
     vision: false,
     maxTokens: 120,
     timeoutMs: 30_000,
-    chain: ['google/gemini-2.5-flash-lite', 'openai/gpt-5-nano'],
+    chain: ['meta-llama/llama-3.1-8b-instruct', 'mistralai/mistral-small-24b-instruct-2501'],
     about: 'Подбирает предмету тип из каталога',
   },
-  // Замечания дизайнера по готовой расстановке.
+  // Замечания дизайнера по готовой расстановке. 9,0/30,1 → 27,4/218,9.
   critique: {
     vision: false,
     maxTokens: 1500,
     timeoutMs: 60_000,
-    chain: ['openai/gpt-5-mini', 'deepseek/deepseek-chat'],
+    chain: ['z-ai/glm-5.3-flash', 'openai/gpt-5-mini'],
     about: 'Разбирает готовую расстановку и предлагает улучшения',
   },
 }
