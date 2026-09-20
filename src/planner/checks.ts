@@ -13,6 +13,7 @@ import {
   norm,
   obbCorners,
   perp,
+  pointInPoly,
   pointSegDist,
   rotate,
   sub,
@@ -256,7 +257,54 @@ export function runChecks(plan: Plan, rooms: Room[]): CheckResult {
     }
   }
 
-  // 7. телевизор и диван
+  // 7. электрика
+  const electrics = plan.furniture.filter((f) => f.electric)
+  if (electrics.length) {
+    const wetNames = ['Санузел', 'Ванная', 'Туалет']
+    for (const r of rooms) {
+      const wet = wetNames.some((n) => r.meta.name.includes(n))
+      const inside = electrics.filter((f) => pointInPoly({ x: f.x, y: f.y }, r.polygon))
+      if (!inside.some((f) => f.electric?.kind === 'light' || f.electric?.kind === 'spot')) {
+        push({ id: `nolight-${r.meta.id}`, level: 'info', text: `В «${r.meta.name}» нет светильника`, target: { kind: 'room', id: r.meta.id } })
+      }
+      if (!wet) continue
+      // в мокрой зоне розетки держат подальше от воды
+      const water = plan.furniture.filter((f) => ['bathtub-170', 'bathtub-150', 'shower-90', 'shower-120'].includes(f.type))
+      for (const o of inside) {
+        if (o.electric?.kind !== 'outlet' && o.electric?.kind !== 'smart-outlet') continue
+        for (const wsrc of water) {
+          if (dist({ x: o.x, y: o.y }, { x: wsrc.x, y: wsrc.y }) < 60 + Math.max(wsrc.w, wsrc.d) / 2) {
+            push({
+              id: `wet-${o.id}`,
+              level: 'warn',
+              text: `Розетка в зоне брызг: до ${nameOf(wsrc)} меньше 60 см. Перенесите или ставьте влагозащищённую`,
+              target: { kind: 'furniture', id: o.id },
+            })
+            break
+          }
+        }
+      }
+      for (const sw of inside) {
+        if (sw.electric?.kind !== 'switch' && sw.electric?.kind !== 'smart-switch') continue
+        push({
+          id: `wetsw-${sw.id}`,
+          level: 'info',
+          text: `Выключатель внутри «${r.meta.name}»: обычно его выносят наружу`,
+          target: { kind: 'furniture', id: sw.id },
+        })
+      }
+    }
+    // у спального места нужна розетка
+    for (const A of items) {
+      if (A.cat?.glyph !== 'bed') continue
+      const near = electrics.some(
+        (e) => (e.electric?.kind === 'outlet' || e.electric?.kind === 'smart-outlet') && dist({ x: e.x, y: e.y }, { x: A.f.x, y: A.f.y }) < 200,
+      )
+      if (!near) push({ id: `bedpower-${A.f.id}`, level: 'info', text: `У ${nameOf(A.f)} нет розетки в пределах 2 м`, target: { kind: 'furniture', id: A.f.id } })
+    }
+  }
+
+  // 8. телевизор и диван
   const tv = plan.furniture.find((f) => f.type === 'tv')
   if (tv) {
     const seats = plan.furniture.filter((f) => ['sofa-3', 'sofa-2', 'sofa-corner', 'armchair'].includes(f.type))

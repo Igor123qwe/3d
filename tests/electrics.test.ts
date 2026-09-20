@@ -4,6 +4,7 @@ import { buildRooms } from '../src/planner/rooms'
 import { CATALOG_MAP } from '../src/planner/catalog'
 import { TEMPLATES } from '../src/planner/templates'
 import { pointInPoly } from '../src/planner/geometry'
+import { runChecks } from '../src/planner/checks'
 import type { ElectricKind, Plan } from '../src/planner/types'
 
 const studio = () => TEMPLATES[1].build()
@@ -135,6 +136,37 @@ describe('ведомость и кабель', () => {
   it('пустой план даёт пустую ведомость', () => {
     const { plan, rooms } = run(twoRoom())
     expect(electricSpec(plan, rooms)).toEqual([])
+  })
+})
+
+describe('проверки электрики', () => {
+  const withAuto = (opts = DEFAULT_AUTO) => {
+    const { plan, rooms, items } = run(twoRoom(), opts)
+    const full: Plan = { ...plan, furniture: [...plan.furniture, ...items] }
+    return { plan: full, rooms, issues: runChecks(full, rooms).issues }
+  }
+
+  it('после автоматической расстановки нет замечаний по свету и розеткам у кровати', () => {
+    const { issues } = withAuto()
+    expect(issues.some((i) => i.text.includes('нет светильника'))).toBe(false)
+    expect(issues.some((i) => i.text.includes('нет розетки в пределах'))).toBe(false)
+  })
+
+  it('розетка у ванны помечается как опасная', () => {
+    const { plan, rooms } = run(twoRoom())
+    const bath = plan.furniture.find((f) => f.type === 'bathtub-150')!
+    const risky: Plan = {
+      ...plan,
+      furniture: [...plan.furniture, { id: 'risky', type: 'outlet', x: bath.x + 20, y: bath.y, w: 8, d: 4, rot: 0, electric: { kind: 'outlet' as const, why: 'вручную', height: 30 } }],
+    }
+    const issues = runChecks(risky, rooms).issues
+    expect(issues.some((i) => i.text.includes('зоне брызг'))).toBe(true)
+  })
+
+  it('план без электрики не заваливает список замечаниями', () => {
+    const { plan, rooms } = run(twoRoom())
+    const issues = runChecks(plan, rooms).issues
+    expect(issues.some((i) => i.text.includes('нет светильника'))).toBe(false)
   })
 })
 

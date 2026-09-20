@@ -241,12 +241,18 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const problems = check.issues.filter((i) => i.level !== 'info').length
 
   // автосохранение
+  const saveFailed = useRef(false)
   useEffect(() => {
     const t = setTimeout(() => {
       try {
         localStorage.setItem(LS_PLAN, JSON.stringify(plan))
+        saveFailed.current = false
       } catch {
-        /* ignore */
+        // чаще всего это переполнение хранилища из-за картинки-подложки
+        if (!saveFailed.current) {
+          saveFailed.current = true
+          setToast('План не помещается в память браузера. Сохраните его в файл через «Файл» и уберите подложку')
+        }
       }
     }, 400)
     return () => clearTimeout(t)
