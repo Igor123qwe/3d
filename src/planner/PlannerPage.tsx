@@ -44,7 +44,8 @@ import {
   electricSpec,
   type AutoElectricOptions,
 } from './electrics'
-import type { ElectricKind } from './types'
+import type { ElectricKind, ProductRef } from './types'
+import { fetchProduct, formatPrice, typeForProduct, type ProductInfo } from './products'
 import { modelKey } from './polyhaven'
 import './planner.css'
 
@@ -198,7 +199,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const [catCategory, setCatCategory] = useState<CategoryKey | 'all'>('all')
   const [toast, setToast] = useState<string | null>(null)
   const [view3d, setView3d] = useState(false)
-  const [catMode, setCatMode] = useState<'schemes' | 'photo'>('schemes')
+  const [catMode, setCatMode] = useState<'schemes' | 'photo' | 'link'>('schemes')
   const [phCats, setPhCats] = useState<{ name: string; count: number }[]>([])
   const [phCat, setPhCat] = useState('furniture')
   const [phItems, setPhItems] = useState<PhAsset[]>([])
@@ -207,6 +208,10 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const [trace, setTrace] = useState<TraceOptions>(DEFAULT_TRACE)
   const [tracing, setTracing] = useState(false)
   const [auto, setAuto] = useState<AutoElectricOptions>(DEFAULT_AUTO)
+  const [productUrl, setProductUrl] = useState('')
+  const [product, setProduct] = useState<ProductInfo | null>(null)
+  const [productState, setProductState] = useState<'idle' | 'loading' | 'error'>('idle')
+  const [productError, setProductError] = useState('')
   const imageInput = useRef<HTMLInputElement>(null)
   const [photoMode, setPhotoMode] = useState(() => {
     try {
@@ -419,6 +424,44 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     const type = guessType(a)
     const cat = CATALOG_MAP[type] ?? CATALOG_MAP.box
     pick({ ...cat, name: a.name, w: dims?.w ?? cat.w, d: dims?.d ?? cat.d, h: dims?.h, model: modelRefFromAsset(a) })
+  }
+
+  const lookupProduct = async () => {
+    const url = productUrl.trim()
+    if (!url) return
+    setProductState('loading')
+    setProductError('')
+    try {
+      const info = await fetchProduct(url)
+      setProduct(info)
+      setProductState('idle')
+    } catch (e) {
+      // ручной ввод всё равно доступен — подставляем заготовку
+      setProduct({ url, name: '', source: 'ничего не найдено' })
+      setProductError((e as Error).message)
+      setProductState('error')
+    }
+  }
+
+  const placeProduct = () => {
+    if (!product) return
+    const type = typeForProduct(product.name)
+    const base = CATALOG_MAP[type] ?? CATALOG_MAP.box
+    const ref: ProductRef = {
+      url: product.url,
+      name: product.name || base.name,
+      photo: product.photo,
+      price: product.price,
+      currency: product.currency,
+    }
+    pick({
+      ...base,
+      name: ref.name,
+      w: product.dims?.w ?? base.w,
+      d: product.dims?.d ?? base.d,
+      h: product.dims?.h,
+      product: ref,
+    })
   }
 
   const shareForPhone = async () => {
@@ -686,6 +729,23 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
               🗑 Удалить
             </button>
           </div>
+          {f.product && (
+            <div className="pl-block">
+              <div className="pl-props-title">Товар</div>
+              <div className="pl-model">
+                {f.product.photo && <img src={f.product.photo} alt="" loading="lazy" referrerPolicy="no-referrer" />}
+                <div>
+                  <b>{f.product.name}</b>
+                  <div className="pl-note">
+                    {f.product.price ? formatPrice(f.product.price, f.product.currency) : 'цена не указана'} ·{' '}
+                    <a href={f.product.url} target="_blank" rel="noreferrer">
+                      страница товара
+                    </a>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
           {f.electric && (
             <div className="pl-hint-box">
               ⚡ {ELECTRIC_NAMES[f.electric.kind]}, высота {f.electric.height} см. Причина: {f.electric.why}.
@@ -1050,14 +1110,94 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         <button className={catMode === 'photo' ? 'active' : ''} onClick={() => setCatMode('photo')}>
           Фото 3D
         </button>
+        <button className={catMode === 'link' ? 'active' : ''} onClick={() => setCatMode('link')}>
+          По ссылке
+        </button>
       </div>
-      <input
-        className="pl-search"
-        placeholder={catMode === 'photo' ? 'Поиск по Poly Haven (англ.): sofa, chair, lamp…' : 'Поиск: кровать, стол, розетка…'}
-        value={catQuery}
-        onChange={(e) => setCatQuery(e.target.value)}
-      />
-      {catMode === 'photo' ? (
+      {catMode !== 'link' && (
+        <input
+          className="pl-search"
+          placeholder={catMode === 'photo' ? 'Поиск по Poly Haven (англ.): sofa, chair, lamp…' : 'Поиск: кровать, стол, розетка…'}
+          value={catQuery}
+          onChange={(e) => setCatQuery(e.target.value)}
+        />
+      )}
+      {catMode === 'link' && (
+        <div>
+          <div className="pl-note">
+            Понравился холодильник или диван в магазине — вставьте ссылку на товар. Планировщик попробует прочитать название, фото, цену и габариты; всё
+            можно поправить руками.
+          </div>
+          <div className="pl-row">
+            <input
+              className="pl-grow"
+              placeholder="https://магазин/товар…"
+              value={productUrl}
+              onChange={(e) => setProductUrl(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void lookupProduct()
+              }}
+            />
+            <button className="pl-btn" onClick={() => void lookupProduct()} disabled={productState === 'loading' || !productUrl.trim()}>
+              {productState === 'loading' ? 'Читаю…' : 'Найти'}
+            </button>
+          </div>
+          {productError && <div className="pl-note">{productError}</div>}
+          {product && (
+            <div className="pl-block">
+              <div className="pl-model">
+                {product.photo && <img src={product.photo} alt="" loading="lazy" referrerPolicy="no-referrer" />}
+                <div>
+                  <b>{product.name || 'Без названия'}</b>
+                  <div className="pl-note">
+                    Источник данных: {product.source}
+                    {product.price ? ` · ${formatPrice(product.price, product.currency)}` : ''}
+                  </div>
+                </div>
+              </div>
+              <label className="pl-field">
+                <span>Название</span>
+                <input value={product.name} onChange={(e) => setProduct({ ...product, name: e.target.value })} />
+              </label>
+              <label className="pl-field">
+                <span>Ширина, см</span>
+                <NumberField
+                  value={product.dims?.w ?? 60}
+                  min={1}
+                  max={1000}
+                  step={5}
+                  onCommit={(v) => setProduct({ ...product, dims: { w: v, d: product.dims?.d ?? 60, h: product.dims?.h ?? 80 } })}
+                />
+              </label>
+              <label className="pl-field">
+                <span>Глубина, см</span>
+                <NumberField
+                  value={product.dims?.d ?? 60}
+                  min={1}
+                  max={1000}
+                  step={5}
+                  onCommit={(v) => setProduct({ ...product, dims: { w: product.dims?.w ?? 60, d: v, h: product.dims?.h ?? 80 } })}
+                />
+              </label>
+              <label className="pl-field">
+                <span>Высота, см</span>
+                <NumberField
+                  value={product.dims?.h ?? 80}
+                  min={1}
+                  max={400}
+                  step={5}
+                  onCommit={(v) => setProduct({ ...product, dims: { w: product.dims?.w ?? 60, d: product.dims?.d ?? 60, h: v } })}
+                />
+              </label>
+              <div className="pl-note">Тип на плане подбирается по названию: «{CATALOG_MAP[typeForProduct(product.name)]?.name ?? 'Произвольный объект'}».</div>
+              <button className="pl-btn active" onClick={placeProduct}>
+                Поставить в план
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      {catMode === 'link' ? null : catMode === 'photo' ? (
         <div>
           <div className="pl-chips">
             {(phCats.length ? phCats : [{ name: 'furniture', count: 0 }]).slice(0, 14).map((c) => (

@@ -1,7 +1,7 @@
 // Каталог мебели и оборудования с реальными размерами и зонами эргономики.
 // Локальная система объекта: x — ширина (вправо), y — глубина (вниз).
 // «Спинка» объекта — верхняя грань (-y), «фронт» — нижняя (+y).
-import type { ElectricPoint, ModelRef } from './types'
+import type { ElectricPoint, ModelRef, ProductRef } from './types'
 
 export type CategoryKey =
   | 'bedroom'
@@ -102,6 +102,8 @@ export interface CatalogItem {
   model?: ModelRef
   /** электрическая точка: подставляется при установке прибора */
   electric?: ElectricPoint
+  /** товар из магазина: подставляется при установке по ссылке */
+  product?: ProductRef
 }
 
 const SEATS = ['chair', 'office-chair', 'bar-stool', 'bench', 'hall-bench']

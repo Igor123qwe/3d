@@ -55,6 +55,8 @@ export interface Furniture {
   model?: ModelRef
   /** электрическая точка: вид, высота установки и причина размещения */
   electric?: ElectricPoint
+  /** товар из магазина: ссылка, фото и цена */
+  product?: ProductRef
 }
 
 export type ElectricKind =
@@ -78,6 +80,15 @@ export interface ElectricPoint {
   kind: ElectricKind
   why: string
   height: number
+}
+
+/** Товар из магазина, поставленный в план по ссылке */
+export interface ProductRef {
+  url: string
+  name: string
+  photo?: string
+  price?: number
+  currency?: string
 }
 
 export interface RoomMeta {
