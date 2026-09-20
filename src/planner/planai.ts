@@ -250,7 +250,8 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
 
   // 4. чертёж заново по числам, если модель дала комнаты прямоугольниками;
   //    побеждает вариант, где замкнулось больше комнат, при равенстве — числа
-  const rebuilt = ai.rooms.some(canRebuildFrom) ? reconstructFromRooms(ai.rooms, u) : null
+  const dimSpans = ai.dimensions.map((d) => ({ a: toPlanPt(u, { x: d.x1 * px.w, y: d.y1 * px.h }), b: toPlanPt(u, { x: d.x2 * px.w, y: d.y2 * px.h }), cm: d.cm }))
+  const rebuilt = ai.rooms.some(canRebuildFrom) ? reconstructFromRooms(ai.rooms, u, {}, dimSpans) : null
   const closedByNumbers = rebuilt ? rebuilt.rooms.filter((r) => r.haveM2 !== undefined).length : 0
   const byNumbers = !!rebuilt && closedByNumbers > 0 && closedByNumbers >= closedRooms(walls, ai, u)
   const method: ConvertMethod = byNumbers ? 'по размерам комнат' : 'по линиям стен'

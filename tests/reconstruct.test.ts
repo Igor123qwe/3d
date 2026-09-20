@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { AiRoom } from '../src/planner/aicontract'
 import type { Underlay } from '../src/planner/types'
-import { fitAxis, pointOnSide, reconstructFromRooms, scaleSamplesFromRooms } from '../src/planner/reconstruct'
+import { fitAxis, pointOnSide, reconstructFromRooms, scaleSamplesFromRooms, type DimSpan } from '../src/planner/reconstruct'
 import { buildRooms } from '../src/planner/rooms'
 
 // картинка 900 × 1000 px, 1 см в пикселе: доли картинки считать просто
@@ -183,5 +183,95 @@ describe('чертёж по числам с плана', () => {
     expect(pointOnSide(rect, 'right', 0.5)).toEqual({ x: 500, y: 400 })
     expect(pointOnSide(rect, 'bottom', 1)).toEqual({ x: 500, y: 600 })
     expect(pointOnSide(rect, 'left', 2)).toEqual({ x: 100, y: 600 })
+  })
+})
+
+describe('как на настоящем плане БТИ: подписи частичные, рамки с картинки малы', () => {
+  /** модель со зрением рисует рамки «по подписи», а не по стенам: они на 15 % меньше и чуть сдвинуты */
+  function shrunkRooms(labels: Record<string, { w?: number; h?: number; area?: boolean }>): AiRoom[] {
+    j = 0
+    return FLAT.map((r) => {
+      const cx = r.x + r.w / 2 + noise() * 0.6
+      const cy = r.y + r.h / 2 + noise() * 0.6
+      const bw = r.w * 0.85
+      const bh = r.h * 0.85
+      const lab = labels[r.name] ?? {}
+      const room: AiRoom = {
+        name: r.name,
+        x: cx / px.w,
+        y: cy / px.h,
+        box: { x1: (cx - bw / 2) / px.w, y1: (cy - bh / 2) / px.h, x2: (cx + bw / 2) / px.w, y2: (cy + bh / 2) / px.h },
+      }
+      if (lab.w) room.widthCm = lab.w
+      if (lab.h) room.depthCm = lab.h
+      if (lab.area !== false) room.areaM2 = Math.round(r.w * r.h) / 1e4
+      return room
+    })
+  }
+
+  it('у половины комнат подписан один размер, у остальных только площадь — площади сходятся в пределах 5 %', () => {
+    const labels: Record<string, { w?: number; h?: number }> = {
+      '5ж': { w: 372, h: 408 },
+      '6': { w: 180 },
+      '1': { w: 234 },
+      '4ж': { w: 401, h: 426 },
+      '2': { h: 426 },
+      коридор: {},
+    }
+    const rooms = shrunkRooms(labels)
+    const res = reconstructFromRooms(rooms, u)
+    expect(res.rooms.filter((r) => r.haveM2 !== undefined)).toHaveLength(FLAT.length)
+    for (const r of FLAT) {
+      const want = (r.w * r.h) / 1e4
+      const have = areaOf(res, r.name) as number
+      // комнате с одной лишь площадью (коридор) размеры достаются от соседей — допуск чуть шире
+      const tol = labels[r.name]?.w || labels[r.name]?.h ? 0.05 : 0.07
+      expect(Math.abs(have - want) / want, `${r.name}: ${have.toFixed(2)} vs ${want.toFixed(2)}`).toBeLessThan(tol)
+    }
+    expect(res.areaFit?.accuracy ?? 0).toBeGreaterThan(0.96)
+  })
+
+  it('подпись у стены с выступом не сходится с площадью — побеждает площадь', () => {
+    // комната на самом деле 372 × 374 = 13.9 м², а «4.08» — длина наружной стены с простенком
+    const small: R[] = [
+      { name: '5ж', x: 40, y: 40, w: 372, h: 374 },
+      { name: '6', x: 422, y: 40, w: 180, h: 374 },
+    ]
+    j = 0
+    const rooms = small.map((r) => {
+      const bw = r.w * 0.85
+      const bh = r.h * 0.85
+      const cx = r.x + r.w / 2
+      const cy = r.y + r.h / 2
+      return { name: r.name, x: cx / px.w, y: cy / px.h, box: { x1: (cx - bw / 2) / px.w, y1: (cy - bh / 2) / px.h, x2: (cx + bw / 2) / px.w, y2: (cy + bh / 2) / px.h } } as AiRoom
+    })
+    Object.assign(rooms[0], { widthCm: 372, depthCm: 408, areaM2: 13.9 })
+    Object.assign(rooms[1], { widthCm: 180, depthCm: 374, areaM2: 6.7 })
+    const res = reconstructFromRooms(rooms, u)
+    const have = areaOf(res, '5ж') as number
+    expect(Math.abs(have - 13.9) / 13.9).toBeLessThan(0.05)
+    const rect = res.rooms.find((r) => r.name === '5ж')!.rect
+    // ширина осталась подписанной (372 + перегородка 10 + половина наружной 15), глубина стала 13.9 / 3.72 ≈ 3.74
+    expect(rect.x2 - rect.x1).toBeCloseTo(397, -1)
+    // сверху и снизу наружные стены: + перегородка 10 + две половины наружной по 15
+    expect(rect.y2 - rect.y1).toBeCloseTo(374 + 40, -1)
+  })
+
+  it('размерная цепочка держит комнату без подписей', () => {
+    // справа снизу ни у «2», ни у «1», ни у коридора подписей нет: правую границу
+    // квартиры держит только цепочка по низу — 4.26 и 4.20 по осям стен
+    const rooms = shrunkRooms({ '5ж': { w: 372, h: 408 }, '6': { w: 180, h: 258 }, '1': { area: false }, '4ж': { w: 401, h: 426 }, '2': { area: false }, коридор: { area: false } })
+    const y = 884 + 10
+    const dims: DimSpan[] = [
+      { a: { x: 35, y }, b: { x: 461, y }, cm: 426 },
+      { a: { x: 461, y }, b: { x: 881, y }, cm: 420 },
+    ]
+    const res = reconstructFromRooms(rooms, u, {}, dims)
+    const rect = res.rooms.find((r) => r.name === '2')!.rect
+    expect(rect.x2 - rect.x1).toBeCloseTo(420, -1)
+    // без цепочки та же комната мала: рамка с картинки на 15 % меньше настоящей
+    const bare = reconstructFromRooms(rooms, u)
+    const bareRect = bare.rooms.find((r) => r.name === '2')!.rect
+    expect(bareRect.x2 - bareRect.x1).toBeLessThan(390)
   })
 })

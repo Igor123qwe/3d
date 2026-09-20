@@ -968,11 +968,24 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       }
       if (r.note) lines.push(`Модель: ${r.note}`)
       lines.push('Мебель внутри новых комнат останется на месте.')
+      // сырой ответ модели и отчёт — в консоль и по кнопке в буфер: без них не разобрать, что пошло не так
+      const debugReport = { model: cost.model, tried: cost.tried, answer: read, report: r }
+      console.info('[ИИ] распознавание плана', debugReport)
       setAsk({
         title: 'Распознано',
         text: lines.join('\n'),
-        options: [{ key: 'apply', label: 'Заменить чертёж распознанным', hint: 'прежний вернёт Ctrl+Z', icon: 'check', primary: true }],
-        onPick: () => {
+        options: [
+          { key: 'apply', label: 'Заменить чертёж распознанным', hint: 'прежний вернёт Ctrl+Z', icon: 'check', primary: true },
+          { key: 'copy', label: 'Скопировать отчёт распознавания', hint: 'ответ модели и разбор — чтобы прислать разработчику', icon: 'clipboard' },
+        ],
+        onPick: (key) => {
+          if (key === 'copy') {
+            void navigator.clipboard
+              .writeText(JSON.stringify(debugReport, null, 2))
+              .then(() => setToast('Отчёт скопирован в буфер обмена'))
+              .catch(() => setToast('Не удалось скопировать: отчёт напечатан в консоли браузера (F12)'))
+            return
+          }
           setAsk(null)
           let lost = 0
           history.apply((prev) => {

@@ -142,8 +142,14 @@ export function checkAiPlan(data: unknown): AiPlan {
       const cm = n < 30 ? n * 100 : n > 1500 ? n / 10 : n
       return cm >= 50 && cm <= 3000 ? Math.round(cm) : undefined
     }
-    room.widthCm = size(r.width_cm ?? r.widthCm ?? r.width)
-    room.depthCm = size(r.depth_cm ?? r.depthCm ?? r.depth ?? r.height_cm)
+    room.widthCm = size(r.width_cm ?? r.widthCm ?? r.width ?? r.width_m ?? r.widthM)
+    room.depthCm = size(r.depth_cm ?? r.depthCm ?? r.depth ?? r.height_cm ?? r.depth_m ?? r.height ?? r.length_cm ?? r.length)
+    // модель может сложить оба размера в одну строку: «4.01x4.26», «401 × 426 см»
+    const pair = /^\s*([\d.,]+)\s*[x×хX*]\s*([\d.,]+)/.exec(String(r.size ?? r.dimensions ?? r.sizes ?? ''))
+    if (pair) {
+      room.widthCm ??= size(pair[1].replace(',', '.'))
+      room.depthCm ??= size(pair[2].replace(',', '.'))
+    }
     rooms.push(room)
   }
 

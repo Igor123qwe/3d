@@ -94,6 +94,14 @@ interface Rect {
   h: number
   wLabelled: boolean
   hLabelled: boolean
+  /** размер взят прямо с подписи и согласован с площадью — его не подгоняем */
+  fixedW: boolean
+  fixedH: boolean
+  /** подписанная площадь, см² (0 — нет) */
+  areaCm2: number
+  /** размеры рамки с картинки, см: по ним грани встают на оси, подписи же — только уравнения */
+  bw: number
+  bh: number
   /** индексы осей после сведения */
   xi: number
   xj: number
@@ -103,29 +111,94 @@ interface Rect {
 
 const toPlan = (u: Underlay, px: Pt): Pt => ({ x: u.x + px.x * u.scale, y: u.y + px.y * u.scale })
 
-/** Внутренние размеры комнаты: подписи важнее картинки, площадь — судья */
+/**
+ * Внутренние размеры комнаты. Площадь на плане БТИ — самое надёжное число:
+ * её пишут для комнаты целиком. Размеры у стен надёжны, когда сходятся с
+ * площадью; если нет — одна из подписей относится к стене с выступом, а не
+ * к комнате, и какая именно, подсказывает форма прямоугольника на картинке.
+ * Чего не подписано — выводится из площади и того, что подписано.
+ */
 function sizeRoom(r: AiRoom & { box: AiBox }, u: Underlay): Omit<Rect, 'xi' | 'xj' | 'yi' | 'yj'> {
   const bw = (r.box.x2 - r.box.x1) * u.px.w * u.scale
   const bh = (r.box.y2 - r.box.y1) * u.px.h * u.scale
+  const A = r.areaM2 ? r.areaM2 * 1e4 : 0
   let w = r.widthCm ?? bw
   let h = r.depthCm ?? bh
-  const wLabelled = !!r.widthCm
-  const hLabelled = !!r.depthCm
-  if (r.areaM2) {
-    const k = (r.areaM2 * 1e4) / (w * h)
-    // подписи вдоль стен бывают частичными («3.72» — только до выступа), площадь честнее
-    if (k < 0.85 || k > 1.18) {
-      if (wLabelled && !hLabelled) h = (r.areaM2 * 1e4) / w
-      else if (hLabelled && !wLabelled) w = (r.areaM2 * 1e4) / h
-      else {
-        const q = Math.sqrt(k)
-        w *= q
-        h *= q
+  let wLabelled = !!r.widthCm
+  let hLabelled = !!r.depthCm
+  let fixedW = wLabelled
+  let fixedH = hLabelled
+  if (A) {
+    const k = A / (w * h)
+    if (wLabelled && hLabelled) {
+      if (Math.abs(k - 1) > 0.06) {
+        const byW = { w, h: A / w }
+        const byH = { w: A / h, h }
+        const aspect = bw > 0 && bh > 0 ? bw / bh : 1
+        if (Math.abs(byW.w / byW.h - aspect) <= Math.abs(byH.w / byH.h - aspect)) {
+          h = byW.h
+          fixedH = false
+        } else {
+          w = byH.w
+          fixedW = false
+        }
       }
+    } else if (wLabelled) {
+      h = A / w
+      hLabelled = true
+    } else if (hLabelled) {
+      w = A / h
+      wLabelled = true
+    } else {
+      // форма с картинки, величина — из площади
+      const q = Math.sqrt(k)
+      w *= q
+      h *= q
+      wLabelled = hLabelled = true
     }
   }
   const c = toPlan(u, { x: ((r.box.x1 + r.box.x2) / 2) * u.px.w, y: ((r.box.y1 + r.box.y2) / 2) * u.px.h })
-  return { spec: r, cx: c.x, cy: c.y, w, h, wLabelled, hLabelled }
+  return { spec: r, cx: c.x, cy: c.y, w, h, wLabelled, hLabelled, fixedW, fixedH, areaCm2: A, bw, bh }
+}
+
+/**
+ * Модель со зрением рисует рамку комнаты «по подписи», внутри настоящих стен:
+ * между гранями соседних комнат остаётся щель шире перегородки. Грани, что
+ * смотрят друг на друга через такую щель, — одна стена: сводим их к середине.
+ * Грани с одной стороны (правая над правой) так не трогаем — там бывает уступ.
+ */
+function closeFacingGaps(rects: Rect[], rawX: number[], rawY: number[], minGap: number): void {
+  const overlap1 = (a1: number, a2: number, b1: number, b2: number) => Math.max(0, Math.min(a2, b2) - Math.max(a1, b1))
+  // щель от сжатия рамок растёт с размером комнаты: у двух комнат по 4 м она
+  // доходит до 60–90 см, а коридор между комнатами уже 90 см — редкость.
+  // Рамки могут и налезть друг на друга (шум картинки): комнаты не пересекаются,
+  // так что небольшое наложение — тоже общая стена
+  const maxGap = (a: number, b: number) => Math.max(minGap, 0.22 * Math.min(a, b))
+  // наложение растёт с шумом так же, как щель — с размером комнаты
+  const minOverlap = (a: number, b: number) => -Math.max(minGap, 0.3 * Math.min(a, b))
+  for (let i = 0; i < rects.length; i++) {
+    for (let j = 0; j < rects.length; j++) {
+      if (i === j) continue
+      const a = rects[i]
+      const b = rects[j]
+      // a слева от b: правая грань a и левая грань b
+      const gapX = rawX[j * 2] - rawX[i * 2 + 1]
+      const spanY = overlap1(a.cy - a.bh / 2, a.cy + a.bh / 2, b.cy - b.bh / 2, b.cy + b.bh / 2)
+      if (gapX > minOverlap(a.bw, b.bw) && gapX <= maxGap(a.bw, b.bw) && spanY > Math.min(a.bh, b.bh) * 0.3) {
+        const mid = (rawX[j * 2] + rawX[i * 2 + 1]) / 2
+        rawX[j * 2] = mid
+        rawX[i * 2 + 1] = mid
+      }
+      // a над b: нижняя грань a и верхняя грань b
+      const gapY = rawY[j * 2] - rawY[i * 2 + 1]
+      const spanX = overlap1(a.cx - a.bw / 2, a.cx + a.bw / 2, b.cx - b.bw / 2, b.cx + b.bw / 2)
+      if (gapY > minOverlap(a.bh, b.bh) && gapY <= maxGap(a.bh, b.bh) && spanX > Math.min(a.bw, b.bw) * 0.3) {
+        const mid = (rawY[j * 2] + rawY[i * 2 + 1]) / 2
+        rawY[j * 2] = mid
+        rawY[i * 2 + 1] = mid
+      }
+    }
+  }
 }
 
 interface Axis {
@@ -240,11 +313,17 @@ interface Span {
  *
  * index — ось каждой грани (грань 2m — низ комнаты m, 2m+1 — верх); меняется на месте.
  */
-export function optimizeAxes(index: number[], seed: number[], raw: number[], spans: Span[], o: Required<ReconstructOptions>): number[] {
-  const cons = (): Constraint[] => spans.map((s, m) => ({ i: index[m * 2], j: index[m * 2 + 1], d: s.d, w: s.w }))
+export function optimizeAxes(index: number[], seed: number[], raw: number[], spans: Span[], o: Required<ReconstructOptions>, extras: Constraint[] = []): number[] {
+  const cons = (): Constraint[] => [...spans.map((s, m) => ({ i: index[m * 2], j: index[m * 2 + 1], d: s.d, w: s.w })), ...extras]
   const fit = () => fitAxis(seed, cons())
   const residual = (pos: number[], m: number) => (index[m * 2] === index[m * 2 + 1] ? 1e4 : pos[index[m * 2 + 1]] - pos[index[m * 2]] - spans[m].d)
-  const total = (pos: number[]) => spans.reduce((sum, s, m) => sum + s.w * residual(pos, m) ** 2, 0)
+  // Мерило для решений «перевесить грань» и «завести ось» — только подписи и
+  // цепочки. Оценки с картинки (вес 0.2) в подгонке участвуют, но решать не
+  // должны: рамка комнаты без подписи бывает мала на треть, и по ней легко
+  // разорвать общую стену, которую подписи держат верно.
+  const total = (pos: number[]) =>
+    spans.reduce((sum, s, m) => sum + (s.w >= 0.5 ? s.w * residual(pos, m) ** 2 : 0), 0) +
+    extras.reduce((sum, c) => sum + c.w * (pos[c.j] - pos[c.i] - c.d) ** 2, 0)
   const NEW_AXIS_GAIN = JOG_CM * JOG_CM
 
   let pos = fit()
@@ -253,7 +332,7 @@ export function optimizeAxes(index: number[], seed: number[], raw: number[], spa
   const pass = (allowNew: boolean): boolean => {
     const order = spans.map((_, m) => m).sort((a, b) => Math.abs(residual(pos, b)) - Math.abs(residual(pos, a)))
     for (const m of order) {
-      if (Math.abs(residual(pos, m)) < 3) continue
+      if (spans[m].w < 0.5 || Math.abs(residual(pos, m)) < 3) continue
       for (const e of [m * 2, m * 2 + 1]) {
         const other = e === m * 2 ? m * 2 + 1 : m * 2
         // где грань должна быть по подписи, если противоположная ось стоит верно
@@ -315,7 +394,28 @@ const overlap = (a1: number, a2: number, b1: number, b2: number): number => Math
 /**
  * Построить стены по комнатам. Подложка уже в нужном масштабе: scale — см в пикселе.
  */
-export function reconstructFromRooms(rooms: AiRoom[], u: Underlay, options: ReconstructOptions = {}): ReconstructResult {
+/** размерная цепочка с плана в координатах чертежа, см */
+export interface DimSpan {
+  a: Pt
+  b: Pt
+  cm: number
+}
+
+/** ближайшая ось к положению, не дальше tol */
+function nearestAxis(pos: number[], v: number, tol: number): number {
+  let best = -1
+  let bestD = tol
+  pos.forEach((p, k) => {
+    const d = Math.abs(p - v)
+    if (d < bestD) {
+      bestD = d
+      best = k
+    }
+  })
+  return best
+}
+
+export function reconstructFromRooms(rooms: AiRoom[], u: Underlay, options: ReconstructOptions = {}, dims: DimSpan[] = []): ReconstructResult {
   const o = { ...DEFAULT_RECONSTRUCT, ...options }
   const skipped: string[] = []
   const sized = rooms.filter(canRebuildFrom).map((r) => sizeRoom(r, u))
@@ -327,43 +427,105 @@ export function reconstructFromRooms(rooms: AiRoom[], u: Underlay, options: Reco
   }) as Rect[]
   if (!rects.length) return { walls: [], rooms: [], skipped, areaFit: null }
 
-  // 1. грани → оси по картинке. Расстояние между осями = внутренний размер + перегородка
+  // 1. грани → оси по картинке. Положение граней берётся с рамок картинки у всех
+  //    комнат одинаково (подписанные не «вырастают» относительно неподписанных —
+  //    иначе их общие стены не сведутся); подписанные размеры входят уравнениями
   const t = o.interiorCm
-  const rawX = rects.flatMap((r) => [r.cx - r.w / 2 - t / 2, r.cx + r.w / 2 + t / 2])
-  const rawY = rects.flatMap((r) => [r.cy - r.h / 2 - t / 2, r.cy + r.h / 2 + t / 2])
+  const rawX = rects.flatMap((r) => [r.cx - r.bw / 2 - t / 2, r.cx + r.bw / 2 + t / 2])
+  const rawY = rects.flatMap((r) => [r.cy - r.bh / 2 - t / 2, r.cy + r.bh / 2 + t / 2])
+  closeFacingGaps(rects, rawX, rawY, o.snapCm * 2.5)
   const cx = cluster(rawX, o.snapCm)
   const cy = cluster(rawY, o.snapCm)
 
-  // 2. какие стороны наружные: рядом нет комнаты. Смотрим по картинке, а не по осям:
-  //    ошибка сведения граней не должна превращать перегородку в наружную стену
+  // 2. какие стороны наружные: рядом нет комнаты. Смотрим по граням после сведения
+  //    щелей — у соседей они уже совпадают, — а не по осям: ошибка сведения граней
+  //    не должна превращать перегородку в наружную стену
   const extra = (o.exteriorCm - o.interiorCm) / 2
-  const near = (a: number, b: number) => Math.abs(a - b) <= o.snapCm * 1.5
+  const near = (a: number, b: number) => Math.abs(a - b) <= o.snapCm
   const sideIsExterior = (r: Rect, side: AiSide): boolean => {
-    const along = side === 'left' || side === 'right' ? r.h : r.w
-    const [l, rr, tp, bt] = [r.cx - r.w / 2, r.cx + r.w / 2, r.cy - r.h / 2, r.cy + r.h / 2]
+    const k = rects.indexOf(r)
+    const along = side === 'left' || side === 'right' ? r.bh : r.bw
+    const [l, rr, tp, bt] = [rawX[k * 2], rawX[k * 2 + 1], rawY[k * 2], rawY[k * 2 + 1]]
     let covered = 0
-    for (const s of rects) {
-      if (s === r) continue
-      const [sl, sr, st, sb] = [s.cx - s.w / 2, s.cx + s.w / 2, s.cy - s.h / 2, s.cy + s.h / 2]
+    rects.forEach((s, m) => {
+      if (s === r) return
+      const [sl, sr, st, sb] = [rawX[m * 2], rawX[m * 2 + 1], rawY[m * 2], rawY[m * 2 + 1]]
       if (side === 'left' && near(sr, l)) covered += overlap(tp, bt, st, sb)
       if (side === 'right' && near(sl, rr)) covered += overlap(tp, bt, st, sb)
       if (side === 'top' && near(sb, tp)) covered += overlap(l, rr, sl, sr)
       if (side === 'bottom' && near(st, bt)) covered += overlap(l, rr, sl, sr)
-    }
+    })
     return covered < along / 2
   }
 
   // 3. оси под размеры. Подпись весит как пять оценок с картинки
-  const specs: AxisSpec[] = rects.map((r) => ({
+  const specOf = (r: Rect): AxisSpec => ({
     dw: r.w + t + (sideIsExterior(r, 'left') ? extra : 0) + (sideIsExterior(r, 'right') ? extra : 0),
     dh: r.h + t + (sideIsExterior(r, 'top') ? extra : 0) + (sideIsExterior(r, 'bottom') ? extra : 0),
-    ww: r.wLabelled || r.spec.areaM2 ? 1 : 0.2,
-    wh: r.hLabelled || r.spec.areaM2 ? 1 : 0.2,
+    ww: r.wLabelled ? 1 : 0.05,
+    wh: r.hLabelled ? 1 : 0.05,
     wExact: r.wLabelled,
     hExact: r.hLabelled,
-  }))
-  const X = optimizeAxes(cx.index, cx.seed, rawX, specs.map((c) => ({ d: c.dw, w: c.ww, exact: c.wExact })), o)
-  const Y = optimizeAxes(cy.index, cy.seed, rawY, specs.map((c) => ({ d: c.dh, w: c.wh, exact: c.hExact })), o)
+  })
+
+  // Размерные цепочки с плана — тоже уравнения: между какими осями сколько
+  // сантиметров. Именно они держат то, что не подписано у комнат: коридоры,
+  // ниши, наружный контур. К осям цепочки привязываются после первой подгонки:
+  // тогда оси уже стоят по подписям, а не по рамкам с картинки
+  let extrasX: Constraint[] = []
+  let extrasY: Constraint[] = []
+  const bindDims = (X: number[], Y: number[]) => {
+    for (const d of dims) {
+      const dx = Math.abs(d.b.x - d.a.x)
+      const dy = Math.abs(d.b.y - d.a.y)
+      // концы цепочки на картинке названы примерно, а неподписанная ось стоит
+      // по сжатой рамке: допуск растёт с длиной цепочки
+      const tol = Math.max(o.snapCm * 2, d.cm * 0.2)
+      if (dx >= dy * 4) {
+        const i = nearestAxis(X, Math.min(d.a.x, d.b.x), tol)
+        const j = nearestAxis(X, Math.max(d.a.x, d.b.x), tol)
+        if (i >= 0 && j >= 0 && i !== j) extrasX.push({ i, j, d: d.cm, w: 1 })
+      } else if (dy >= dx * 4) {
+        const i = nearestAxis(Y, Math.min(d.a.y, d.b.y), tol)
+        const j = nearestAxis(Y, Math.max(d.a.y, d.b.y), tol)
+        if (i >= 0 && j >= 0 && i !== j) extrasY.push({ i, j, d: d.cm, w: 1 })
+      }
+    }
+  }
+
+  // Площадь — уравнение второго порядка: ширина × глубина. Решаем по очереди:
+  // подгоняем оси, смотрим, какая площадь вышла, поправляем неподписанный размер
+  // от подписанного и подгоняем снова. Две-три итерации сходятся.
+  let X: number[] = cx.seed
+  let Y: number[] = cy.seed
+  for (let round = 0; round < 5; round++) {
+    const specs = rects.map(specOf)
+    X = optimizeAxes(cx.index, X, rawX, specs.map((c) => ({ d: c.dw, w: c.ww, exact: c.wExact })), o, extrasX)
+    Y = optimizeAxes(cy.index, Y, rawY, specs.map((c) => ({ d: c.dh, w: c.wh, exact: c.hExact })), o, extrasY)
+    let changed = false
+    if (round === 0 && dims.length) {
+      bindDims(X, Y)
+      changed = extrasX.length + extrasY.length > 0
+    }
+    rects.forEach((r, k) => {
+      if (!r.areaCm2) return
+      const spec = specs[k]
+      const solvedW = X[cx.index[k * 2 + 1]] - X[cx.index[k * 2]] - (spec.dw - r.w)
+      const solvedH = Y[cy.index[k * 2 + 1]] - Y[cy.index[k * 2]] - (spec.dh - r.h)
+      if (solvedW <= 30 || solvedH <= 30) return
+      const ratio = r.areaCm2 / (solvedW * solvedH)
+      if (Math.abs(ratio - 1) < 0.03) return
+      if (!r.fixedW && !r.fixedH) {
+        const q = Math.sqrt(ratio)
+        r.w = solvedW * q
+        r.h = solvedH * q
+      } else if (!r.fixedH) r.h = r.areaCm2 / solvedW
+      else if (!r.fixedW) r.w = r.areaCm2 / solvedH
+      else return
+      changed = true
+    })
+    if (!changed) break
+  }
   rects.forEach((r, k) => {
     r.xi = cx.index[k * 2]
     r.xj = cx.index[k * 2 + 1]

@@ -128,3 +128,20 @@ describe('проверка товара', () => {
     expect(() => checkAiProduct({ currency: 'RUB' })).toThrow(/пусто/)
   })
 })
+
+describe('размеры комнат в разных обличьях', () => {
+  it('width_m, height и строка «4.01x4.26» читаются как сантиметры', () => {
+    const plan = checkAiPlan({
+      rooms: [
+        { name: 'a', x: 0.2, y: 0.2, box: { x1: 0.1, y1: 0.1, x2: 0.3, y2: 0.3 }, width_m: 4.01, height: 4.26 },
+        { name: 'b', x: 0.6, y: 0.2, box: { x1: 0.5, y1: 0.1, x2: 0.7, y2: 0.3 }, size: '3,30 × 4,26' },
+        { name: 'c', x: 0.6, y: 0.6, box: { x1: 0.5, y1: 0.5, x2: 0.7, y2: 0.7 }, dimensions: '180x258' },
+      ],
+    })
+    expect(plan.rooms.map((r) => [r.widthCm, r.depthCm])).toEqual([
+      [401, 426],
+      [330, 426],
+      [180, 258],
+    ])
+  })
+})
