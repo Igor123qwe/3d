@@ -6,7 +6,9 @@ import { fitModel, M } from './scene3d'
 import { modelKey } from './polyhaven'
 
 let renderer: THREE.WebGLRenderer | null = null
+/** картинки видов сверху; ограничиваем, чтобы кэш не рос без предела */
 const cache = new Map<string, Promise<string>>()
+const CACHE_LIMIT = 64
 
 export const topViewKey = (ref: ModelRef, w: number, d: number, h: number): string => `${modelKey(ref)}|${Math.round(w)}x${Math.round(d)}x${Math.round(h)}`
 
@@ -52,6 +54,11 @@ export function renderTopView(ref: ModelRef, w: number, d: number, h: number): P
     })()
     p.catch(() => cache.delete(key))
     cache.set(key, p)
+    while (cache.size > CACHE_LIMIT) {
+      const oldest = cache.keys().next().value
+      if (oldest === undefined) break
+      cache.delete(oldest)
+    }
   }
   return p
 }
