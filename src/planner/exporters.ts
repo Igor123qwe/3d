@@ -147,5 +147,24 @@ export function normalizePlan(p: Partial<Plan>): Plan {
       return { id: typeof d.id === 'string' ? d.id : `d${i}`, a, b, offset: num(d.offset, 30) }
     }),
     settings: { grid: Math.max(1, num(p.settings?.grid, 10)) },
+    ...(underlayOf(p.underlay) ? { underlay: underlayOf(p.underlay)! } : {}),
+  }
+}
+
+function underlayOf(v: unknown): Plan['underlay'] | null {
+  const u = v as Partial<NonNullable<Plan['underlay']>> | null
+  if (!u || typeof u.src !== 'string' || !u.src) return null
+  const w = num(u.px?.w, 0)
+  const h = num(u.px?.h, 0)
+  if (!(w > 0) || !(h > 0)) return null
+  return {
+    src: u.src,
+    px: { w, h },
+    x: num(u.x, 0),
+    y: num(u.y, 0),
+    scale: Math.max(0.01, num(u.scale, 1)),
+    opacity: Math.min(1, Math.max(0.05, num(u.opacity, 0.55))),
+    visible: u.visible !== false,
+    locked: !!u.locked,
   }
 }

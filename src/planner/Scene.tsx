@@ -232,6 +232,20 @@ export const Scene: React.FC<SceneProps> = ({ plan, rooms, check, layers, unit, 
         </pattern>
       </defs>
 
+      {/* подложка — под всем чертежом */}
+      {layers.underlay && plan.underlay?.visible && (
+        <image
+          href={plan.underlay.src}
+          x={plan.underlay.x}
+          y={plan.underlay.y}
+          width={plan.underlay.px.w * plan.underlay.scale}
+          height={plan.underlay.px.h * plan.underlay.scale}
+          opacity={plan.underlay.opacity}
+          preserveAspectRatio="none"
+          pointerEvents="none"
+        />
+      )}
+
       {/* полы комнат */}
       {layers.rooms &&
         rooms.map((r) => {
@@ -361,6 +375,10 @@ export function planBounds(plan: Plan): { minX: number; minY: number; maxX: numb
   for (const w of plan.walls) pts.push(...wallPolygon(w, plan.walls))
   for (const f of plan.furniture) pts.push(...obbCorners(f.x, f.y, f.w, f.d, f.rot))
   for (const d of plan.dims) pts.push(d.a, d.b)
+  const u = plan.underlay
+  if (u?.visible) {
+    pts.push({ x: u.x, y: u.y }, { x: u.x + u.px.w * u.scale, y: u.y + u.px.h * u.scale })
+  }
   if (!pts.length) return null
   return bboxOf(pts)
 }

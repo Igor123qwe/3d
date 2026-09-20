@@ -1,5 +1,5 @@
 // Операции над планом: чистые функции Plan -> Plan
-import type { DimensionLine, Furniture, Opening, OpeningKind, Plan, Pt, Room, RoomMeta, Selection, Wall } from './types'
+import type { DimensionLine, Furniture, Opening, OpeningKind, Plan, Pt, Room, RoomMeta, Selection, Underlay, Wall } from './types'
 import { uid } from './types'
 import { CATALOG_MAP, type CatalogItem } from './catalog'
 import { add, dist, eq, lerp, mul, norm, normDeg, perp, pointInPoly, sub } from './geometry'
@@ -178,6 +178,15 @@ export function nudgeFurniture(plan: Plan, id: string, dx: number, dy: number): 
   const f = plan.furniture.find((x) => x.id === id)
   if (!f) return plan
   return updateFurniture(plan, id, { x: f.x + dx, y: f.y + dy })
+}
+
+export function setUnderlay(plan: Plan, underlay: Underlay | undefined): Plan {
+  return { ...plan, underlay }
+}
+
+export function updateUnderlay(plan: Plan, patch: Partial<Underlay>): Plan {
+  if (!plan.underlay) return plan
+  return { ...plan, underlay: { ...plan.underlay, ...patch } }
 }
 
 export function updateRoomMeta(plan: Plan, id: string, patch: Partial<RoomMeta>): Plan {

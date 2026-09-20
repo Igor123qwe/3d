@@ -23,7 +23,9 @@ import {
   updateDim,
   updateFurniture,
   updateOpening,
+  setUnderlay,
   updateRoomMeta,
+  updateUnderlay,
   updateWall,
   WALL_THICKNESSES,
 } from './ops'
@@ -31,6 +33,7 @@ import { dist, fmtArea, fmtLen, fmtNum, lerp, normDeg } from './geometry'
 import { getTelegramWebApp } from '../telegram'
 import { guessType, modelRefFromAsset, modelRefFromUrl, phAssets, phCategories, phDimsCm, phInfo, phPage, type PhAsset } from './polyhaven'
 import { decodePlan, parseHash, planShareUrl } from './share'
+import { DEFAULT_TRACE, calibrate, grayscaleOf, loadUnderlayImage, makeUnderlay, tracePlan, type TraceOptions } from './underlay'
 import { modelKey } from './polyhaven'
 import './planner.css'
 
@@ -39,7 +42,7 @@ const View3D = lazy(() => import('./View3D'))
 const LS_PLAN = 'boop.planner.plan.v1'
 const LS_UI = 'boop.planner.ui.v1'
 
-const DEFAULT_LAYERS: Layers = { grid: true, rooms: true, furniture: true, electric: true, dims: true, ergo: false, labels: true }
+const DEFAULT_LAYERS: Layers = { grid: true, underlay: true, rooms: true, furniture: true, electric: true, dims: true, ergo: false, labels: true }
 
 interface UiPrefs {
   layers: Layers
@@ -172,6 +175,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const [phItems, setPhItems] = useState<PhAsset[]>([])
   const [phState, setPhState] = useState<'idle' | 'loading' | 'error'>('idle')
   const [customModelUrl, setCustomModelUrl] = useState('')
+  const [trace, setTrace] = useState<TraceOptions>(DEFAULT_TRACE)
+  const [tracing, setTracing] = useState(false)
+  const imageInput = useRef<HTMLInputElement>(null)
   const [photoMode, setPhotoMode] = useState(() => {
     try {
       return localStorage.getItem('boop.planner.photo') !== '0'
@@ -445,6 +451,68 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     }
     void run()
   }, [exportJob]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const onOpenImage = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0]
+    e.target.value = ''
+    if (!f) return
+    try {
+      const img = await loadUnderlayImage(f)
+      const b = planBounds(plan)
+      const center = b ? { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 } : { x: 0, y: 0 }
+      history.apply((p) => setUnderlay(p, makeUnderlay(img, center)))
+      setLayers((l) => ({ ...l, underlay: true }))
+      setPanel('props')
+      setSelection(null)
+      setTimeout(() => canvasRef.current?.fit(), 50)
+      setToast('Схема загружена. Задайте масштаб кнопкой «Калибровать», потом обведите или распознайте стены')
+    } catch (err) {
+      setToast((err as Error).message)
+    }
+  }
+
+  const onCalibrate = (a: Pt, b: Pt) => {
+    const u = plan.underlay
+    if (!u) return
+    const answer = window.prompt('Какой размер у показанного отрезка на плане, в сантиметрах?', '372')
+    if (answer === null) return
+    const cm = Number(answer.replace(',', '.'))
+    if (!Number.isFinite(cm) || cm <= 0) {
+      setToast('Нужно число больше нуля, например 372')
+      return
+    }
+    history.apply((p) => (p.underlay ? { ...p, underlay: calibrate(p.underlay, a, b, cm) } : p))
+    setTool('select')
+    setToast(`Масштаб задан: ${(cm / 100).toFixed(2)} м на показанном отрезке`)
+  }
+
+  const detectWallsFromImage = async () => {
+    const u = plan.underlay
+    if (!u || tracing) return
+    setTracing(true)
+    try {
+      const gray = await grayscaleOf(u)
+      const { walls, openings } = tracePlan(gray, u, trace)
+      if (!walls.length) {
+        setToast('Стены не найдены: попробуйте поднять чувствительность или уменьшить минимальную длину')
+        return
+      }
+      const replace =
+        plan.walls.length > 0 &&
+        window.confirm(`Найдено стен: ${walls.length}, проёмов: ${openings.length}. Заменить нарисованные стены? «Отмена» — добавить к ним.`)
+      history.apply((p) => ({
+        ...p,
+        walls: replace ? walls : [...p.walls, ...walls],
+        openings: replace ? openings : [...p.openings, ...openings],
+      }))
+      setSelection(null)
+      setToast(`Распознано: стен ${walls.length}, проёмов ${openings.length}. Проверьте и поправьте вручную`)
+    } catch (err) {
+      setToast((err as Error).message)
+    } finally {
+      setTracing(false)
+    }
+  }
 
   const onOpenFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]
@@ -812,6 +880,56 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             <div className="pl-note">Наружные стены обычно 38–51 см, межквартирные 20–25, перегородки 8–12 см.</div>
           </div>
         )}
+        {plan.underlay && (
+          <div className="pl-block">
+            <div className="pl-props-title">Схема-подложка</div>
+            <div className="pl-note">
+              Масштаб: {plan.underlay.scale.toFixed(2)} см в пикселе. Ширина картинки на плане —{' '}
+              {fmtLen(plan.underlay.px.w * plan.underlay.scale, 'm')}.
+            </div>
+            <div className="pl-row">
+              <button className={`pl-btn ${tool === 'calibrate' ? 'active' : ''}`} onClick={() => setTool('calibrate')}>
+                📏 Калибровать
+              </button>
+              <button className="pl-btn" onClick={detectWallsFromImage} disabled={tracing}>
+                {tracing ? 'Распознаю…' : '✨ Распознать стены'}
+              </button>
+            </div>
+            <label className="pl-field pl-field-col">
+              <span>Прозрачность</span>
+              <input
+                type="range"
+                min={5}
+                max={100}
+                step={5}
+                value={Math.round(plan.underlay.opacity * 100)}
+                onChange={(e) => history.silent((p) => updateUnderlay(p, { opacity: Number(e.target.value) / 100 }))}
+              />
+            </label>
+            <label className="pl-field">
+              <span>Закрепить (не двигать мышью)</span>
+              <input type="checkbox" checked={plan.underlay.locked} onChange={() => history.silent((p) => updateUnderlay(p, { locked: !p.underlay?.locked }))} />
+            </label>
+            <div className="pl-block">
+              <div className="pl-note">Настройки распознавания</div>
+              <label className="pl-field pl-field-col">
+                <span>Чувствительность: {trace.sensitivity}</span>
+                <input type="range" min={10} max={95} step={5} value={trace.sensitivity} onChange={(e) => setTrace((t) => ({ ...t, sensitivity: Number(e.target.value) }))} />
+              </label>
+              <label className="pl-field">
+                <span>Мин. длина стены, см</span>
+                <NumberField value={trace.minLengthCm} min={20} max={500} step={10} onCommit={(v) => setTrace((t) => ({ ...t, minLengthCm: v }))} />
+              </label>
+              <label className="pl-field">
+                <span>Макс. толщина стены, см</span>
+                <NumberField value={trace.maxThicknessCm} min={10} max={150} step={5} onCommit={(v) => setTrace((t) => ({ ...t, maxThicknessCm: v }))} />
+              </label>
+            </div>
+            <button className="pl-btn danger" onClick={() => history.apply((p) => setUnderlay(p, undefined))}>
+              🗑 Убрать подложку
+            </button>
+          </div>
+        )}
         <div className="pl-props-title">План «{plan.name}»</div>
         <div className="pl-stats">
           <div>
@@ -1055,6 +1173,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             <div className="pl-menu-title">Файлы</div>
             <button className="pl-menu-item" onClick={() => { downloadJson(plan); setMenu(null) }}>Сохранить план (JSON)</button>
             <button className="pl-menu-item" onClick={() => { fileInput.current?.click(); setMenu(null) }}>Открыть план (JSON)…</button>
+            <button className="pl-menu-item" onClick={() => { imageInput.current?.click(); setMenu(null) }}>Загрузить схему картинкой…</button>
             <button className="pl-menu-item" onClick={() => doExport('png')}>Экспорт картинки (PNG)</button>
             <button className="pl-menu-item" onClick={() => doExport('svg')}>Экспорт вектора (SVG)</button>
             <div className="pl-menu-title">Единицы на плане</div>
@@ -1080,6 +1199,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             {(
               [
                 ['grid', 'Сетка'],
+                ['underlay', 'Схема-подложка'],
                 ['rooms', 'Полы и названия комнат'],
                 ['furniture', 'Мебель'],
                 ['electric', 'Электрика'],
@@ -1098,6 +1218,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           </div>
         )}
         <input ref={fileInput} type="file" accept=".json,application/json" style={{ display: 'none' }} onChange={onOpenFile} />
+        <input ref={imageInput} type="file" accept="image/*" style={{ display: 'none' }} onChange={onOpenImage} />
       </header>
 
       <nav className={`pl-tools ${view3d ? 'hidden' : ''}`}>
@@ -1107,6 +1228,12 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             <span className="pl-tool-name">{t.name}</span>
           </button>
         ))}
+        {plan.underlay && (
+          <button className={`pl-tool ${tool === 'calibrate' ? 'active' : ''}`} onClick={() => setTool('calibrate')} title="Задать масштаб подложки по известному размеру">
+            <span className="pl-tool-icon">📐</span>
+            <span className="pl-tool-name">Масштаб</span>
+          </button>
+        )}
         <button className={`pl-tool ${tool === 'place' || panel === 'catalog' ? 'active' : ''}`} onClick={openCatalog} title="Каталог мебели">
           <span className="pl-tool-icon">🛋</span>
           <span className="pl-tool-name">Мебель</span>
@@ -1147,6 +1274,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           onViewChange={setView}
           onHint={setHint}
           photos={photos}
+          onCalibrate={onCalibrate}
         />
       )}
 

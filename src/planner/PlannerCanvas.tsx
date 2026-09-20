@@ -78,6 +78,8 @@ export interface CanvasProps {
   onViewChange: (v: View) => void
   onHint: (text: string) => void
   photos?: Record<string, string>
+  /** пользователь показал отрезок известной длины на подложке */
+  onCalibrate?: (a: Pt, b: Pt) => void
 }
 
 type Drag =
@@ -91,6 +93,7 @@ type Drag =
   | { kind: 'wall'; id: string; plan0: Plan; start: Pt; wall0: Wall }
   | { kind: 'opening'; id: string; plan0: Plan }
   | { kind: 'dim'; id: string; plan0: Plan; dim0: DimensionLine }
+  | { kind: 'underlay'; start: Pt; plan0: Plan }
 
 const NS = { vectorEffect: 'non-scaling-stroke' as const }
 const sameSel = (a: Selection, b: Selection) => (a === null && b === null) || (!!a && !!b && a.kind === b.kind && a.id === b.id)
@@ -102,7 +105,7 @@ const isEditable = (t: EventTarget | null) => {
 }
 
 export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) => {
-  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view, onViewChange, onHint, photos } = props
+  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view, onViewChange, onHint, photos, onCalibrate } = props
   const svgRef = useRef<SVGSVGElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({ w: 800, h: 600 })
@@ -112,6 +115,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   const [roomDraft, setRoomDraft] = useState<{ a: Pt; b: Pt } | null>(null)
   const [dimStart, setDimStart] = useState<Pt | null>(null)
   const [measure, setMeasure] = useState<{ a: Pt; b: Pt; live: boolean } | null>(null)
+  const [calibA, setCalibA] = useState<Pt | null>(null)
   const [hover, setHover] = useState<Selection>(null)
   const [ghost, setGhost] = useState<{ x: number; y: number; rot: number } | null>(null)
   const [ghostRot, setGhostRot] = useState(0)
@@ -215,6 +219,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     setRoomDraft(null)
     setDimStart(null)
     setMeasure(null)
+    setCalibA(null)
     setGhost(null)
     setOpeningGhost(null)
     setGuides([])
@@ -253,9 +258,14 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       case 'measure':
         text = measure?.live ? 'Клик — зафиксировать измерение' : 'Клик — начать измерение рулеткой'
         break
+      case 'calibrate':
+        text = calibA
+          ? 'Клик — вторая точка известного размера, потом введите его длину'
+          : 'Покажите на подложке отрезок с известным размером: клик — первая точка'
+        break
     }
     onHint(text)
-  }, [tool, selection, draft.length, placing, dimStart, measure?.live, onHint])
+  }, [tool, selection, draft.length, placing, dimStart, measure?.live, calibA, onHint])
 
   // ---------- вспомогательные ----------
   const handlePositions = (f: Furniture) => {
@@ -315,7 +325,8 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         }
         case 'room':
         case 'dimension':
-        case 'measure': {
+        case 'measure':
+        case 'calibrate': {
           const s = snapWallPoint(raw, p.walls, { grid: g, tol, ortho: false })
           setCursor({ p: s.p, kind: s.kind })
           setGuides(s.guides)
@@ -412,9 +423,17 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           setMeasure((m) => (!m || !m.live ? { a: s.p, b: s.p, live: true } : { ...m, b: s.p, live: false }))
           return
         }
+        case 'calibrate': {
+          if (!calibA) setCalibA(raw)
+          else {
+            onCalibrate?.(calibA, raw)
+            setCalibA(null)
+          }
+          return
+        }
       }
     },
-    [tool, tol, ortho, wallThickness, history, rooms, placing, ghostRot, dimStart, onSelect, onToolChange, onHint, finishDraft],
+    [tool, tol, ortho, wallThickness, history, rooms, placing, ghostRot, dimStart, calibA, onCalibrate, onSelect, onToolChange, onHint, finishDraft],
   )
 
   // ---------- указатель ----------
@@ -500,6 +519,14 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       if (!sameSel(hit, selection)) onSelect(hit)
       drag.current = { kind: 'dim', id: hit.id, plan0: plan, dim0: plan.dims.find((d) => d.id === hit.id)! }
       return
+    }
+    const u = plan.underlay
+    if (!hit && u && !u.locked && u.visible && layers.underlay) {
+      const inside = raw.x >= u.x && raw.y >= u.y && raw.x <= u.x + u.px.w * u.scale && raw.y <= u.y + u.px.h * u.scale
+      if (inside) {
+        drag.current = { kind: 'underlay', start: raw, plan0: plan }
+        return
+      }
     }
     drag.current = { kind: 'pan', sx: e.clientX, sy: e.clientY, view0: viewRef.current, moved: false, clickSel: hit }
   }
@@ -601,6 +628,12 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         if (!op) return
         const s = snapOpening(raw, d.plan0, op.width, tol + 15)
         if (s) history.preview(updateOpening(d.plan0, d.id, { wallId: s.wallId, t: s.t }))
+        return
+      }
+      case 'underlay': {
+        const u = d.plan0.underlay
+        if (!u) return
+        history.preview({ ...d.plan0, underlay: { ...u, x: u.x + (raw.x - d.start.x), y: u.y + (raw.y - d.start.y) } })
         return
       }
       case 'dim': {
@@ -850,6 +883,15 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
             </g>
           )}
 
+          {/* калибровка масштаба подложки */}
+          {calibA && cursor && (
+            <g>
+              <line x1={calibA.x} y1={calibA.y} x2={cursor.p.x} y2={cursor.p.y} stroke="#16a34a" strokeWidth={1.5} {...NS} />
+              <circle cx={calibA.x} cy={calibA.y} r={4 / zoom} fill="#16a34a" />
+              {lengthLabel(calibA, cursor.p, 'calib')}
+            </g>
+          )}
+
           {/* рулетка */}
           {measure && (
             <g>
@@ -861,7 +903,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           )}
 
           {/* маркер курсора при рисовании */}
-          {cursor && (tool === 'wall' || tool === 'room' || tool === 'dimension' || tool === 'measure') && (
+          {cursor && (tool === 'wall' || tool === 'room' || tool === 'dimension' || tool === 'measure' || tool === 'calibrate') && (
             <g pointerEvents="none">
               <circle cx={cursor.p.x} cy={cursor.p.y} r={(cursor.kind === 'endpoint' ? 7 : 4) / zoom} fill="none" stroke={cursor.kind === 'endpoint' ? '#f43f5e' : ACCENT} strokeWidth={1.5} {...NS} />
             </g>

@@ -18,7 +18,9 @@ const fromB64url = (s: string): Uint8Array => {
 }
 
 export async function encodePlan(plan: Plan): Promise<string> {
-  const data = new TextEncoder().encode(JSON.stringify(plan))
+  // картинка подложки весит сотни килобайт — в ссылку она не поместится
+  const { underlay: _underlay, ...light } = plan
+  const data = new TextEncoder().encode(JSON.stringify(light))
   if (typeof CompressionStream !== 'undefined') {
     try {
       const stream = new Blob([data]).stream().pipeThrough(new CompressionStream('deflate-raw'))

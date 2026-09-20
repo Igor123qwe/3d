@@ -77,6 +77,23 @@ export interface PlanSettings {
   grid: number
 }
 
+/** Картинка плана под чертежом: по ней обводят или распознают стены */
+export interface Underlay {
+  /** изображение (data URL) */
+  src: string
+  /** размер изображения, px */
+  px: { w: number; h: number }
+  /** положение левого верхнего угла на плане, см */
+  x: number
+  y: number
+  /** сантиметров в одном пикселе изображения */
+  scale: number
+  opacity: number
+  visible: boolean
+  /** заблокирована: не двигается мышью */
+  locked: boolean
+}
+
 export interface Plan {
   version: 1
   name: string
@@ -86,6 +103,7 @@ export interface Plan {
   rooms: RoomMeta[]
   dims: DimensionLine[]
   settings: PlanSettings
+  underlay?: Underlay
 }
 
 /** Комната, найденная по замкнутому контуру стен */
@@ -119,11 +137,13 @@ export type Tool =
   | 'place'
   | 'dimension'
   | 'measure'
+  | 'calibrate'
 
 export type LengthUnit = 'cm' | 'mm' | 'm'
 
 export interface Layers {
   grid: boolean
+  underlay: boolean
   rooms: boolean
   furniture: boolean
   electric: boolean
