@@ -4,10 +4,11 @@
 // показывал бы приложение без серверной части. Плагин переводит запрос Node
 // в стандартный Request, зовёт обработчик и пишет обратно его Response —
 // ровно так же, как это делает Vercel.
-import { loadEnv, type Connect, type Plugin, type ViteDevServer } from 'vite'
+import type { Connect, Plugin, ViteDevServer } from 'vite'
 import type { ServerResponse } from 'node:http'
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { envHint, readDotenv } from './dotenv'
 
 type Handler = (req: Request) => Promise<Response> | Response
 
@@ -44,13 +45,32 @@ async function send(res: ServerResponse, out: Response): Promise<void> {
   res.end(Buffer.from(await out.arrayBuffer()))
 }
 
-function middleware(server: ViteDevServer, root: string): Connect.NextHandleFunction {
+/**
+ * Переменные из .env → process.env. Vite сам туда ничего не кладёт, а серверные
+ * функции читают ключ именно оттуда. Читается заново на каждый запрос к /api:
+ * ключ, вписанный в .env при работающем сервере, подхватывается без перезапуска.
+ * То, что задано в окружении самой оболочки при старте, файл не перебивает.
+ */
+function applyEnv(root: string, shell: Record<string, string | undefined>): void {
+  const env = readDotenv(root)
+  for (const [key, value] of Object.entries(env)) {
+    if (shell[key] === undefined) process.env[key] = value
+  }
+  // ключ убрали из файла — убираем и из процесса
+  for (const key of Object.keys(process.env)) {
+    if (shell[key] === undefined && env[key] === undefined && /^(ROUTERAI_|AI_)/.test(key) && key !== 'AI_ENV_HINT') delete process.env[key]
+  }
+  process.env.AI_ENV_HINT = process.env.ROUTERAI_API_KEY || process.env.AI_API_KEY ? '' : envHint(root, env)
+}
+
+function middleware(server: ViteDevServer, root: string, shell: Record<string, string | undefined>): Connect.NextHandleFunction {
   return (req, res, next) => {
     const pathname = (req.url || '').split('?')[0]
     if (!pathname.startsWith('/api/')) return next()
     const file = fileFor(pathname, root)
     if (!file) return next()
     void (async () => {
+      applyEnv(root, shell)
       try {
         const mod = (await server.ssrLoadModule(file)) as { default?: Handler }
         if (typeof mod.default !== 'function') throw new Error(`${file}: нет обработчика по умолчанию`)
@@ -66,21 +86,19 @@ function middleware(server: ViteDevServer, root: string): Connect.NextHandleFunc
 
 export function apiDev(): Plugin {
   let root = process.cwd()
+  // снимок окружения оболочки до чтения .env: его файл перебивать не должен
+  const shell: Record<string, string | undefined> = { ...process.env }
   return {
     name: 'planner-api-dev',
     apply: 'serve',
     configResolved(cfg) {
-      root = cfg.root
-      // Vite сам в process.env ничего не кладёт, а серверные функции читают
-      // ключ именно оттуда. Без этого .env локально был бы бесполезен, хотя
-      // на Vercel те же переменные работают.
-      const env = loadEnv(cfg.mode, cfg.envDir || root, '')
-      for (const [key, value] of Object.entries(env)) {
-        if (process.env[key] === undefined) process.env[key] = value
-      }
+      root = cfg.envDir || cfg.root
+      applyEnv(root, shell)
+      const hint = process.env.AI_ENV_HINT
+      cfg.logger.info(hint ? `  ИИ выключен: ${hint}` : '  ИИ включён: ключ ROUTERAI_API_KEY найден')
     },
     configureServer(server) {
-      server.middlewares.use(middleware(server, root))
+      server.middlewares.use(middleware(server, root, shell))
     },
   }
 }

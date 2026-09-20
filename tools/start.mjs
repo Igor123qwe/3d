@@ -4,7 +4,7 @@
 // Вся работа здесь, а не в start.cmd и start.sh: bat-файл с кириллицей и
 // ветвлениями слишком легко ломается о кодировку и переводы строк, а Node
 // одинаково ведёт себя во всех системах.
-import { existsSync, statSync, copyFileSync, writeFileSync } from 'node:fs'
+import { existsSync, statSync, copyFileSync, writeFileSync, readFileSync, renameSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -50,14 +50,24 @@ if (!existsSync(join(root, 'node_modules')) || !existsSync(stamp) || mtime(lock)
 
 // ---------- 3. настройки ----------
 const env = join(root, '.env')
+// Блокнот в Windows любит дописать .txt — чиним молча, но говорим об этом
+const envTxt = join(root, '.env.txt')
+if (!existsSync(env) && existsSync(envTxt)) {
+  renameSync(envTxt, env)
+  say('[3/4] Файл .env.txt переименован в .env (Блокнот дописал расширение).')
+}
 if (!existsSync(env)) {
   const sample = join(root, '.env.example')
   if (existsSync(sample)) copyFileSync(sample, env)
   say('[3/4] Создан файл .env. Чтобы включить ИИ, уберите в нём решётку перед')
-  say('      ROUTERAI_API_KEY и вставьте свой ключ, потом запустите заново.')
-  say('      Без ключа приложение работает, просто без кнопок с ИИ.')
+  say('      ROUTERAI_API_KEY и вставьте свой ключ — перезапускать не нужно,')
+  say('      сервер перечитает .env сам. Без ключа всё работает, но без ИИ.')
 } else {
-  say('[3/4] Настройки на месте.')
+  const text = readFileSync(env, 'utf8').replace(/^\uFEFF/, '')
+  const m = /^\s*ROUTERAI_API_KEY\s*=\s*(\S+)/m.exec(text)
+  if (m && m[1] !== 'sk-...') say('[3/4] Настройки на месте, ключ ИИ найден.')
+  else if (/^\s*#.*ROUTERAI_API_KEY/m.test(text)) say('[3/4] ИИ выключен: в .env строка ROUTERAI_API_KEY закомментирована — уберите решётку.')
+  else say('[3/4] ИИ выключен: в .env нет ROUTERAI_API_KEY=ваш_ключ.')
 }
 
 // ---------- 4. запуск ----------

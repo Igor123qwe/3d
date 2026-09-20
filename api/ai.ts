@@ -23,8 +23,11 @@ export default async function handler(req: Request): Promise<Response> {
   }
 
   const spent = spentToday()
+  // подсказка, почему ключа нет: её кладёт плагин разработки, прочитав .env
+  const hint = !cfg && process.env.AI_ENV_HINT ? process.env.AI_ENV_HINT : undefined
   return json({
     enabled: !!cfg,
+    hint,
     tasks: TASK_NAMES.map((t) => {
       const spec = specFor(t)
       return { task: t, about: spec.about, vision: spec.vision, maxTokens: spec.maxTokens, models: chainFor(t) }

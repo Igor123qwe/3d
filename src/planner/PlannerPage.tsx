@@ -1525,8 +1525,23 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                     </button>
                     <span className="pl-note">
                       Обводка — грубый черновик: цифры на плане она не читает, а выноски и штриховку принимает за стены. Точнее — «Распознать с ИИ»: чертёж строится
-                      заново по размерам с плана. Для этого нужен ключ ROUTERAI_API_KEY в .env (см. README). Или нарисуйте стены поверх картинки: «Комната», «Стена».
+                      заново по размерам с плана. Или нарисуйте стены поверх картинки: «Комната», «Стена».
                     </span>
+                    <div className="pl-note pl-note-warn">
+                      <b>ИИ выключен.</b> {ai.hint || 'Нужен ключ ROUTERAI_API_KEY в файле .env рядом с package.json (см. README).'}
+                    </div>
+                    <button
+                      className="pl-btn small"
+                      onClick={() =>
+                        void aiStatus(true).then((st) => {
+                          setAi(st)
+                          setToast(st.enabled ? 'Ключ найден: кнопки ИИ включены' : `ИИ всё ещё выключен. ${st.hint || 'Ключ не найден'}`)
+                        })
+                      }
+                      title="Перечитать .env: ключ подхватывается без перезапуска"
+                    >
+                      <Icon name="history" size={16} /> Я добавил ключ — проверить
+                    </button>
                   </>
                 )}
               </li>

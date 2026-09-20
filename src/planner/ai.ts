@@ -16,6 +16,8 @@ export interface AiTaskInfo {
 
 export interface AiStatus {
   enabled: boolean
+  /** почему ИИ выключен: подсказка про .env от локального сервера */
+  hint?: string
   tasks: AiTaskInfo[]
   spentToday: { rub: number; calls: number; limitRub: number } | null
 }
