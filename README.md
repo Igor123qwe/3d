@@ -5,6 +5,7 @@
 Работает без установки — в обычном браузере и внутри Telegram Mini App.
 
 **Демо:** [igor123qwe.github.io/3d](https://igor123qwe.github.io/3d/) — откройте на телефоне, чтобы проверить AR.
+Публикация включается один раз: Settings → Pages → Source: **GitHub Actions**. После этого каждый push в `main` обновляет демо.
 
 ![План квартиры](docs/01-plan.png)
 
@@ -46,7 +47,9 @@ npm run build      # сборка в dist/
 npm run preview    # просмотр собранной версии
 ```
 
-Деплой на Vercel работает без настройки: `vercel.json` уже в репозитории, страница `/planner` ведёт на приложение. Каждый push в `main` также публикуется на GitHub Pages (workflow `.github/workflows/pages.yml`); для размещения в подпапке путь задаётся переменной `BASE_PATH`.
+Деплой на Vercel работает без настройки: `vercel.json` уже в репозитории, страница `/planner` ведёт на приложение.
+
+Публикация на GitHub Pages (`.github/workflows/pages.yml`) требует один раз включить Pages: Settings → Pages → Source: **GitHub Actions**. Путь размещения берётся из переменной `BASE_PATH`, поэтому приложение одинаково работает и в корне домена, и в подпапке.
 
 ## Как устроено
 
