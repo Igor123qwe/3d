@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { addSpent, askJson, chainFor, rateLimit, spentToday, type AiConfig } from '../api/_lib'
+import { addSpent, askJson, chainFor, chainFrom, rateLimit, spentToday, type AiConfig } from '../api/_lib'
 
 const cfg: AiConfig = { base: 'https://router.test/v1', key: 'sk-secret-do-not-leak', dailyLimitRub: 0 }
 
@@ -156,5 +156,15 @@ describe('ограничение частоты', () => {
     const opt = { limit: 1, windowMs: 60_000 }
     expect(rateLimit('9.9.9.9', opt, now)).toBe(true)
     expect(rateLimit('8.8.8.8', opt, now)).toBe(true)
+  })
+})
+
+describe('вторая попытка — с модели посильнее', () => {
+  it('startAt пропускает дешёвые модели, но за концом цепочки остаётся последняя', () => {
+    process.env.AI_MODEL_PLAN = 'a/cheap,b/mid,c/strong'
+    expect(chainFrom('plan', 0)).toEqual(['a/cheap', 'b/mid', 'c/strong'])
+    expect(chainFrom('plan', 1)).toEqual(['b/mid', 'c/strong'])
+    expect(chainFrom('plan', 7)).toEqual(['c/strong'])
+    delete process.env.AI_MODEL_PLAN
   })
 })

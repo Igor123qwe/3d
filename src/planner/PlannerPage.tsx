@@ -946,9 +946,34 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     if (!u || aiBusy) return
     setAiBusy('Читаю план…')
     try {
-      const { plan: read, ai: cost } = await recognizePlan(u.src)
+      let { plan: read, ai: cost } = await recognizePlan(u.src)
       // масштаб не трогаем, если пользователь уже откалибровал подложку руками
-      const result = convertAiPlan(read, u, { keepScale: calibrated })
+      let result = convertAiPlan(read, u, { keepScale: calibrated })
+      let attempts = 1
+      // Площади разошлись — модель, скорее всего, прочитала план неверно: выдумала
+      // комнату или пропустила подписи. Вторая попытка идёт к модели посильнее,
+      // с подсказкой, что именно не сошлось; остаётся лучший из двух ответов
+      const weak = (res: ReturnType<typeof convertAiPlan>) => res.report.areaFit !== null && res.report.areaFit.accuracy < 0.85
+      if (result.walls.length && weak(result)) {
+        setAiBusy('Площади не сошлись — перепроверяю моделью посильнее…')
+        const off = result.report.areaFit!.off.map((o) => `${o.name}: на плане ${o.wantM2} м², вышло ${o.haveM2.toFixed(1)}`).join('; ')
+        const hint =
+          `Первая попытка разошлась с планом (${off}). Перепроверь: у каждой комнаты на плане подписаны номер и площадь — ` +
+          'верни ровно те комнаты, что подписаны, не выдумывай лишних; размеры width_cm и depth_cm бери только с подписей у стен этой комнаты; box — по внутренним граням стен.'
+        try {
+          const second = await recognizePlan(u.src, hint, undefined, 1)
+          const again = convertAiPlan(second.plan, u, { keepScale: calibrated })
+          attempts = 2
+          noteCost('план', second.ai)
+          if (again.walls.length && (again.report.areaFit?.accuracy ?? 0) > (result.report.areaFit?.accuracy ?? 0)) {
+            read = second.plan
+            cost = second.ai
+            result = again
+          }
+        } catch (e) {
+          console.info('[ИИ] вторая попытка не удалась', (e as Error).message)
+        }
+      }
       if (!result.walls.length) {
         setToast('Модель не нашла стен на картинке')
         return
@@ -962,7 +987,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             : 'Чертёж построен заново по прямоугольникам комнат; площадей на плане нет, сверить не с чем.',
         )
         for (const off of r.areaFit?.off.slice(0, 4) ?? []) lines.push(`• ${off.name}: на плане ${fmtNum(off.wantM2)} м², получилось ${fmtNum(off.haveM2)} м²`)
+        if (r.roomsDropped.length) lines.push(`Выброшено как выдуманное моделью: ${r.roomsDropped.join(', ')} — без этого площади соседей сошлись.`)
         if (r.roomsSkipped.length) lines.push(`Не удалось поставить: ${r.roomsSkipped.join(', ')}.`)
+        if (attempts > 1) lines.push(`Попыток две: первая разошлась, вторая — модель ${cost.model}.`)
       } else {
         lines.push('Чертёж собран по линиям стен с картинки: размеров комнат модель не прочитала, поэтому точность ниже — проверьте масштаб.')
       }

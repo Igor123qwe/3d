@@ -176,6 +176,15 @@ export interface AskOptions<T> {
   check: (data: unknown) => T
   /** сколько моделей из цепочки пробовать; по умолчанию вся цепочка */
   maxTries?: number
+  /** с какой модели цепочки начать: 1 — пропустить самую дешёвую (вторая попытка после слабого ответа) */
+  startAt?: number
+}
+
+/** цепочка, начиная с startAt-й модели; за концом цепочки остаётся последняя, самая сильная */
+export function chainFrom(task: AiTask, startAt: number): string[] {
+  const chain = chainFor(task)
+  const from = Math.max(0, Math.min(Math.floor(startAt), chain.length - 1))
+  return chain.slice(from)
 }
 
 export interface AiAnswer<T> {
@@ -193,7 +202,7 @@ export interface AiAnswer<T> {
  */
 export async function askJson<T>(cfg: AiConfig, o: AskOptions<T>): Promise<AiAnswer<T>> {
   const spec = specFor(o.task)
-  const chain = chainFor(o.task).slice(0, o.maxTries ?? 99)
+  const chain = chainFrom(o.task, o.startAt ?? 0).slice(0, o.maxTries ?? 99)
   if (!chain.length) throw new Error(`для задачи «${o.task}» не задано ни одной модели`)
   const budget = spentToday()
   if (cfg.dailyLimitRub > 0 && budget.rub >= cfg.dailyLimitRub) {

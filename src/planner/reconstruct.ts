@@ -63,6 +63,8 @@ export interface ReconstructResult {
   rooms: PlacedRoom[]
   /** комнаты, что не удалось поставить: без размеров, слишком узкие */
   skipped: string[]
+  /** комнаты, выброшенные как лишние: без них площади остальных сошлись заметно лучше */
+  dropped: string[]
   areaFit: AreaFit | null
 }
 
@@ -417,7 +419,37 @@ function nearestAxis(pos: number[], v: number, tol: number): number {
   return best
 }
 
+/**
+ * Построить и, если площади не сходятся, поискать лишнюю комнату. Модель со
+ * зрением иногда выдумывает помещение — второй «санузел» между двумя жилыми —
+ * и тогда соседям не хватает места, а их подписанные площади проседают на
+ * треть. Убираем по одной комнате, перестраиваем и оставляем вариант, где
+ * сходимость выросла заметно; так до двух комнат.
+ */
 export function reconstructFromRooms(rooms: AiRoom[], u: Underlay, options: ReconstructOptions = {}, dims: DimSpan[] = []): ReconstructResult {
+  let current = rooms.filter(canRebuildFrom)
+  let best = reconstructCore(current, u, options, dims)
+  const dropped: string[] = []
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const acc = best.areaFit?.accuracy ?? 1
+    if (acc >= 0.9 || current.length < 3 || (best.areaFit?.samples ?? 0) < 2) break
+    let candidate: { res: ReconstructResult; name: string } | null = null
+    for (const r of current) {
+      const rest = current.filter((x) => x !== r)
+      const res = reconstructCore(rest, u, options, dims)
+      const gain = (res.areaFit?.accuracy ?? 0) - acc
+      // без этой комнаты должно стать заметно лучше, и подписанных площадей — не меньше одной
+      if (gain >= 0.1 && (res.areaFit?.samples ?? 0) >= 1 && (!candidate || (res.areaFit?.accuracy ?? 0) > (candidate.res.areaFit?.accuracy ?? 0))) candidate = { res, name: r.name }
+    }
+    if (!candidate) break
+    dropped.push(candidate.name)
+    current = current.filter((x) => x.name !== candidate!.name)
+    best = candidate.res
+  }
+  return { ...best, dropped }
+}
+
+function reconstructCore(rooms: AiRoom[], u: Underlay, options: ReconstructOptions = {}, dims: DimSpan[] = []): ReconstructResult {
   const o = { ...DEFAULT_RECONSTRUCT, ...options }
   const skipped: string[] = []
   const sized = rooms.filter(canRebuildFrom).map((r) => sizeRoom(r, u))
@@ -427,7 +459,7 @@ export function reconstructFromRooms(rooms: AiRoom[], u: Underlay, options: Reco
     if (!ok) skipped.push(r.spec.name)
     return ok
   }) as Rect[]
-  if (!rects.length) return { walls: [], rooms: [], skipped, areaFit: null }
+  if (!rects.length) return { walls: [], rooms: [], skipped, dropped: [], areaFit: null }
 
   // 1. грани → оси по картинке. Положение граней берётся с рамок картинки у всех
   //    комнат одинаково (подписанные не «вырастают» относительно неподписанных —
@@ -541,7 +573,7 @@ export function reconstructFromRooms(rooms: AiRoom[], u: Underlay, options: Reco
     if (!ok) skipped.push(r.spec.name)
     return ok
   })
-  if (!placed.length) return { walls: [], rooms: [], skipped, areaFit: null }
+  if (!placed.length) return { walls: [], rooms: [], skipped, dropped: [], areaFit: null }
 
   // 4. стены: по каждой оси — отрезки между соседними поперечными осями,
   //    толщина по тому, сколько комнат прилегает
@@ -606,7 +638,7 @@ export function reconstructFromRooms(rooms: AiRoom[], u: Underlay, options: Reco
       .map(({ name, wantM2, haveM2 }) => ({ name, wantM2, haveM2 }))
     areaFit = { accuracy: Math.max(0, 1 - errs.reduce((a, b) => a + b, 0) / errs.length), off, samples: checked.length }
   }
-  return { walls, rooms: out, skipped, areaFit }
+  return { walls, rooms: out, skipped, dropped: [], areaFit }
 }
 
 /** Точка на стене комнаты: side — какая стена, at — доля вдоль неё */

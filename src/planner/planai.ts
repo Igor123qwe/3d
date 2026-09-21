@@ -19,7 +19,7 @@ import type { Opening, Plan, Pt, RoomMeta, Underlay, Wall } from './types'
 import { uid } from './types'
 import { MIN_WALL_LENGTH, WALL_THICKNESSES } from './ops'
 import { buildRooms } from './rooms'
-import { closestOnSeg, dist, pointInPoly } from './geometry'
+import { bboxOf, closestOnSeg, dist, pointInPoly } from './geometry'
 import { canRebuildFrom, pointOnSide, reconstructFromRooms, scaleSamplesFromRooms, type AreaFit } from './reconstruct'
 
 export interface ConvertOptions {
@@ -58,6 +58,10 @@ export interface ConvertReport {
   areaFit: AreaFit | null
   /** комнаты, которые не удалось поставить по числам */
   roomsSkipped: string[]
+  /** комнаты, выброшенные как выдуманные: без них площади остальных сошлись */
+  roomsDropped: string[]
+  /** где лёг чертёж относительно картинки: для разбора, если он лёг мимо */
+  placement: { walls: { minX: number; minY: number; maxX: number; maxY: number } | null; underlay: { minX: number; minY: number; maxX: number; maxY: number }; shifted: boolean }
   note?: string
 }
 
@@ -271,6 +275,30 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
   const method: ConvertMethod = byNumbers ? 'по размерам комнат' : 'по линиям стен'
   if (byNumbers && rebuilt) walls = rebuilt.walls
 
+  // 6. чертёж должен лежать на картинке: центр стен внутри подложки. Если он лёг
+  //    мимо — это ошибка координат, и лучше сдвинуть чертёж на картинку и сказать
+  //    об этом, чем оставить его в стороне
+  const uRect = { minX: u.x, minY: u.y, maxX: u.x + px.w * u.scale, maxY: u.y + px.h * u.scale }
+  const pts = walls.flatMap((w) => [w.a, w.b])
+  const wBox = pts.length ? bboxOf(pts) : null
+  let shifted = false
+  if (wBox) {
+    const cx = (wBox.minX + wBox.maxX) / 2
+    const cy = (wBox.minY + wBox.maxY) / 2
+    if (cx < uRect.minX || cx > uRect.maxX || cy < uRect.minY || cy > uRect.maxY) {
+      const dx = (uRect.minX + uRect.maxX) / 2 - cx
+      const dy = (uRect.minY + uRect.maxY) / 2 - cy
+      walls = walls.map((w) => ({ ...w, a: { x: w.a.x + dx, y: w.a.y + dy }, b: { x: w.b.x + dx, y: w.b.y + dy } }))
+      if (byNumbers && rebuilt) {
+        for (const r of rebuilt.rooms) {
+          r.anchor = { x: r.anchor.x + dx, y: r.anchor.y + dy }
+          r.rect = { x1: r.rect.x1 + dx, y1: r.rect.y1 + dy, x2: r.rect.x2 + dx, y2: r.rect.y2 + dy }
+        }
+      }
+      shifted = true
+    }
+  }
+
   // 5. проёмы садятся на ближайшую стену; по числам — на нужную стену нужной комнаты
   const openings: Opening[] = []
   let dropped = 0
@@ -298,7 +326,7 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
     openings.push({ id: uid('o'), kind: op.kind, wallId: hit.wall.id, t, width, hinge: 'a', side: 1 })
   }
 
-  // 6. названия комнат
+  // 6а. названия комнат
   const metas: RoomMeta[] = []
   if (byNumbers && rebuilt) {
     for (const r of rebuilt.rooms) {
@@ -332,7 +360,9 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
       rooms: metas.length,
       areaFit: byNumbers && rebuilt ? rebuilt.areaFit : null,
       roomsSkipped: byNumbers && rebuilt ? [...rebuilt.skipped, ...rebuilt.rooms.filter((r) => r.haveM2 === undefined).map((r) => r.name)] : [],
-      note: ai.note,
+      roomsDropped: byNumbers && rebuilt ? rebuilt.dropped : [],
+      placement: { walls: wBox ? bboxOf(walls.flatMap((w) => [w.a, w.b])) : null, underlay: uRect, shifted },
+      note: shifted ? `${ai.note ? `${ai.note} ` : ''}Чертёж лёг мимо картинки и был сдвинут на неё — координаты в ответе модели подозрительны, пришлите отчёт разработчику.` : ai.note,
     },
   }
 }

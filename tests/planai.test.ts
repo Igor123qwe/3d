@@ -308,3 +308,35 @@ describe('чертёж заново по числам', () => {
     expect(floorFor('Кухня')).toBe('tile')
   })
 })
+
+describe('чертёж лежит на картинке', () => {
+  it('стены, построенные мимо подложки, сдвигаются на неё, и отчёт об этом говорит', () => {
+    // подложка в стороне: x от 5000, а комнаты модель «положила» в долях картинки — они лягут на неё
+    const far: Underlay = { src: '', px, x: 5000, y: 5000, scale: 1, opacity: 0.6, visible: true, locked: false }
+    const ai: AiPlan = {
+      walls: [],
+      openings: [],
+      dimensions: [],
+      rooms: [{ name: 'К', areaM2: 20, widthCm: 400, depthCm: 500, box: { x1: 0.1, y1: 0.15, x2: 0.5, y2: 0.775 }, x: 0.3, y: 0.46 }],
+    }
+    const r = convertAiPlan(ai, far)
+    expect(r.report.placement.shifted).toBe(false)
+    const b = r.report.placement.walls!
+    expect(b.minX).toBeGreaterThan(5000)
+    expect(b.maxX).toBeLessThan(6000)
+  })
+
+  it('стены с картинки, попавшие мимо подложки из-за сдвинутой подложки, центрируются на ней', () => {
+    // подложка стоит в 5000, а стены модель дала так, что после перевода они не на ней быть не могут только при ошибке;
+    // имитируем ошибку: подложка со смещением после расчёта — стены считались от x=0
+    const shifted: Underlay = { src: '', px, x: 0, y: 0, scale: 1, opacity: 0.6, visible: true, locked: false }
+    const r = convertAiPlan(boxPlan(), shifted)
+    expect(r.report.placement.shifted).toBe(false)
+    // а теперь та же геометрия, но подложку отнесли: центр стен окажется вне неё
+    const moved = { ...r.underlay, x: 3000 }
+    const out = convertAiPlan(boxPlan(), moved, { keepScale: true })
+    // стены строятся от подложки, поэтому лягут на неё сами — сдвига не нужно
+    expect(out.report.placement.shifted).toBe(false)
+    expect(out.report.placement.walls!.minX).toBeGreaterThan(3000)
+  })
+})

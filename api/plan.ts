@@ -43,19 +43,22 @@ export default async function handler(req: Request): Promise<Response> {
   // распознавание плана — самый дорогой вызов, поэтому лимит строгий
   if (!rateLimit(ip, { limit: 10, windowMs: 10 * 60_000 })) return fail('слишком часто: не больше 10 планов за 10 минут', 429)
 
-  let body: { image?: string; hint?: string }
+  let body: { image?: string; hint?: string; escalate?: number }
   try {
-    body = await readJsonBody<{ image?: string; hint?: string }>(req, IMAGE_LIMIT)
+    body = await readJsonBody<{ image?: string; hint?: string; escalate?: number }>(req, IMAGE_LIMIT)
   } catch (e) {
     return fail((e as Error).message, 413)
   }
   const image = body.image || ''
   if (!/^data:image\/(png|jpeg|jpg|webp);base64,/.test(image)) return fail('нужна картинка в виде data:image/…;base64', 400)
 
-  const hint = typeof body.hint === 'string' ? body.hint.slice(0, 500) : ''
+  const hint = typeof body.hint === 'string' ? body.hint.slice(0, 800) : ''
+  // вторая попытка после слабого ответа идёт сразу к модели посильнее
+  const escalate = Math.max(0, Math.min(3, Number(body.escalate) || 0))
   try {
     const answer = await askJson(cfg, {
       task: 'plan',
+      startAt: escalate,
       check: checkAiPlan,
       messages: [
         { role: 'system', content: PROMPT },

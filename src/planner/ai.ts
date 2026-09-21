@@ -108,10 +108,10 @@ export interface RecognizeResult {
   ai: AiCost
 }
 
-/** Прочитать план с картинки */
-export async function recognizePlan(src: string, hint?: string, signal?: AbortSignal): Promise<RecognizeResult> {
+/** Прочитать план с картинки; escalate — с какой модели цепочки начать (вторая попытка — с более сильной) */
+export async function recognizePlan(src: string, hint?: string, signal?: AbortSignal, escalate = 0): Promise<RecognizeResult> {
   const image = await shrinkForVision(src)
-  return post<RecognizeResult>('plan', { image, hint }, signal)
+  return post<RecognizeResult>('plan', { image, hint, escalate }, signal)
 }
 
 // ---------- товар по ссылке ----------
