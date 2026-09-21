@@ -10,6 +10,7 @@ import {
   dominantAngle,
   flattenBackground,
   floodRoom,
+  groundRoomBox,
   homography,
   orderCorners,
 } from '../src/planner/raster'
@@ -231,5 +232,47 @@ describe('комната по клику', () => {
     const r = floodRoom(d2, w2, h2, { x: 70, y: 100 }, 12)!
     expect(r).not.toBeNull()
     expect(r.x2).toBeGreaterThan(200)
+  })
+})
+
+describe('рамка комнаты от модели — к стенам на картинке', () => {
+  const W = 300
+  const H = 200
+  function twoRooms() {
+    const { g, rect } = sheet(W, H)
+    rect(6, 6, 293, 9)
+    rect(6, 190, 293, 193)
+    rect(6, 6, 9, 193)
+    rect(290, 6, 293, 193)
+    rect(141, 6, 149, 193)
+    rect(141, 80, 149, 110, 255)
+    return g
+  }
+
+  it('рамка «по подписи», меньше комнаты и сдвинутая, встаёт по внутренним граням стен', () => {
+    const d2 = distanceToInk(binarize(twoRooms(), W, H))
+    // модель обвела примерно середину левой комнаты: 40..110 × 60..150
+    const g = groundRoomBox(d2, W, H, { x1: 40 / W, y1: 60 / H, x2: 110 / W, y2: 150 / H }, 20)!
+    expect(g).not.toBeNull()
+    expect(g.x1 * W).toBeCloseTo(10, -1)
+    expect(g.x2 * W).toBeCloseTo(140, -1)
+    expect(g.y1 * H).toBeCloseTo(10, -1)
+    expect(g.y2 * H).toBeCloseTo(189, -1)
+  })
+
+  it('рамка, не пересекающаяся с найденной комнатой, не принимается', () => {
+    const d2 = distanceToInk(binarize(twoRooms(), W, H))
+    // рамка на правую комнату, а центр попал… тоже в правую: примем; но рамка в углу левой при центре в правой — нет
+    const off = groundRoomBox(d2, W, H, { x1: 20 / W, y1: 20 / H, x2: 60 / W, y2: 60 / H }, 20)
+    // центр (40,40) — в левой комнате, IoU с её рамкой мал (рамка крошечная): отклоняется
+    expect(off).toBeNull()
+  })
+
+  it('открытый контур — привязки нет', () => {
+    const { g, rect } = sheet(W, H)
+    rect(6, 6, 293, 9)
+    rect(6, 6, 9, 193)
+    const d2 = distanceToInk(binarize(g, W, H))
+    expect(groundRoomBox(d2, W, H, { x1: 0.2, y1: 0.2, x2: 0.5, y2: 0.6 }, 12)).toBeNull()
   })
 })

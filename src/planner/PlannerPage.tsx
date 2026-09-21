@@ -36,10 +36,11 @@ import { getTelegramWebApp } from '../telegram'
 import { guessType, modelRefFromAsset, modelRefFromUrl, phAssets, phCategories, phDimsCm, phInfo, phPage, type PhAsset } from './polyhaven'
 import { decodePlan, parseHash, planShareUrl } from './share'
 import { DEFAULT_TRACE, calibrate, detectWalls, grayscaleOf, joinCorners, loadUnderlayImage, makeUnderlay, mergeCollinear, nameFromFile, planFromImage, toPixel, toPlan, tracePlan, type LoadedImage, type TraceOptions } from './underlay'
-import { cleanRaster, distanceToInk, dominantAngle, floodRoom, grayToImage, rotateImage, warpToRect, type CleanResult } from './raster'
+import { cleanRaster, distanceToInk, dominantAngle, floodRoom, grayToImage, groundRoomBox, rotateImage, warpToRect, type CleanResult } from './raster'
 import type { Guide } from './snapping'
 import { aiStatus, askLayout, lookupProductViaServer, recognizePlan, type AiStatus } from './ai'
 import { applyAiPlan, convertAiPlan } from './planai'
+import type { AiBox, AiPlan } from './aicontract'
 import { applyLayout, catalogForRoom, layoutSummary, vetLayout } from './autolayout'
 import {
   DEFAULT_AUTO,
@@ -946,9 +947,20 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     if (!u || aiBusy) return
     setAiBusy('Читаю план…')
     try {
+      // очищенный растр — чтобы привязать рамки комнат от модели к настоящим стенам
+      const raster = await ensureRaster(u).catch(() => null)
+      if (raster && !raster.d2) raster.d2 = distanceToInk(raster.clean.bin)
+      const ground = raster
+        ? (box: AiBox, closeCm: number) => {
+            const closePx = Math.min(80, Math.max(3, Math.round(closeCm / u.scale)))
+            const g = groundRoomBox(raster.d2!, u.px.w, u.px.h, box, closePx)
+            return g ? { x1: g.x1, y1: g.y1, x2: g.x2, y2: g.y2 } : null
+          }
+        : undefined
+      const convert = (p: AiPlan) => convertAiPlan(p, u, { keepScale: calibrated, ground })
       let { plan: read, ai: cost } = await recognizePlan(u.src)
       // масштаб не трогаем, если пользователь уже откалибровал подложку руками
-      let result = convertAiPlan(read, u, { keepScale: calibrated })
+      let result = convert(read)
       let attempts = 1
       // Площади разошлись — модель, скорее всего, прочитала план неверно: выдумала
       // комнату или пропустила подписи. Вторая попытка идёт к модели посильнее,
@@ -962,7 +974,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           'верни ровно те комнаты, что подписаны, не выдумывай лишних; размеры width_cm и depth_cm бери только с подписей у стен этой комнаты; box — по внутренним граням стен.'
         try {
           const second = await recognizePlan(u.src, hint, undefined, 1)
-          const again = convertAiPlan(second.plan, u, { keepScale: calibrated })
+          const again = convert(second.plan)
           attempts = 2
           noteCost('план', second.ai)
           if (again.walls.length && (again.report.areaFit?.accuracy ?? 0) > (result.report.areaFit?.accuracy ?? 0)) {
@@ -987,6 +999,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             : 'Чертёж построен заново по прямоугольникам комнат; площадей на плане нет, сверить не с чем.',
         )
         for (const off of r.areaFit?.off.slice(0, 4) ?? []) lines.push(`• ${off.name}: на плане ${fmtNum(off.wantM2)} м², получилось ${fmtNum(off.haveM2)} м²`)
+        if (r.grounded) lines.push(`Рамки ${r.grounded} из ${read.rooms.length} комнат привязаны к стенам на картинке.`)
         if (r.roomsDropped.length) lines.push(`Выброшено как выдуманное моделью: ${r.roomsDropped.join(', ')} — без этого площади соседей сошлись.`)
         if (r.roomsSkipped.length) lines.push(`Не удалось поставить: ${r.roomsSkipped.join(', ')}.`)
         if (attempts > 1) lines.push(`Попыток две: первая разошлась, вторая — модель ${cost.model}.`)

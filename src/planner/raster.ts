@@ -548,3 +548,34 @@ export function floodRoom(d2: Float32Array, w: number, h: number, seed: Pt, clos
   const area = (x2 - x1 + 1) * (y2 - y1 + 1)
   return { x1: x1 - closePx, y1: y1 - closePx, x2: x2 + closePx, y2: y2 + closePx, fill: area ? Math.min(1, count / area) : 0 }
 }
+
+/**
+ * Привязать рамку комнаты от модели к настоящим стенам на картинке: заливка от
+ * центра рамки по очищенному растру даёт прямоугольник по внутренним граням стен.
+ * Модель со зрением называет координаты примерно, а линии на картинке точны —
+ * так у соседних комнат общая стена оказывается одной и той же линией.
+ * Рамка принимается, только если заливка похожа на комнату и пересекается с
+ * тем, что назвала модель: иначе это соседняя комната или утечка.
+ */
+export function groundRoomBox(
+  d2: Float32Array,
+  w: number,
+  h: number,
+  box: { x1: number; y1: number; x2: number; y2: number },
+  closePx: number,
+): { x1: number; y1: number; x2: number; y2: number; fill: number } | null {
+  const bx1 = box.x1 * w
+  const by1 = box.y1 * h
+  const bx2 = box.x2 * w
+  const by2 = box.y2 * h
+  const seed = { x: (bx1 + bx2) / 2, y: (by1 + by2) / 2 }
+  const r = floodRoom(d2, w, h, seed, closePx)
+  if (!r || r.fill < 0.6) return null
+  // пересечение с рамкой модели: IoU не меньше четверти
+  const ix = Math.max(0, Math.min(bx2, r.x2) - Math.max(bx1, r.x1))
+  const iy = Math.max(0, Math.min(by2, r.y2) - Math.max(by1, r.y1))
+  const inter = ix * iy
+  const union = (bx2 - bx1) * (by2 - by1) + (r.x2 - r.x1) * (r.y2 - r.y1) - inter
+  if (union <= 0 || inter / union < 0.25) return null
+  return { x1: r.x1 / w, y1: r.y1 / h, x2: r.x2 / w, y2: r.y2 / h, fill: r.fill }
+}

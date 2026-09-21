@@ -53,6 +53,10 @@ export interface AiRoom {
   /** размеры комнаты, подписанные на плане: по горизонтали и по вертикали */
   widthCm?: number
   depthCm?: number
+  /** кто за какой стеной: имена соседних комнат по сторонам — общая стена одна на двоих */
+  neighbors?: Partial<Record<AiSide, string[]>>
+  /** стороны, выходящие на наружный контур квартиры */
+  outer?: AiSide[]
 }
 
 /** размерная цепочка с плана: по ней чертёж встаёт в масштаб */
@@ -141,6 +145,21 @@ export function checkAiPlan(data: unknown): AiPlan {
       if (n === null) return undefined
       const cm = n < 30 ? n * 100 : n > 1500 ? n / 10 : n
       return cm >= 50 && cm <= 3000 ? Math.round(cm) : undefined
+    }
+    const sides: AiSide[] = ['top', 'right', 'bottom', 'left']
+    const nb = (r.neighbors ?? r.adjacent ?? r.neighbours) as Record<string, unknown> | undefined
+    if (nb && typeof nb === 'object') {
+      const out: Partial<Record<AiSide, string[]>> = {}
+      for (const side of sides) {
+        const v = nb[side]
+        const names = (Array.isArray(v) ? v : typeof v === 'string' && v ? [v] : []).map((n) => String(n).trim().slice(0, 40)).filter(Boolean)
+        if (names.length) out[side] = names
+      }
+      if (Object.keys(out).length) room.neighbors = out
+    }
+    if (Array.isArray(r.outer)) {
+      const outer = r.outer.map((v) => String(v).toLowerCase()).filter((v): v is AiSide => (sides as string[]).includes(v))
+      if (outer.length) room.outer = outer
     }
     room.widthCm = size(r.width_cm ?? r.widthCm ?? r.width ?? r.width_m ?? r.widthM)
     room.depthCm = size(r.depth_cm ?? r.depthCm ?? r.depth ?? r.height_cm ?? r.depth_m ?? r.height ?? r.length_cm ?? r.length)

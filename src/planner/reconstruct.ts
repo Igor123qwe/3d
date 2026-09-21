@@ -205,6 +205,65 @@ function closeFacingGaps(rects: Rect[], rawX: number[], rawY: number[], minGap: 
   }
 }
 
+/**
+ * Соседство, названное моделью: «за правой стеной 5ж — 6 и коридор». Общая
+ * стена одна на двоих, как бы ни разошлись рамки на картинке: правая грань
+ * одной и левая грань другой сводятся к общему положению. Связи объединяются
+ * через систему непересекающихся множеств, чтобы цепочка A–B–C дала одну ось.
+ */
+function linkDeclaredNeighbors(rects: Rect[], rawX: number[], rawY: number[]): void {
+  const byName = new Map(rects.map((r, k) => [r.spec.name, k]))
+  const n = rects.length * 2
+  const parentX = Array.from({ length: n }, (_, i) => i)
+  const parentY = Array.from({ length: n }, (_, i) => i)
+  const find = (par: number[], i: number): number => (par[i] === i ? i : (par[i] = find(par, par[i])))
+  const union = (par: number[], a: number, b: number) => {
+    const ra = find(par, a)
+    const rb = find(par, b)
+    if (ra !== rb) par[rb] = ra
+  }
+  rects.forEach((r, k) => {
+    const nb = r.spec.neighbors
+    if (!nb) return
+    for (const name of nb.right ?? []) {
+      const m = byName.get(name)
+      if (m !== undefined && m !== k) union(parentX, k * 2 + 1, m * 2)
+    }
+    for (const name of nb.left ?? []) {
+      const m = byName.get(name)
+      if (m !== undefined && m !== k) union(parentX, k * 2, m * 2 + 1)
+    }
+    for (const name of nb.bottom ?? []) {
+      const m = byName.get(name)
+      if (m !== undefined && m !== k) union(parentY, k * 2 + 1, m * 2)
+    }
+    for (const name of nb.top ?? []) {
+      const m = byName.get(name)
+      if (m !== undefined && m !== k) union(parentY, k * 2, m * 2 + 1)
+    }
+  })
+  for (const [par, raw] of [
+    [parentX, rawX],
+    [parentY, rawY],
+  ] as const) {
+    const groups = new Map<number, number[]>()
+    for (let e = 0; e < n; e++) {
+      const root = find(par, e)
+      const g = groups.get(root) ?? []
+      g.push(e)
+      groups.set(root, g)
+    }
+    for (const g of groups.values()) {
+      if (g.length < 2) continue
+      // общая стена не может быть у двух граней одной комнаты
+      const rooms = new Set(g.map((e) => Math.floor(e / 2)))
+      if (rooms.size < g.length) continue
+      const mean = g.reduce((a, e) => a + raw[e], 0) / g.length
+      for (const e of g) raw[e] = mean
+    }
+  }
+}
+
 interface Axis {
   /** положение оси, см */
   pos: number[]
@@ -468,6 +527,7 @@ function reconstructCore(rooms: AiRoom[], u: Underlay, options: ReconstructOptio
   const rawX = rects.flatMap((r) => [r.cx - r.bw / 2 - t / 2, r.cx + r.bw / 2 + t / 2])
   const rawY = rects.flatMap((r) => [r.cy - r.bh / 2 - t / 2, r.cy + r.bh / 2 + t / 2])
   closeFacingGaps(rects, rawX, rawY, o.snapCm * 2.5)
+  linkDeclaredNeighbors(rects, rawX, rawY)
   const cx = cluster(rawX, o.snapCm)
   const cy = cluster(rawY, o.snapCm)
 
@@ -477,6 +537,9 @@ function reconstructCore(rooms: AiRoom[], u: Underlay, options: ReconstructOptio
   const extra = (o.exteriorCm - o.interiorCm) / 2
   const near = (a: number, b: number) => Math.abs(a - b) <= o.snapCm
   const sideIsExterior = (r: Rect, side: AiSide): boolean => {
+    // модель сказала прямо, что снаружи, а что за стеной — верим ей
+    if (r.spec.outer?.includes(side)) return true
+    if (r.spec.neighbors?.[side]?.length) return false
     const k = rects.indexOf(r)
     const along = side === 'left' || side === 'right' ? r.bh : r.bw
     const [l, rr, tp, bt] = [rawX[k * 2], rawX[k * 2 + 1], rawY[k * 2], rawY[k * 2 + 1]]

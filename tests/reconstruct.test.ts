@@ -301,3 +301,37 @@ describe('выдуманная комната', () => {
     expect(res.dropped).toEqual([])
   })
 })
+
+describe('соседство, названное моделью', () => {
+  it('рамки разъехались на треть, но соседи названы — общие стены всё равно одни', () => {
+    const rooms = aiRooms(FLAT, 'both', false)
+    // рамки сжаты на 30 % и раскиданы: без соседства они бы не сошлись
+    for (const r of rooms) {
+      const b = r.box!
+      const cx = (b.x1 + b.x2) / 2
+      const cy = (b.y1 + b.y2) / 2
+      const hw = ((b.x2 - b.x1) / 2) * 0.7
+      const hh = ((b.y2 - b.y1) / 2) * 0.7
+      r.box = { x1: cx - hw, y1: cy - hh, x2: cx + hw, y2: cy + hh }
+    }
+    const by = (n: string) => rooms.find((r) => r.name === n)!
+    by('5ж').neighbors = { right: ['6', 'коридор'], bottom: ['4ж'] }
+    by('5ж').outer = ['left', 'top']
+    by('6').neighbors = { left: ['5ж'], right: ['1'], bottom: ['коридор'] }
+    by('коридор').neighbors = { left: ['5ж'], right: ['1'], top: ['6'], bottom: ['4ж', '2'] }
+    by('1').neighbors = { left: ['6', 'коридор'], bottom: ['2'] }
+    by('1').outer = ['top', 'right']
+    by('4ж').neighbors = { top: ['5ж'], right: ['2'] }
+    by('4ж').outer = ['left', 'bottom']
+    by('2').neighbors = { top: ['коридор', '1'], left: ['4ж'] }
+    by('2').outer = ['right', 'bottom']
+    const res = reconstructFromRooms(rooms, u)
+    expect(res.rooms.filter((r) => r.haveM2 !== undefined)).toHaveLength(FLAT.length)
+    expect(res.areaFit?.accuracy ?? 0).toBeGreaterThan(0.96)
+    // общая стена 5ж и 6 — одна ось
+    expect(res.rooms.find((r) => r.name === '5ж')!.rect.x2).toBeCloseTo(res.rooms.find((r) => r.name === '6')!.rect.x1, 5)
+    // ни одной пары стен, лежащих на одной прямой с наложением
+    const overl = res.walls.filter((a, i) => res.walls.some((b, j) => j > i && Math.abs(a.a.x - a.b.x) < 1 && Math.abs(b.a.x - b.b.x) < 1 && Math.abs(a.a.x - b.a.x) < 1 && Math.min(Math.max(a.a.y, a.b.y), Math.max(b.a.y, b.b.y)) - Math.max(Math.min(a.a.y, a.b.y), Math.min(b.a.y, b.b.y)) > 1))
+    expect(overl).toHaveLength(0)
+  })
+})

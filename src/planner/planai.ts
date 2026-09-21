@@ -14,7 +14,7 @@
 // 3. Если модель прочитала комнаты с размерами, чертёж строится заново по
 //    числам (reconstruct.ts), а стены с картинки остаются запасным путём:
 //    берётся тот вариант, где замкнулось больше комнат.
-import type { AiDimension, AiPlan } from './aicontract'
+import type { AiBox, AiDimension, AiPlan } from './aicontract'
 import type { Opening, Plan, Pt, RoomMeta, Underlay, Wall } from './types'
 import { uid } from './types'
 import { MIN_WALL_LENGTH, WALL_THICKNESSES } from './ops'
@@ -25,13 +25,22 @@ import { canRebuildFrom, pointOnSide, reconstructFromRooms, scaleSamplesFromRoom
 export interface ConvertOptions {
   /** не трогать масштаб: пользователь уже откалибровал подложку руками */
   keepScale?: boolean
+  /**
+   * Привязка рамки комнаты к стенам на картинке (заливка по очищенному растру):
+   * возвращает уточнённую рамку в долях картинки или null, если стен вокруг не нашлось.
+   * closeCm — на сколько сантиметров закрывать дверные проёмы
+   */
+  ground?: (box: AiBox, closeCm: number) => AiBox | null
   /** допуск сведения концов стен, см */
   weldCm?: number
   /** до скольких градусов отклонения стена считается осевой */
   axisTolDeg?: number
 }
 
-export const DEFAULT_CONVERT: Required<ConvertOptions> = { keepScale: false, weldCm: 12, axisTolDeg: 6 }
+/** настройки со значениями по умолчанию; привязка к картинке — необязательная */
+type ConvertSettings = Required<Omit<ConvertOptions, 'ground'>> & Pick<ConvertOptions, 'ground'>
+
+export const DEFAULT_CONVERT: ConvertSettings = { keepScale: false, weldCm: 12, axisTolDeg: 6 }
 
 export type ScaleSource = 'размерные цепочки' | 'размеры комнат' | 'размеры на плане' | 'площади комнат' | 'прежняя калибровка'
 
@@ -60,6 +69,8 @@ export interface ConvertReport {
   roomsSkipped: string[]
   /** комнаты, выброшенные как выдуманные: без них площади остальных сошлись */
   roomsDropped: string[]
+  /** сколько рамок комнат привязано к стенам на картинке */
+  grounded: number
   /** где лёг чертёж относительно картинки: для разбора, если он лёг мимо */
   placement: { walls: { minX: number; minY: number; maxX: number; maxY: number } | null; underlay: { minX: number; minY: number; maxX: number; maxY: number }; shifted: boolean }
   note?: string
@@ -109,11 +120,11 @@ export function scaleFromDimensions(dims: AiDimension[], px: { w: number; h: num
  * одни и те же подписи, прочитанные двумя способами. Вместе оценок больше,
  * и одна ошибка чтения тонет в медиане.
  */
-export function scaleFromLabels(ai: AiPlan, px: { w: number; h: number }): ScaleFit | null {
+export function scaleFromLabels(ai: AiPlan, px: { w: number; h: number }, minSamples = 2): ScaleFit | null {
   const dims = dimensionSamples(ai.dimensions, px)
   const rooms = scaleSamplesFromRooms(ai.rooms, px)
   const all = [...dims, ...rooms]
-  if (all.length < 2) return null
+  if (all.length < minSamples) return null
   const source: ScaleSource = dims.length && rooms.length ? 'размеры на плане' : dims.length ? 'размерные цепочки' : 'размеры комнат'
   return { cmPerPx: robustMedian(all), source, samples: all.length }
 }
@@ -245,13 +256,39 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
   const o = { ...DEFAULT_CONVERT, ...options }
   const px = underlay.px
 
-  // 1. масштаб
+  // 1. масштаб — по числам с плана
   let fit: ScaleFit = { cmPerPx: underlay.scale, source: 'прежняя калибровка', samples: 0 }
   if (!o.keepScale) {
     const byLabels = scaleFromLabels(ai, px)
     if (byLabels) fit = byLabels
   }
   let u: Underlay = { ...underlay, scale: fit.cmPerPx }
+
+  // 1а. рамки комнат — к настоящим стенам на картинке, где заливка нашла комнату
+  //     похожего размера: геометрия с картинки точнее координат модели. Радиус
+  //     закрытия дверных проёмов берётся по предварительному масштабу
+  let grounded = 0
+  const groundedNames = new Set<string>()
+  const rooms = ai.rooms.map((r) => {
+    if (!r.box || !o.ground) return r
+    const g = o.ground(r.box, 45)
+    if (!g) return r
+    const areaM2 = (g.x2 - g.x1) * px.w * (g.y2 - g.y1) * px.h * u.scale * u.scale * 1e-4
+    // подписанная площадь есть — заливка не должна расходиться с ней больше чем вдвое
+    if (r.areaM2 && (areaM2 < r.areaM2 * 0.55 || areaM2 > r.areaM2 * 1.8)) return r
+    grounded++
+    groundedNames.add(r.name)
+    return { ...r, box: g }
+  })
+  // привязанные рамки — настоящая геометрия: масштаб по ним точнее, чем по рамкам модели
+  if (!o.keepScale && grounded) {
+    // рамка со стен картинки надёжна и в одиночку: одной оценки достаточно
+    const byGrounded = scaleFromLabels({ ...ai, rooms: rooms.filter((r) => groundedNames.has(r.name)) }, px, 1)
+    if (byGrounded) {
+      fit = byGrounded
+      u = { ...underlay, scale: fit.cmPerPx }
+    }
+  }
 
   // 2. стены по линиям с картинки при выбранном масштабе
   let walls = buildWalls(ai, u, o)
@@ -269,7 +306,7 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
   // 4. чертёж заново по числам, если модель дала комнаты прямоугольниками;
   //    побеждает вариант, где замкнулось больше комнат, при равенстве — числа
   const dimSpans = ai.dimensions.map((d) => ({ a: toPlanPt(u, { x: d.x1 * px.w, y: d.y1 * px.h }), b: toPlanPt(u, { x: d.x2 * px.w, y: d.y2 * px.h }), cm: d.cm }))
-  const rebuilt = ai.rooms.some(canRebuildFrom) ? reconstructFromRooms(ai.rooms, u, wallThicknesses(ai), dimSpans) : null
+  const rebuilt = rooms.some(canRebuildFrom) ? reconstructFromRooms(rooms, u, wallThicknesses(ai), dimSpans) : null
   const closedByNumbers = rebuilt ? rebuilt.rooms.filter((r) => r.haveM2 !== undefined).length : 0
   const byNumbers = !!rebuilt && closedByNumbers > 0 && closedByNumbers >= closedRooms(walls, ai, u)
   const method: ConvertMethod = byNumbers ? 'по размерам комнат' : 'по линиям стен'
@@ -361,13 +398,14 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
       areaFit: byNumbers && rebuilt ? rebuilt.areaFit : null,
       roomsSkipped: byNumbers && rebuilt ? [...rebuilt.skipped, ...rebuilt.rooms.filter((r) => r.haveM2 === undefined).map((r) => r.name)] : [],
       roomsDropped: byNumbers && rebuilt ? rebuilt.dropped : [],
+      grounded,
       placement: { walls: wBox ? bboxOf(walls.flatMap((w) => [w.a, w.b])) : null, underlay: uRect, shifted },
       note: shifted ? `${ai.note ? `${ai.note} ` : ''}Чертёж лёг мимо картинки и был сдвинут на неё — координаты в ответе модели подозрительны, пришлите отчёт разработчику.` : ai.note,
     },
   }
 }
 
-function buildWalls(ai: AiPlan, u: Underlay, o: Required<ConvertOptions>): Wall[] {
+function buildWalls(ai: AiPlan, u: Underlay, o: ConvertSettings): Wall[] {
   const raw: Wall[] = []
   for (const w of ai.walls) {
     const a0 = toPlanPt(u, { x: w.x1 * u.px.w, y: w.y1 * u.px.h })

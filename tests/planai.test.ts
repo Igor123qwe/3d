@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { AiPlan } from '../src/planner/aicontract'
+import type { AiBox, AiPlan } from '../src/planner/aicontract'
 import type { Underlay } from '../src/planner/types'
 import {
   applyAiPlan,
@@ -338,5 +338,25 @@ describe('чертёж лежит на картинке', () => {
     // стены строятся от подложки, поэтому лягут на неё сами — сдвига не нужно
     expect(out.report.placement.shifted).toBe(false)
     expect(out.report.placement.walls!.minX).toBeGreaterThan(3000)
+  })
+})
+
+describe('рамки привязываются к стенам на картинке', () => {
+  it('привязка меняет рамку, если площадь похожа, и не трогает, если заливка утекла в чужую комнату', () => {
+    const rooms: AiPlan['rooms'] = [
+      { name: 'Гостиная', areaM2: 20, box: { x1: 0.15, y1: 0.2, x2: 0.45, y2: 0.7 }, x: 0.3, y: 0.46 },
+      { name: '2', areaM2: 15, box: { x1: 0.55, y1: 0.2, x2: 0.8, y2: 0.7 }, x: 0.66, y: 0.46 },
+    ]
+    const calls: AiBox[] = []
+    const ground = (box: AiBox) => {
+      calls.push(box)
+      // для первой — настоящие стены 400 × 500 при 1 см/px; для второй — утечка на всю квартиру
+      return box.x1 < 0.5 ? { x1: 0.1, y1: 0.15, x2: 0.5, y2: 0.775 } : { x1: 0.1, y1: 0.15, x2: 0.9, y2: 0.775 }
+    }
+    const r = convertAiPlan({ walls: [], openings: [], dimensions: [], rooms }, underlay(1), { ground })
+    expect(calls).toHaveLength(2)
+    expect(r.report.grounded).toBe(1)
+    const living = r.rooms.find((m) => m.name === 'Гостиная')!
+    expect(living.anchor.x).toBeCloseTo(300, -2)
   })
 })
