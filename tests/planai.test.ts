@@ -360,3 +360,54 @@ describe('рамки привязываются к стенам на карти�
     expect(living.anchor.x).toBeCloseTo(300, -2)
   })
 })
+
+describe('комнаты с картинки', () => {
+  const region = (x1: number, y1: number, x2: number, y2: number) => ({ x1, y1, x2, y2, areaPx: (x2 - x1) * (y2 - y1), points: (x2 - x1) * (y2 - y1), fill: 0.97, fillBox: 0.97, edges: 0, cx: (x1 + x2) / 2, cy: (y1 + y2) / 2 })
+  // две комнаты 400 × 500 и 300 × 500 на картинке 1000 × 800, 1 px = 1 см
+  const regions = [region(100, 150, 500, 650), region(510, 150, 810, 650)]
+
+  it('без ИИ: комнаты по номерам, стены общие, масштаб текущий', () => {
+    const r = convertAiPlan({ walls: [], openings: [], rooms: [], dimensions: [] }, underlay(1), { keepScale: true, regions })
+    expect(r.report.method).toBe('по комнатам с картинки')
+    expect(r.rooms.map((m) => m.name)).toEqual(['Помещение 1', 'Помещение 2'])
+    expect(r.walls.filter((w) => w.thickness === 10)).toHaveLength(1)
+    expect(r.report.scale.source).toBe('прежняя калибровка')
+  })
+
+  it('с подписями модели: имена и площади ложатся на области, масштаб — по площадям, выдумка отпадает', () => {
+    const ai: AiPlan = {
+      walls: [],
+      openings: [],
+      dimensions: [],
+      rooms: [
+        // точки модели промахнулись, рамки её кривые — не важно: площади всё расставят
+        { name: 'Гостиная', areaM2: 20, x: 0.05, y: 0.05, box: { x1: 0, y1: 0, x2: 0.2, y2: 0.2 } },
+        { name: '2', areaM2: 15, x: 0.05, y: 0.05, box: { x1: 0, y1: 0, x2: 0.2, y2: 0.2 } },
+        { name: 'Санузел', areaM2: 3, x: 0.05, y: 0.05 },
+      ],
+    }
+    // подложка в неверном масштабе: площади его поправят
+    const r = convertAiPlan(ai, underlay(2), { regions })
+    expect(r.report.method).toBe('по комнатам с картинки')
+    expect(r.report.segmented).toEqual({ regions: 2, matched: 2, unmatched: ['Санузел'] })
+    expect(r.report.scale.cmPerPx).toBeCloseTo(1, 1)
+    expect(r.rooms.map((m) => m.name).sort()).toEqual(['2', 'Гостиная'])
+    expect(r.report.areaFit?.accuracy ?? 0).toBeGreaterThan(0.97)
+  })
+
+  it('подписи не легли — области не в счёт, работает прежний путь по рамкам модели', () => {
+    const ai: AiPlan = {
+      walls: [],
+      openings: [],
+      dimensions: [],
+      rooms: [
+        // площади 50 и 12 относятся друг к другу не так, как области (20 и 15): совпадений нет
+        { name: 'A', areaM2: 50, x: 0.05, y: 0.05, box: { x1: 0.1, y1: 0.15, x2: 0.5, y2: 0.775 }, widthCm: 400, depthCm: 1250 },
+        { name: 'B', areaM2: 12, x: 0.05, y: 0.05, box: { x1: 0.51, y1: 0.15, x2: 0.81, y2: 0.775 }, widthCm: 300, depthCm: 400 },
+      ],
+    }
+    const r = convertAiPlan(ai, underlay(1), { regions })
+    expect(r.report.method).toBe('по размерам комнат')
+    expect(r.report.segmented).toBeNull()
+  })
+})

@@ -12,6 +12,7 @@ import {
   floodRoom,
   groundRoomBox,
   homography,
+  segmentRooms,
   orderCorners,
 } from '../src/planner/raster'
 
@@ -274,5 +275,119 @@ describe('рамка комнаты от модели — к стенам на �
     rect(6, 6, 9, 193)
     const d2 = distanceToInk(binarize(g, W, H))
     expect(groundRoomBox(d2, W, H, { x1: 0.2, y1: 0.2, x2: 0.5, y2: 0.6 }, 12)).toBeNull()
+  })
+})
+
+describe('все комнаты с картинки разом', () => {
+  /** квартира с плана БТИ, нарисованная чернилами: шесть комнат, дверные проёмы, наружная рамка */
+  function flatSheet() {
+    const W = 900
+    const H = 1000
+    const { g, rect } = sheet(W, H)
+    const rooms = [
+      [40, 40, 412, 448],
+      [422, 40, 602, 298],
+      [422, 308, 602, 448],
+      [612, 40, 846, 448],
+      [40, 458, 441, 884],
+      [451, 458, 846, 884],
+    ]
+    // стены: наружная рамка 20 px, перегородки 10 px — как промежутки между комнатами
+    rect(20, 20, 866, 904)
+    for (const [x1, y1, x2, y2] of rooms) rect(x1, y1, x2, y2, 255)
+    // дверные проёмы 80 px в перегородках и «цифры» внутри комнат
+    rect(412, 200, 422, 280, 255)
+    rect(441, 600, 451, 680, 255)
+    rect(200, 448, 280, 458, 255)
+    rect(150, 200, 190, 215)
+    rect(700, 600, 740, 615)
+    // размерная линия снаружи — тонкая, не стена
+    rect(40, 930, 846, 931)
+    return { g, W, H, rooms }
+  }
+
+  it('находит все шесть комнат и не считает комнатой ни лист, ни цифры', () => {
+    const { g, W, H, rooms } = flatSheet()
+    const d2 = distanceToInk(despeckle(binarize(g, W, H)))
+    const found = segmentRooms(d2, W, H, 45)
+    expect(found).toHaveLength(rooms.length)
+    for (const [x1, y1, x2, y2] of rooms) {
+      const hit = found.find((r) => Math.abs(r.x1 - x1) < 8 && Math.abs(r.y1 - y1) < 8 && Math.abs(r.x2 - x2) < 8 && Math.abs(r.y2 - y2) < 8)
+      expect(hit, `комната ${x1},${y1}`).toBeDefined()
+      expect(hit!.fill).toBeGreaterThan(0.85)
+    }
+  })
+
+  it('слишком узкое закрытие проёмов сливает комнаты — их становится меньше', () => {
+    const { g, W, H } = flatSheet()
+    const d2 = distanceToInk(despeckle(binarize(g, W, H)))
+    expect(segmentRooms(d2, W, H, 20).length).toBeLessThan(6)
+  })
+})
+
+describe('план, обрезанный краем фото', () => {
+  it('комната без правой стены остаётся комнатой; поле листа вокруг — нет', () => {
+    const W = 400
+    const H = 300
+    const { g, rect } = sheet(W, H)
+    rect(60, 40, 399, 46) // верхняя стена уходит за край
+    rect(60, 240, 399, 246)
+    rect(60, 40, 66, 246)
+    rect(200, 40, 206, 246)
+    // правой стены нет — фото обрезано; вокруг плана белое поле
+    const d2 = distanceToInk(binarize(g, W, H))
+    const found = segmentRooms(d2, W, H, 12)
+    expect(found).toHaveLength(2)
+    const right = found.find((r) => r.x1 > 200)!
+    expect(right.x2).toBeGreaterThan(380)
+  })
+
+  it('комната, подтекающая в поле через обрезанный угол, сохраняет свою рамку и площадь', () => {
+    const W = 400
+    const H = 300
+    const { g, rect } = sheet(W, H)
+    rect(60, 40, 340, 46)
+    rect(60, 240, 340, 246)
+    rect(60, 40, 66, 246)
+    rect(200, 40, 206, 246)
+    rect(334, 40, 340, 246)
+    rect(334, 40, 340, 70, 255) // дырка в правой стене у верхнего угла — утечка в поле справа
+    const d2 = distanceToInk(binarize(g, W, H))
+    const found = segmentRooms(d2, W, H, 8)
+    const right = found.find((r) => r.x1 > 190 && r.x1 < 220)!
+    expect(right).toBeDefined()
+    // рамка по медианам — по стене, а не по краю листа; площадь — не больше рамки
+    expect(right.x2).toBeLessThan(345)
+    expect(right.areaPx).toBeLessThanOrEqual((right.x2 - right.x1 + 1) * (right.y2 - right.y1 + 1))
+  })
+})
+
+describe('Г-образная комната рядом с коридором', () => {
+  it('рамка Г-образной комнаты накрывает начало коридора — угол помечается её вырезом, коридор целый', () => {
+    const W = 600
+    const H = 500
+    const { g, rect } = sheet(W, H)
+    // комната 40..340 × 40..340, коридор 240..560 × 240..340 заходит в её правый нижний угол;
+    // стены 8 px, между комнатой и коридором — уступ
+    rect(30, 30, 570, 350) // сплошная плита
+    rect(40, 40, 340, 340, 255) // комната
+    rect(240, 240, 560, 340, 255) // коридор (угол общий)
+    rect(340, 40, 560, 232, 255) // кухня над коридором
+    // стены между коридором и комнатой: вертикальная 232..240 по x от y 240 до 340, горизонтальная 232..240 по y от x 240 до 340
+    rect(232, 240, 240, 340)
+    rect(240, 232, 340, 240)
+    rect(340, 40, 348, 240) // стена комната|кухня
+    const d2 = distanceToInk(despeckle(binarize(g, W, H)))
+    const found = segmentRooms(d2, W, H, 14)
+    expect(found).toHaveLength(3)
+    const room = found.find((r) => r.x1 < 50 && r.y1 < 50)!
+    const hall = found.find((r) => r.x2 > 540 && r.y1 > 200)!
+    expect(room).toBeDefined()
+    expect(hall).toBeDefined()
+    // угол принадлежит коридору: комната уступает его, коридор не уступает ничего
+    expect(room.yieldsTo).toEqual([found.indexOf(hall)])
+    expect(hall.yieldsTo).toBeUndefined()
+    // площадь комнаты — по заполнению, а не по рамке: без угла коридора
+    expect(room.areaPx).toBeLessThan((room.x2 - room.x1) * (room.y2 - room.y1) * 0.95)
   })
 })

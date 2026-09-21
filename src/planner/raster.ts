@@ -156,7 +156,9 @@ export function components(bin: Bin): { labels: Int32Array; list: Component[] } 
  */
 export function despeckle(bin: Bin, opts: { minPixels?: number; maxSide?: number } = {}): Bin {
   const minPixels = opts.minPixels ?? 12
-  const maxSide = opts.maxSide ?? Math.max(12, Math.round(Math.max(bin.w, bin.h) / 45))
+  // подписи площадей и размеров на снимке плана — до 8 % высоты листа; стены —
+  // длиннее, а короткие стенки сидят на длинных и в отдельные компоненты не попадают
+  const maxSide = opts.maxSide ?? Math.max(16, Math.round(Math.max(bin.w, bin.h) * 0.08))
   const { labels, list } = components(bin)
   const drop = new Uint8Array(list.length + 1)
   list.forEach((c, i) => {
@@ -578,4 +580,466 @@ export function groundRoomBox(
   const union = (bx2 - bx1) * (by2 - by1) + (r.x2 - r.x1) * (r.y2 - r.y1) - inter
   if (union <= 0 || inter / union < 0.25) return null
   return { x1: r.x1 / w, y1: r.y1 / h, x2: r.x2 / w, y2: r.y2 / h, fill: r.fill }
+}
+
+// ---------- все комнаты с картинки разом ----------
+
+export interface RoomRegion {
+  /** рамка по внутренним граням стен, пиксели */
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+  /** площадь области заливки, px² */
+  areaPx: number
+  /** доля рамки, залитая областью: меньше 0,75 — комната не прямоугольная */
+  fill: number
+  /** доля полного охватывающего прямоугольника области: низкая — область Г-образная или подтекает */
+  fillBox: number
+  /** кусок Г-образной области: по линии разреза стены нет, это одна комната с соседним куском или проём без двери */
+  cut?: boolean
+  /** скольких краёв листа касается область: три-четыре — это поле вокруг плана, не комната */
+  edges: number
+  /** центр масс области */
+  cx: number
+  cy: number
+  /** номер области в разметке — служебный, для разрешения перекрытий рамок */
+  id?: number
+  /** сколько точек в самой области (без расширения до стен) — для порогов «слишком мелко» */
+  points: number
+  /** комната Г-образная: области с этими номерами (в выдаче) заходят в её рамку углом, и там место их */
+  yieldsTo?: number[]
+}
+
+/**
+ * Все комнаты с картинки: тот же приём, что «комната по клику», но клик ставится
+ * во все свободные пиксели разом. Свободное — дальше closePx от чернил (так
+ * закрываются дверные проёмы); каждая связная область — комната, если она не
+ * касается края листа (снаружи квартиры) и не крошечная. Так делают сегментацию
+ * нейросети у лидеров; на чертеже БТИ с толстыми стенами это делает и растр.
+ */
+export interface PxRect {
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+}
+
+/** рамка по медианам границ строк и столбцов области: «язычок» в проёме или утечка в поле её не растягивают */
+type CutSides = { top?: boolean; bottom?: boolean; left?: boolean; right?: boolean }
+
+function measureRegion(labels: Int32Array, id: number, w: number, h: number, box: PxRect, closePx: number, cut: CutSides = {}): RoomRegion | null {
+  const rowMin = new Int32Array(h).fill(w)
+  const rowMax = new Int32Array(h).fill(-1)
+  const colMin = new Int32Array(w).fill(h)
+  const colMax = new Int32Array(w).fill(-1)
+  const rowN = new Int32Array(h)
+  const colN = new Int32Array(w)
+  let count = 0
+  let sx = 0
+  let sy = 0
+  for (let y = box.y1; y <= box.y2; y++) {
+    for (let x = box.x1; x <= box.x2; x++) {
+      if (labels[y * w + x] !== id) continue
+      count++
+      sx += x
+      sy += y
+      rowN[y]++
+      colN[x]++
+      if (x < rowMin[y]) rowMin[y] = x
+      if (x > rowMax[y]) rowMax[y] = x
+      if (y < colMin[x]) colMin[x] = y
+      if (y > colMax[x]) colMax[x] = y
+    }
+  }
+  if (!count) return null
+  // медиана границ строк (столбцов), взвешенная числом точек в строке: узкий
+  // язычок в проёме или полоска поля в две точки шириной, даже длинная, рамку
+  // не сдвигают
+  const median = (arr: Int32Array, n: Int32Array, skip: number): number => {
+    const vals: { v: number; wt: number }[] = []
+    let total = 0
+    for (let k = 0; k < arr.length; k++) {
+      if (arr[k] === skip) continue
+      const wt = n[k]
+      vals.push({ v: arr[k], wt })
+      total += wt
+    }
+    vals.sort((a, b) => a.v - b.v)
+    let acc = 0
+    for (const { v, wt } of vals) {
+      acc += wt
+      if (acc * 2 >= total) return v
+    }
+    return vals[vals.length - 1].v
+  }
+  const x1 = median(rowMin, rowN, w)
+  const x2 = median(rowMax, rowN, -1)
+  const y1 = median(colMin, colN, h)
+  const y2 = median(colMax, colN, -1)
+  const boxArea = (x2 - x1 + 1) * (y2 - y1 + 1)
+  // полный охват области: по нему видно Г-образность, медианная рамка её прячет
+  let fx1 = w, fy1 = h, fx2 = -1, fy2 = -1
+  for (let y = box.y1; y <= box.y2; y++) if (rowMin[y] !== w) { fy1 = Math.min(fy1, y); fy2 = Math.max(fy2, y); fx1 = Math.min(fx1, rowMin[y]); fx2 = Math.max(fx2, rowMax[y]) }
+  const fullArea = (fx2 - fx1 + 1) * (fy2 - fy1 + 1)
+  const edges = [fx1 <= 0, fy1 <= 0, fx2 >= w - 1, fy2 >= h - 1].filter(Boolean).length
+  // По линии разреза стены нет — грань куска и есть граница, расширять её нечем.
+  // Но только если кусок и правда лежит на линии разреза: полоса шириной closePx
+  // вдоль неё заполнена хотя бы наполовину. Остаток поля после отрезанной полосы
+  // к её линии прилегает лишь тонким слоем — ему граница по медиане
+  const touches = (side: keyof CutSides): boolean => {
+    const band = Math.max(1, closePx)
+    let hit = 0
+    let full = 0
+    if (side === 'left' || side === 'right') {
+      const from = side === 'left' ? box.x1 : Math.max(box.x1, box.x2 - band + 1)
+      const to = side === 'left' ? Math.min(box.x2, box.x1 + band - 1) : box.x2
+      for (let y = y1; y <= y2; y++) {
+        if (rowMin[y] === w) continue
+        for (let x = from; x <= to; x++) if (labels[y * w + x] === id) hit++
+      }
+      full = (to - from + 1) * (y2 - y1 + 1)
+    } else {
+      const from = side === 'top' ? box.y1 : Math.max(box.y1, box.y2 - band + 1)
+      const to = side === 'top' ? Math.min(box.y2, box.y1 + band - 1) : box.y2
+      for (let x = x1; x <= x2; x++) {
+        if (colMin[x] === h) continue
+        for (let y = from; y <= to; y++) if (labels[y * w + x] === id) hit++
+      }
+      full = (to - from + 1) * (x2 - x1 + 1)
+    }
+    return full > 0 && hit / full >= 0.5
+  }
+  const cutL = !!cut.left && touches('left')
+  const cutR = !!cut.right && touches('right')
+  const cutT = !!cut.top && touches('top')
+  const cutB = !!cut.bottom && touches('bottom')
+  const isCut = cutL || cutR || cutT || cutB
+  // Площадь комнаты — по рамке до стен, помноженной на заполнение: сама область
+  // съедена закрытием проёмов на closePx с каждой стороны, считать её точки —
+  // занижать площадь маленьких комнат на треть. Утечка в поле листа считаться
+  // не должна: заполнение не больше единицы, площадь — не больше рамки
+  const fill = boxArea ? Math.min(1, count / boxArea) : 0
+  const X1 = cutL ? box.x1 : x1 - closePx
+  const Y1 = cutT ? box.y1 : y1 - closePx
+  const X2 = cutR ? box.x2 : x2 + closePx
+  const Y2 = cutB ? box.y2 : y2 + closePx
+  return {
+    id,
+    x1: X1,
+    y1: Y1,
+    x2: X2,
+    y2: Y2,
+    areaPx: fill * (X2 - X1 + 1) * (Y2 - Y1 + 1),
+    points: count,
+    fill,
+    fillBox: fullArea ? count / fullArea : 0,
+    cx: sx / count,
+    cy: sy / count,
+    edges,
+    ...(isCut ? { cut: true } : {}),
+  }
+}
+
+/**
+ * Г-образная область — это две комнаты без двери между ними (кухня и коридор)
+ * или комната с нишей. Режем там, где ширина области резко меняется: по строке
+ * или столбцу со ступенькой профиля, и только если куски заполняют свои рамки
+ * лучше целого. Куски метятся новыми номерами в labels, чтобы их измерить.
+ */
+function splitRegion(labels: Int32Array, id: number, w: number, h: number, box: PxRect, closePx: number, minArea: number, nextId: () => number, depth: number, cutIn: CutSides = {}): RoomRegion[] {
+  const whole = measureRegion(labels, id, w, h, box, closePx, cutIn)
+  if (!whole) return []
+  if (whole.fillBox >= 0.8 || depth >= 5) return [whole]
+  // профили: ширина области по строкам и высота по столбцам
+  const rowW = new Int32Array(h)
+  const colH = new Int32Array(w)
+  for (let y = box.y1; y <= box.y2; y++) for (let x = box.x1; x <= box.x2; x++) if (labels[y * w + x] === id) (rowW[y]++, colH[x]++)
+  const maxRow = Math.max(...Array.from(rowW.subarray(box.y1, box.y2 + 1)))
+  const maxCol = Math.max(...Array.from(colH.subarray(box.x1, box.x2 + 1)))
+  let best: { horizontal: boolean; at: number; gain: number } | null = null
+  const tryCut = (horizontal: boolean, at: number) => {
+    // помечаем куски временными номерами, меряем, возвращаем метки
+    const idA = nextId()
+    const idB = nextId()
+    for (let y = box.y1; y <= box.y2; y++) for (let x = box.x1; x <= box.x2; x++) {
+      const i = y * w + x
+      if (labels[i] !== id) continue
+      labels[i] = (horizontal ? y < at : x < at) ? idA : idB
+    }
+    const a = measureRegion(labels, idA, w, h, box, closePx)
+    const b = measureRegion(labels, idB, w, h, box, closePx)
+    for (let y = box.y1; y <= box.y2; y++) for (let x = box.x1; x <= box.x2; x++) {
+      const i = y * w + x
+      if (labels[i] === idA || labels[i] === idB) labels[i] = id
+    }
+    if (!a || !b || a.points < minArea || b.points < minArea) return
+    // режем ради заметного выигрыша (ниша или эркер комнату на две не делят) —
+    // либо чтобы отщипнуть чистый прямоугольник, не ухудшив остальное: так по
+    // полосе снимается поле листа вокруг плана, пока не останется комната,
+    // подтёкшая в него через дырку в стене
+    const gain = (a.fillBox * a.areaPx + b.fillBox * b.areaPx) / (a.areaPx + b.areaPx) - whole.fillBox
+    const peel = Math.max(a.fillBox, b.fillBox) >= 0.9 && gain >= 0
+    if ((gain > 0.2 || peel) && (!best || gain > best.gain)) best = { horizontal, at, gain }
+  }
+  // ступенька профиля размыта на ширину закрытия проёмов (углы области скруглены),
+  // поэтому ищем её, сравнивая строки по обе стороны окна, а режем по самой
+  // резкой ступеньке внутри окна — иначе от отрезанной полосы остаётся полоска
+  const k = Math.max(2, closePx)
+  const step = Math.max(1, Math.floor(closePx / 4))
+  const sharpest = (prof: Int32Array, at: number, lo: number, hi: number): number => {
+    let best = at
+    let jump = -1
+    for (let t = Math.max(lo + 1, at - k); t <= Math.min(hi, at + k); t++) {
+      const d = Math.abs(prof[t] - prof[t - 1])
+      if (d > jump) (jump = d), (best = t)
+    }
+    return best
+  }
+  const triedH = new Set<number>()
+  const triedV = new Set<number>()
+  for (let y = box.y1 + k; y <= box.y2 - k; y += step) {
+    if (!(rowW[y - k] && rowW[y + k] && Math.abs(rowW[y + k] - rowW[y - k]) > maxRow * 0.25)) continue
+    const at = sharpest(rowW, y, box.y1, box.y2)
+    if (!triedH.has(at)) (triedH.add(at), tryCut(true, at))
+  }
+  for (let x = box.x1 + k; x <= box.x2 - k; x += step) {
+    if (!(colH[x - k] && colH[x + k] && Math.abs(colH[x + k] - colH[x - k]) > maxCol * 0.25)) continue
+    const at = sharpest(colH, x, box.x1, box.x2)
+    if (!triedV.has(at)) (triedV.add(at), tryCut(false, at))
+  }
+  if (!best) return [whole]
+  const cut0 = cutIn
+  const cut = best as { horizontal: boolean; at: number }
+  const idA = nextId()
+  const idB = nextId()
+  for (let y = box.y1; y <= box.y2; y++) for (let x = box.x1; x <= box.x2; x++) {
+    const i = y * w + x
+    if (labels[i] !== id) continue
+    labels[i] = (cut.horizontal ? y < cut.at : x < cut.at) ? idA : idB
+  }
+  const boxA: PxRect = cut.horizontal ? { ...box, y2: cut.at - 1 } : { ...box, x2: cut.at - 1 }
+  const boxB: PxRect = cut.horizontal ? { ...box, y1: cut.at } : { ...box, x1: cut.at }
+  const cutA: CutSides = cut.horizontal ? { ...cut0, bottom: true } : { ...cut0, right: true }
+  const cutB: CutSides = cut.horizontal ? { ...cut0, top: true } : { ...cut0, left: true }
+  return [...splitRegion(labels, idA, w, h, boxA, closePx, minArea, nextId, depth + 1, cutA), ...splitRegion(labels, idB, w, h, boxB, closePx, minArea, nextId, depth + 1, cutB)]
+}
+
+/** сколько сторон рамки упираются в стену (чернила в полосе у грани) или в край листа */
+function walledSides(d2: Float32Array, w: number, h: number, r: RoomRegion): number {
+  const NEAR = 8 // px: чернила в этой полосе у грани считаются стеной
+  const inkNear = (x: number, y: number) => x < 0 || y < 0 || x >= w || y >= h || d2[y * w + x] <= 1
+  const frac = (horizontal: boolean, at: number, from: number, to: number): number => {
+    let hit = 0
+    let n = 0
+    for (let t = from; t <= to; t++) {
+      n++
+      let found = false
+      for (let k = 0; k <= NEAR && !found; k++) found = horizontal ? inkNear(t, at - k) || inkNear(t, at + k) : inkNear(at - k, t) || inkNear(at + k, t)
+      if (found) hit++
+    }
+    return n ? hit / n : 0
+  }
+  const x1 = Math.max(0, Math.round(r.x1))
+  const x2 = Math.min(w - 1, Math.round(r.x2))
+  const y1 = Math.max(0, Math.round(r.y1))
+  const y2 = Math.min(h - 1, Math.round(r.y2))
+  let sides = 0
+  if (r.x1 <= 0 || frac(false, x1, y1, y2) >= 0.5) sides++
+  if (r.x2 >= w - 1 || frac(false, x2, y1, y2) >= 0.5) sides++
+  if (r.y1 <= 0 || frac(true, y1, x1, x2) >= 0.5) sides++
+  if (r.y2 >= h - 1 || frac(true, y2, x1, x2) >= 0.5) sides++
+  return sides
+}
+
+export function segmentRooms(d2: Float32Array, w: number, h: number, closePx: number, opts: { minAreaPx?: number; maxAreaFrac?: number; clip?: PxRect | null } = {}): RoomRegion[] {
+  const r2 = closePx * closePx
+  const minArea = opts.minAreaPx ?? Math.max(400, (w * h) / 400)
+  const maxArea = (opts.maxAreaFrac ?? 0.5) * w * h
+  const clip = opts.clip ?? { x1: 0, y1: 0, x2: w - 1, y2: h - 1 }
+  const open = (i: number) => {
+    if (d2[i] <= r2) return false
+    const x = i % w
+    const y = (i - x) / w
+    return x >= clip.x1 && x <= clip.x2 && y >= clip.y1 && y <= clip.y2
+  }
+  const labels = new Int32Array(w * h)
+  const queue = new Int32Array(w * h)
+  const out: RoomRegion[] = []
+  let next = 1
+  const nextId = () => next++
+  for (let start = 0; start < d2.length; start++) {
+    if (labels[start] || !open(start)) continue
+    const id = nextId()
+    let head = 0
+    let tail = 0
+    queue[tail++] = start
+    labels[start] = id
+    let count = 0
+    const box: PxRect = { x1: w, y1: h, x2: 0, y2: 0 }
+    while (head < tail) {
+      const i = queue[head++]
+      const x = i % w
+      const y = (i - x) / w
+      count++
+      if (x < box.x1) box.x1 = x
+      if (x > box.x2) box.x2 = x
+      if (y < box.y1) box.y1 = y
+      if (y > box.y2) box.y2 = y
+      const visit = (j: number) => {
+        if (!labels[j] && open(j)) {
+          labels[j] = id
+          queue[tail++] = j
+        }
+      }
+      if (x > 0) visit(i - 1)
+      if (x < w - 1) visit(i + 1)
+      if (y > 0) visit(i - w)
+      if (y < h - 1) visit(i + w)
+    }
+    // Слишком большая область — это поле листа, возможно с подтёкшей в него
+    // комнатой; её всё равно режем, а предел площади проверяем по кускам
+    if (count < minArea) continue
+    for (const piece of splitRegion(labels, id, w, h, box, closePx, minArea, nextId, 0)) {
+      if (piece.areaPx > maxArea) continue
+      // Поле вокруг квартиры обнимает план и касается трёх-четырёх сторон листа —
+      // это не комната. Комната, обрезанная краем фото, касается одной-двух
+      // сторон: её оставляем, край листа для неё становится стеной. Проверяется
+      // после разрезания: комната, подтекающая в поле через обрезанный угол,
+      // отделяется от поля разрезом
+      if (piece.edges >= 3) continue
+      const boxW = piece.x2 - piece.x1 + 1
+      const boxH = piece.y2 - piece.y1 + 1
+      // полоса поля вдоль одной стороны листа — не комната: слишком узкая или вытянутая
+      const minSide = Math.max(12, Math.min(w, h) * 0.04)
+      if (Math.min(boxW, boxH) < minSide || Math.max(boxW, boxH) / Math.min(boxW, boxH) > 8) continue
+      // кусок поля вдоль края листа лежит на нём длинной стороной и неглубок;
+      // комната, обрезанная краем, упирается в него торцом и уходит вглубь
+      if (fieldStrip(piece, w, h)) continue
+      // комната обнесена стенами: вдоль хотя бы трёх сторон рамки — чернила или край листа;
+      // у куска Г-образной области одна сторона — разрез, ему хватит двух
+      if (walledSides(d2, w, h, piece) < (piece.cut ? 2 : 3)) continue
+      out.push(piece)
+    }
+  }
+  // Рамки двух областей перекрылись — одна из комнат Г-образная (коридор
+  // заходит в её угол), и медианная рамка накрыла чужое. Чьё это место, говорят
+  // сами точки: у кого их в перекрытии больше, тот и хозяин; у другой это
+  // место помечается вырезом — на чертеже там будет стена соседа, не её
+  // комнаты квартиры примыкают друг к другу; область в стороне от всех — обрывок
+  // поля, текст на полях или кусок соседнего плана
+  const near = Math.max(2 * closePx + 6, Math.min(w, h) * 0.06)
+  const kept = (out.length < 2 ? out : out.filter((r) => out.some((s) => s !== r && adjacent(r, s, near)))).sort((a, b) => b.areaPx - a.areaPx)
+  resolveOverlaps(kept, labels, w)
+  return kept
+}
+
+/**
+ * Полоса поля листа: касается края листа (или тянется от края до края) и вдоль
+ * него втрое длиннее, чем вглубь. Обрезанная фото комната тоже касается края,
+ * но уходит от него вглубь плана, а не стелется вдоль.
+ */
+function fieldStrip(r: RoomRegion, w: number, h: number): boolean {
+  const boxW = r.x2 - r.x1 + 1
+  const boxH = r.y2 - r.y1 + 1
+  const left = r.x1 <= 0
+  const right = r.x2 >= w - 1
+  const top = r.y1 <= 0
+  const bottom = r.y2 >= h - 1
+  if ((left && right) || (top && bottom)) return true
+  if ((left || right) && boxH > 3 * boxW) return true
+  if ((top || bottom) && boxW > 3 * boxH) return true
+  return false
+}
+
+function resolveOverlaps(regions: RoomRegion[], labels: Int32Array, w: number): void {
+  const count = (r: RoomRegion, o: PxRect): number => {
+    if (r.id === undefined) return 0
+    let n = 0
+    for (let y = o.y1; y <= o.y2; y++) for (let x = o.x1; x <= o.x2; x++) if (labels[y * w + x] === r.id) n++
+    return n
+  }
+  for (let i = 0; i < regions.length; i++) {
+    for (let j = i + 1; j < regions.length; j++) {
+      const a = regions[i]
+      const b = regions[j]
+      const o: PxRect = { x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1), x2: Math.min(a.x2, b.x2), y2: Math.min(a.y2, b.y2) }
+      const ow = o.x2 - o.x1 + 1
+      const oh = o.y2 - o.y1 + 1
+      if (ow <= 0 || oh <= 0) continue
+      const smaller = Math.min((a.x2 - a.x1 + 1) * (a.y2 - a.y1 + 1), (b.x2 - b.x1 + 1) * (b.y2 - b.y1 + 1))
+      // касание рамок на толщину стены — не перекрытие
+      if (ow * oh < smaller * 0.03) continue
+      const na = count(a, o)
+      const nb = count(b, o)
+      if (na === nb) continue
+      const loser = na < nb ? a : b
+      ;(loser.yieldsTo ??= []).push(regions.indexOf(loser === a ? b : a))
+    }
+  }
+}
+
+/** две рамки примыкают: щель между обращёнными гранями не шире near, а по другой оси они перекрываются */
+function adjacent(a: RoomRegion, b: RoomRegion, near: number): boolean {
+  const ox = Math.min(a.x2, b.x2) - Math.max(a.x1, b.x1)
+  const oy = Math.min(a.y2, b.y2) - Math.max(a.y1, b.y1)
+  const gapX = Math.max(b.x1 - a.x2, a.x1 - b.x2)
+  const gapY = Math.max(b.y1 - a.y2, a.y1 - b.y2)
+  return (gapX <= near && oy > 0) || (gapY <= near && ox > 0)
+}
+
+/**
+ * Радиус закрытия проёмов подбирается сам: слишком малый сливает комнаты через
+ * двери и находит «комнаты» в тексте на полях, слишком большой съедает
+ * маленькие комнаты и режет большие по нишам. Пробуем несколько радиусов и
+ * голосуем: настоящая комната находится почти при любом радиусе, случайная —
+ * при одном. Берём радиус, чей набор ближе всего к согласованному; при
+ * равенстве — с меньшим числом кусков разрезов, потом больший радиус.
+ */
+export function segmentRoomsAuto(d2: Float32Array, w: number, h: number, basePx: number, clip?: PxRect | null): { regions: RoomRegion[]; closePx: number } {
+  const tries = [0.5, 0.65, 0.8, 1, 1.25].map((k) => {
+    const closePx = Math.max(3, Math.round(basePx * k))
+    return { closePx, regions: segmentRooms(d2, w, h, closePx, { clip }) }
+  })
+  // кластеры похожих рамок (IoU ≥ 0,6) по всем радиусам; поддержка — в скольких радиусах кластер встретился
+  const clusters: { box: RoomRegion; support: number }[] = []
+  const matches = tries.map(({ regions }) => {
+    const taken = new Set<number>()
+    return regions.map((r) => {
+      let best = -1
+      let bestIou = 0.6
+      clusters.forEach((c, k) => {
+        if (taken.has(k)) return
+        const iou = boxIou(r, c.box)
+        if (iou >= bestIou) (bestIou = iou), (best = k)
+      })
+      if (best < 0) {
+        clusters.push({ box: r, support: 0 })
+        best = clusters.length - 1
+      }
+      taken.add(best)
+      clusters[best].support++
+      return best
+    })
+  })
+  const need = Math.ceil(tries.length / 2)
+  let pick = 0
+  let pickScore = -Infinity
+  tries.forEach((t, i) => {
+    const agreed = matches[i].filter((k) => clusters[k].support >= need).length
+    const extra = t.regions.length - agreed
+    const cut = t.regions.filter((r) => r.cut).length
+    // согласованных больше, лишних меньше; куски разрезов — признак излишнего радиуса
+    const score = agreed - extra - cut * 0.25 + t.closePx * 1e-4
+    if (score > pickScore) (pickScore = score), (pick = i)
+  })
+  return { regions: tries[pick].regions, closePx: tries[pick].closePx }
+}
+
+function boxIou(a: PxRect, b: PxRect): number {
+  const ix = Math.max(0, Math.min(a.x2, b.x2) - Math.max(a.x1, b.x1))
+  const iy = Math.max(0, Math.min(a.y2, b.y2) - Math.max(a.y1, b.y1))
+  const inter = ix * iy
+  const union = (a.x2 - a.x1) * (a.y2 - a.y1) + (b.x2 - b.x1) * (b.y2 - b.y1) - inter
+  return union > 0 ? inter / union : 0
 }

@@ -21,6 +21,8 @@ import { MIN_WALL_LENGTH, WALL_THICKNESSES } from './ops'
 import { buildRooms } from './rooms'
 import { bboxOf, closestOnSeg, dist, pointInPoly } from './geometry'
 import { canRebuildFrom, pointOnSide, reconstructFromRooms, scaleSamplesFromRooms, type AreaFit } from './reconstruct'
+import type { RoomRegion } from './raster'
+import { roomsFromRegions } from './segment'
 
 export interface ConvertOptions {
   /** не трогать масштаб: пользователь уже откалибровал подложку руками */
@@ -31,6 +33,11 @@ export interface ConvertOptions {
    * closeCm — на сколько сантиметров закрывать дверные проёмы
    */
   ground?: (box: AiBox, closeCm: number) => AiBox | null
+  /**
+   * Комнаты, найденные сегментацией картинки (пиксели). Если их две и больше,
+   * геометрия берётся с них, а от модели — только подписи и проёмы
+   */
+  regions?: RoomRegion[]
   /** допуск сведения концов стен, см */
   weldCm?: number
   /** до скольких градусов отклонения стена считается осевой */
@@ -38,7 +45,7 @@ export interface ConvertOptions {
 }
 
 /** настройки со значениями по умолчанию; привязка к картинке — необязательная */
-type ConvertSettings = Required<Omit<ConvertOptions, 'ground'>> & Pick<ConvertOptions, 'ground'>
+type ConvertSettings = Required<Omit<ConvertOptions, 'ground' | 'regions'>> & Pick<ConvertOptions, 'ground' | 'regions'>
 
 export const DEFAULT_CONVERT: ConvertSettings = { keepScale: false, weldCm: 12, axisTolDeg: 6 }
 
@@ -52,7 +59,7 @@ export interface ScaleFit {
   samples: number
 }
 
-export type ConvertMethod = 'по размерам комнат' | 'по линиям стен'
+export type ConvertMethod = 'по комнатам с картинки' | 'по размерам комнат' | 'по линиям стен'
 
 export interface ConvertReport {
   scale: ScaleFit
@@ -71,6 +78,8 @@ export interface ConvertReport {
   roomsDropped: string[]
   /** сколько рамок комнат привязано к стенам на картинке */
   grounded: number
+  /** сегментация: сколько комнат найдено на картинке и скольким подписям модели нашлось место */
+  segmented: { regions: number; matched: number; unmatched: string[] } | null
   /** где лёг чертёж относительно картинки: для разбора, если он лёг мимо */
   placement: { walls: { minX: number; minY: number; maxX: number; maxY: number } | null; underlay: { minX: number; minY: number; maxX: number; maxY: number }; shifted: boolean }
   note?: string
@@ -264,29 +273,55 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
   }
   let u: Underlay = { ...underlay, scale: fit.cmPerPx }
 
-  // 1а. рамки комнат — к настоящим стенам на картинке, где заливка нашла комнату
-  //     похожего размера: геометрия с картинки точнее координат модели. Радиус
-  //     закрытия дверных проёмов берётся по предварительному масштабу
+  // 1а. комнаты с картинки: сегментация нашла области — геометрия берётся с них,
+  //     от модели остаются подписи (по точке или по площади) и проёмы
   let grounded = 0
+  let segmented: ConvertReport['segmented'] = null
+  let rooms = ai.rooms
+  let bySegments = false
+  const regions = o.regions ?? []
+  if (regions.length >= 2) {
+    // толщина стены между соседними областями — в пикселях картинки; масштаб здесь
+    // ещё ненадёжен, поэтому допуск задаётся долей картинки, а не сантиметрами
+    const wallPx = Math.max(8, 0.05 * Math.min(px.w, px.h))
+    const seg = roomsFromRegions(regions, px, ai.rooms, wallPx)
+    const labelled = ai.rooms.filter((r) => r.areaM2).length
+    // областям верим, если подписи легли хотя бы наполовину (или подписей нет вовсе)
+    if (!labelled || seg.matched >= Math.ceil(labelled / 2)) {
+      rooms = seg.rooms
+      bySegments = true
+      segmented = { regions: regions.length, matched: seg.matched, unmatched: seg.unmatched }
+      if (!o.keepScale && seg.cmPerPx) {
+        fit = { cmPerPx: seg.cmPerPx, source: 'площади комнат', samples: seg.matched }
+        u = { ...underlay, scale: fit.cmPerPx }
+      }
+    }
+  }
+
+  // 1б. иначе — рамки комнат от модели привязываются к настоящим стенам на картинке,
+  //     где заливка нашла комнату похожего размера. Радиус закрытия дверных проёмов
+  //     берётся по предварительному масштабу
   const groundedNames = new Set<string>()
-  const rooms = ai.rooms.map((r) => {
-    if (!r.box || !o.ground) return r
-    const g = o.ground(r.box, 45)
-    if (!g) return r
-    const areaM2 = (g.x2 - g.x1) * px.w * (g.y2 - g.y1) * px.h * u.scale * u.scale * 1e-4
-    // подписанная площадь есть — заливка не должна расходиться с ней больше чем вдвое
-    if (r.areaM2 && (areaM2 < r.areaM2 * 0.55 || areaM2 > r.areaM2 * 1.8)) return r
-    grounded++
-    groundedNames.add(r.name)
-    return { ...r, box: g }
-  })
-  // привязанные рамки — настоящая геометрия: масштаб по ним точнее, чем по рамкам модели
-  if (!o.keepScale && grounded) {
-    // рамка со стен картинки надёжна и в одиночку: одной оценки достаточно
-    const byGrounded = scaleFromLabels({ ...ai, rooms: rooms.filter((r) => groundedNames.has(r.name)) }, px, 1)
-    if (byGrounded) {
-      fit = byGrounded
-      u = { ...underlay, scale: fit.cmPerPx }
+  if (!bySegments) {
+    rooms = ai.rooms.map((r) => {
+      if (!r.box || !o.ground) return r
+      const g = o.ground(r.box, 45)
+      if (!g) return r
+      const areaM2 = (g.x2 - g.x1) * px.w * (g.y2 - g.y1) * px.h * u.scale * u.scale * 1e-4
+      // подписанная площадь есть — заливка не должна расходиться с ней больше чем вдвое
+      if (r.areaM2 && (areaM2 < r.areaM2 * 0.55 || areaM2 > r.areaM2 * 1.8)) return r
+      grounded++
+      groundedNames.add(r.name)
+      return { ...r, box: g }
+    })
+    // привязанные рамки — настоящая геометрия: масштаб по ним точнее, чем по рамкам модели
+    if (!o.keepScale && grounded) {
+      // рамка со стен картинки надёжна и в одиночку: одной оценки достаточно
+      const byGrounded = scaleFromLabels({ ...ai, rooms: rooms.filter((r) => groundedNames.has(r.name)) }, px, 1)
+      if (byGrounded) {
+        fit = byGrounded
+        u = { ...underlay, scale: fit.cmPerPx }
+      }
     }
   }
 
@@ -309,7 +344,7 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
   const rebuilt = rooms.some(canRebuildFrom) ? reconstructFromRooms(rooms, u, wallThicknesses(ai), dimSpans) : null
   const closedByNumbers = rebuilt ? rebuilt.rooms.filter((r) => r.haveM2 !== undefined).length : 0
   const byNumbers = !!rebuilt && closedByNumbers > 0 && closedByNumbers >= closedRooms(walls, ai, u)
-  const method: ConvertMethod = byNumbers ? 'по размерам комнат' : 'по линиям стен'
+  const method: ConvertMethod = byNumbers ? (bySegments ? 'по комнатам с картинки' : 'по размерам комнат') : 'по линиям стен'
   if (byNumbers && rebuilt) walls = rebuilt.walls
 
   // 6. чертёж должен лежать на картинке: центр стен внутри подложки. Если он лёг
@@ -399,6 +434,7 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
       roomsSkipped: byNumbers && rebuilt ? [...rebuilt.skipped, ...rebuilt.rooms.filter((r) => r.haveM2 === undefined).map((r) => r.name)] : [],
       roomsDropped: byNumbers && rebuilt ? rebuilt.dropped : [],
       grounded,
+      segmented,
       placement: { walls: wBox ? bboxOf(walls.flatMap((w) => [w.a, w.b])) : null, underlay: uRect, shifted },
       note: shifted ? `${ai.note ? `${ai.note} ` : ''}Чертёж лёг мимо картинки и был сдвинут на неё — координаты в ответе модели подозрительны, пришлите отчёт разработчику.` : ai.note,
     },

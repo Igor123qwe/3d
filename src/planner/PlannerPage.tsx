@@ -36,7 +36,7 @@ import { getTelegramWebApp } from '../telegram'
 import { guessType, modelRefFromAsset, modelRefFromUrl, phAssets, phCategories, phDimsCm, phInfo, phPage, type PhAsset } from './polyhaven'
 import { decodePlan, parseHash, planShareUrl } from './share'
 import { DEFAULT_TRACE, calibrate, detectWalls, grayscaleOf, joinCorners, loadUnderlayImage, makeUnderlay, mergeCollinear, nameFromFile, planFromImage, toPixel, toPlan, tracePlan, type LoadedImage, type TraceOptions } from './underlay'
-import { cleanRaster, distanceToInk, dominantAngle, floodRoom, grayToImage, groundRoomBox, rotateImage, warpToRect, type CleanResult } from './raster'
+import { cleanRaster, distanceToInk, dominantAngle, floodRoom, grayToImage, groundRoomBox, rotateImage, segmentRooms, segmentRoomsAuto, warpToRect, type CleanResult, type RoomRegion } from './raster'
 import type { Guide } from './snapping'
 import { aiStatus, askLayout, lookupProductViaServer, recognizePlan, type AiStatus } from './ai'
 import { applyAiPlan, convertAiPlan } from './planai'
@@ -781,6 +781,67 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     })
   }
 
+  // отладочный доступ к растру из сквозных проверок: только в dev-сборке
+  useEffect(() => {
+    if (!import.meta.env.DEV) return
+    ;(window as unknown as { __plannerDebug?: unknown }).__plannerDebug = {
+      raster: async () => {
+        const u = plan.underlay
+        if (!u) return null
+        const r = await ensureRaster(u)
+        if (!r.d2) r.d2 = distanceToInk(r.clean.bin)
+        return { w: u.px.w, h: u.px.h, scale: u.scale, ink: r.clean.bin.ink, d2: r.d2 }
+      },
+      segmentRooms,
+      segmentRoomsAuto,
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plan.underlay])
+
+  /** Все комнаты с картинки: области заливки по очищенному растру */
+  const regionsOf = async (u: Underlay): Promise<RoomRegion[]> => {
+    const r = await ensureRaster(u)
+    if (!r.d2) r.d2 = distanceToInk(r.clean.bin)
+    // дверной проём до 90 см закрывается радиусом в полпроёма; точный радиус подбирается сам
+    const closePx = Math.min(80, Math.max(3, Math.round(45 / u.scale)))
+    return segmentRoomsAuto(r.d2, u.px.w, u.px.h, closePx).regions
+  }
+
+  /** Комнаты с картинки без ИИ: сегментация даёт геометрию, имена — по номерам */
+  const roomsFromPicture = async () => {
+    const u = plan.underlay
+    if (!u || tracing) return
+    setTracing(true)
+    try {
+      const regions = await regionsOf(u)
+      if (regions.length < 2) {
+        setToast(regions.length ? 'На картинке нашлась только одна замкнутая область — попробуйте «Очистить» фото или «Комната по клику»' : 'Замкнутых комнат на картинке не нашлось: линии стен прерываются. Попробуйте «Очистить» или «Комната по клику»')
+        return
+      }
+      const result = convertAiPlan({ walls: [], openings: [], rooms: [], dimensions: [] }, u, { keepScale: true, regions })
+      if (!result.walls.length) {
+        setToast('Комнаты нашлись, но стены из них не собрались — проверьте картинку')
+        return
+      }
+      setAsk({
+        title: 'Комнаты с картинки',
+        text: `Найдено комнат: ${result.report.rooms}, стен ${result.report.walls}. Масштаб — текущий (${u.scale.toFixed(2)} см в пикселе): задайте его по отрезку или по площади любой комнаты. Имена комнат — по номерам, переименуйте в свойствах.`,
+        options: [{ key: 'apply', label: 'Заменить чертёж найденным', hint: 'прежний вернёт Ctrl+Z', icon: 'check', primary: true }],
+        onPick: () => {
+          setAsk(null)
+          history.apply((prev) => applyAiPlan(prev, result).plan)
+          setSelection(null)
+          setTimeout(() => canvasRef.current?.fit(), 50)
+          setToast(`Комнат ${result.report.rooms}, стен ${result.report.walls}. Проверьте масштаб и названия`)
+        },
+      })
+    } catch (err) {
+      setToast((err as Error).message)
+    } finally {
+      setTracing(false)
+    }
+  }
+
   /** Повернуть фото так, чтобы стены легли по осям */
   const levelImage = async () => {
     const u = plan.underlay
@@ -957,7 +1018,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             return g ? { x1: g.x1, y1: g.y1, x2: g.x2, y2: g.y2 } : null
           }
         : undefined
-      const convert = (p: AiPlan) => convertAiPlan(p, u, { keepScale: calibrated, ground })
+      // комнаты с картинки: геометрия с растра, от модели — подписи
+      const regions = raster ? await regionsOf(u).catch(() => []) : []
+      const convert = (p: AiPlan) => convertAiPlan(p, u, { keepScale: calibrated, ground, regions })
       let { plan: read, ai: cost } = await recognizePlan(u.src)
       // масштаб не трогаем, если пользователь уже откалибровал подложку руками
       let result = convert(read)
@@ -992,14 +1055,15 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       }
       const r = result.report
       const lines = [`Стен ${r.walls}, проёмов ${r.openings}, комнат ${r.rooms}. Масштаб — ${r.scale.source} (${r.scale.cmPerPx.toFixed(2)} см в пикселе).`]
-      if (r.method === 'по размерам комнат') {
+      if (r.method !== 'по линиям стен') {
         lines.push(
           r.areaFit
             ? `Чертёж построен заново по размерам с плана: площади комнат сходятся на ${Math.round(r.areaFit.accuracy * 100)} %.`
             : 'Чертёж построен заново по прямоугольникам комнат; площадей на плане нет, сверить не с чем.',
         )
         for (const off of r.areaFit?.off.slice(0, 4) ?? []) lines.push(`• ${off.name}: на плане ${fmtNum(off.wantM2)} м², получилось ${fmtNum(off.haveM2)} м²`)
-        if (r.grounded) lines.push(`Рамки ${r.grounded} из ${read.rooms.length} комнат привязаны к стенам на картинке.`)
+        if (r.segmented) lines.push(`Комнаты взяты с картинки: найдено ${r.segmented.regions}, подписей модели легло ${r.segmented.matched} из ${read.rooms.length}${r.segmented.unmatched.length ? ` (без места: ${r.segmented.unmatched.join(', ')})` : ''}.`)
+        else if (r.grounded) lines.push(`Рамки ${r.grounded} из ${read.rooms.length} комнат привязаны к стенам на картинке.`)
         if (r.roomsDropped.length) lines.push(`Выброшено как выдуманное моделью: ${r.roomsDropped.join(', ')} — без этого площади соседей сошлись.`)
         if (r.roomsSkipped.length) lines.push(`Не удалось поставить: ${r.roomsSkipped.join(', ')}.`)
         if (attempts > 1) lines.push(`Попыток две: первая разошлась, вторая — модель ${cost.model}.`)
@@ -1559,6 +1623,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                     </button>
                     <span className="pl-note">Читает размеры и площади комнат, двери и окна — и строит чертёж заново по числам с плана. Масштаб встанет сам.</span>
                     <div className="pl-row">
+                      <button className="pl-btn small" onClick={() => void roomsFromPicture()} disabled={tracing} title="Найти все замкнутые комнаты на картинке разом, без ИИ">
+                        <Icon name="room" size={16} /> {tracing ? 'Ищу…' : 'Комнаты с картинки'}
+                      </button>
                       <button className={`pl-btn small ${tool === 'roomPick' ? 'active' : ''}`} onClick={() => setTool(tool === 'roomPick' ? 'select' : 'roomPick')} title="Кликните внутри комнаты на картинке — стены вокруг неё появятся сами">
                         <Icon name="wand" size={16} /> Комната по клику
                       </button>
@@ -1569,10 +1636,13 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                   </>
                 ) : (
                   <>
-                    <button className={`pl-btn primary ${tool === 'roomPick' ? 'active' : ''}`} onClick={() => setTool(tool === 'roomPick' ? 'select' : 'roomPick')} title="Кликните внутри комнаты на картинке — стены вокруг неё появятся сами">
-                      <Icon name="wand" size={18} /> Комната по клику
+                    <button className="pl-btn primary" onClick={() => void roomsFromPicture()} disabled={tracing} title="Найти все замкнутые комнаты на картинке разом">
+                      <Icon name="room" size={18} /> {tracing ? 'Ищу комнаты…' : 'Комнаты с картинки'}
                     </button>
-                    <span className="pl-note">Самый надёжный путь без ИИ: клик внутри каждой комнаты на картинке — по комнате за клик, общие стены сходятся сами.</span>
+                    <span className="pl-note">Все замкнутые комнаты с картинки разом — общие стены сходятся сами. Не нашло какую-то — добавьте её кликом:</span>
+                    <button className={`pl-btn small ${tool === 'roomPick' ? 'active' : ''}`} onClick={() => setTool(tool === 'roomPick' ? 'select' : 'roomPick')} title="Кликните внутри комнаты на картинке — стены вокруг неё появятся сами">
+                      <Icon name="wand" size={16} /> Комната по клику
+                    </button>
                     <button className="pl-btn small" onClick={detectWallsFromImage} disabled={tracing}>
                       <Icon name="wall" size={16} /> {tracing ? 'Обвожу…' : 'Или обвести все линии разом'}
                     </button>

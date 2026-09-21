@@ -101,7 +101,7 @@ interface Rect {
   /** размер взят прямо с подписи и согласован с площадью — его не подгоняем */
   fixedW: boolean
   fixedH: boolean
-  /** подписанная площадь, см² (0 — нет) */
+  /** площадь рамки по подписи, см² (0 — нет): подписанная площадь плюс углы, отданные соседям */
   areaCm2: number
   /** размеры рамки с картинки, см: по ним грани встают на оси, подписи же — только уравнения */
   bw: number
@@ -122,10 +122,20 @@ const toPlan = (u: Underlay, px: Pt): Pt => ({ x: u.x + px.x * u.scale, y: u.y +
  * к комнате, и какая именно, подсказывает форма прямоугольника на картинке.
  * Чего не подписано — выводится из площади и того, что подписано.
  */
-function sizeRoom(r: AiRoom & { box: AiBox }, u: Underlay): Omit<Rect, 'xi' | 'xj' | 'yi' | 'yj'> {
+function sizeRoom(r: AiRoom & { box: AiBox }, u: Underlay, all: (AiRoom & { box: AiBox })[]): Omit<Rect, 'xi' | 'xj' | 'yi' | 'yj'> {
   const bw = (r.box.x2 - r.box.x1) * u.px.w * u.scale
   const bh = (r.box.y2 - r.box.y1) * u.px.h * u.scale
-  const A = r.areaM2 ? r.areaM2 * 1e4 : 0
+  // Г-образная комната: подписанная площадь — без угла, отданного соседу, а размеры
+  // у стен — по всей рамке. Чтобы они сошлись, к площади добавляется этот угол
+  let notchCm2 = 0
+  for (const name of r.yieldsTo ?? []) {
+    const s = all.find((x) => x.name === name)
+    if (!s) continue
+    const ox = Math.max(0, Math.min(r.box.x2, s.box.x2) - Math.max(r.box.x1, s.box.x1)) * u.px.w * u.scale
+    const oy = Math.max(0, Math.min(r.box.y2, s.box.y2) - Math.max(r.box.y1, s.box.y1)) * u.px.h * u.scale
+    notchCm2 += ox * oy
+  }
+  const A = r.areaM2 ? r.areaM2 * 1e4 + notchCm2 : 0
   let w = r.widthCm ?? bw
   let h = r.depthCm ?? bh
   let wLabelled = !!r.widthCm
@@ -511,7 +521,8 @@ export function reconstructFromRooms(rooms: AiRoom[], u: Underlay, options: Reco
 function reconstructCore(rooms: AiRoom[], u: Underlay, options: ReconstructOptions = {}, dims: DimSpan[] = []): ReconstructResult {
   const o = { ...DEFAULT_RECONSTRUCT, ...options }
   const skipped: string[] = []
-  const sized = rooms.filter(canRebuildFrom).map((r) => sizeRoom(r, u))
+  const boxed = rooms.filter(canRebuildFrom)
+  const sized = boxed.map((r) => sizeRoom(r, u, boxed))
   // комната уже полуметра — ниша или шкаф, а не комната: осей ей не хватит
   const rects = sized.filter((r) => {
     const ok = r.w >= 60 && r.h >= 60
@@ -543,6 +554,9 @@ function reconstructCore(rooms: AiRoom[], u: Underlay, options: ReconstructOptio
     const k = rects.indexOf(r)
     const along = side === 'left' || side === 'right' ? r.bh : r.bw
     const [l, rr, tp, bt] = [rawX[k * 2], rawX[k * 2 + 1], rawY[k * 2], rawY[k * 2 + 1]]
+    // грань внутри рамки Г-образного соседа, что уступил этот угол, — перегородка
+    const at: Pt = side === 'left' ? { x: l, y: (tp + bt) / 2 } : side === 'right' ? { x: rr, y: (tp + bt) / 2 } : side === 'top' ? { x: (l + rr) / 2, y: tp } : { x: (l + rr) / 2, y: bt }
+    if (rects.some((s, m) => s !== r && s.spec.yieldsTo?.includes(r.spec.name) && at.x > rawX[m * 2] && at.x < rawX[m * 2 + 1] && at.y > rawY[m * 2] && at.y < rawY[m * 2 + 1])) return false
     let covered = 0
     rects.forEach((s, m) => {
       if (s === r) return
@@ -639,13 +653,20 @@ function reconstructCore(rooms: AiRoom[], u: Underlay, options: ReconstructOptio
   if (!placed.length) return { walls: [], rooms: [], skipped, dropped: [], areaFit: null }
 
   // 4. стены: по каждой оси — отрезки между соседними поперечными осями,
-  //    толщина по тому, сколько комнат прилегает
+  //    толщина по тому, сколько комнат прилегает. Грань Г-образной комнаты
+  //    внутри её выреза не рисуется: там стоят стены соседа, который в этот
+  //    угол заходит; сама комната на чертеже выходит Г-образной
   const walls: Wall[] = []
+  const margin = o.snapCm / 2
+  const insideRoom = (s: Rect, p: Pt) => p.x > X[s.xi] + margin && p.x < X[s.xj] - margin && p.y > Y[s.yi] + margin && p.y < Y[s.yj] - margin
+  // точка в углу, который комната r отдала соседу: внутри рамки этого соседа
+  const inNotch = (r: Rect, p: Pt) => !!r.spec.yieldsTo?.length && placed.some((s) => s !== r && r.spec.yieldsTo!.includes(s.spec.name) && insideRoom(s, p))
   const line = (vertical: boolean, k: number) => {
     const at = vertical ? X[k] : Y[k]
     const near = placed.filter((r) => (vertical ? r.xi === k || r.xj === k : r.yi === k || r.yj === k))
     if (!near.length) return
-    const marks = [...new Set(near.flatMap((r) => (vertical ? [Y[r.yi], Y[r.yj]] : [X[r.xi], X[r.xj]])))].sort((a, b) => a - b)
+    // поперечные оси всех комнат — чтобы грань могла оборваться там, где начинается чужой угол
+    const marks = [...new Set(placed.flatMap((r) => (vertical ? [Y[r.yi], Y[r.yj]] : [X[r.xi], X[r.xj]])))].sort((a, b) => a - b)
     let run: { from: number; to: number; th: number } | null = null
     const flush = () => {
       if (run && run.to - run.from >= 5) {
@@ -660,10 +681,13 @@ function reconstructCore(rooms: AiRoom[], u: Underlay, options: ReconstructOptio
     for (let m = 0; m < marks.length - 1; m++) {
       const s0 = marks[m]
       const s1 = marks[m + 1]
-      const covers = (r: Rect) => (vertical ? Y[r.yi] <= s0 + 0.5 && Y[r.yj] >= s1 - 0.5 : X[r.xi] <= s0 + 0.5 && X[r.xj] >= s1 - 0.5)
+      const mid: Pt = vertical ? { x: at, y: (s0 + s1) / 2 } : { x: (s0 + s1) / 2, y: at }
+      const covers = (r: Rect) => (vertical ? Y[r.yi] <= s0 + 0.5 && Y[r.yj] >= s1 - 0.5 : X[r.xi] <= s0 + 0.5 && X[r.xj] >= s1 - 0.5) && !inNotch(r, mid)
       const before = near.some((r) => (vertical ? r.xj === k : r.yj === k) && covers(r))
       const after = near.some((r) => (vertical ? r.xi === k : r.yi === k) && covers(r))
-      const th = before && after ? o.interiorCm : before || after ? o.exteriorCm : 0
+      // стена соседа по краю отданного ему угла — перегородка между двумя комнатами, не наружная
+      const inner = (before || after) && !(before && after) && placed.some((s) => !near.includes(s) && insideRoom(s, mid) && near.some((n) => s.spec.yieldsTo?.includes(n.spec.name)))
+      const th = (before && after) || inner ? o.interiorCm : before || after ? o.exteriorCm : 0
       if (!th) {
         flush()
         continue

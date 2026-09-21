@@ -335,3 +335,36 @@ describe('соседство, названное моделью', () => {
     expect(overl).toHaveLength(0)
   })
 })
+
+describe('Г-образная комната', () => {
+  // коридор заходит в правый нижний угол комнаты: у комнаты этот угол — вырез
+  const rooms: AiRoom[] = [
+    { name: 'Гостиная', areaM2: 14.4, x: 150 / px.w, y: 150 / px.h, box: { x1: 40 / px.w, y1: 40 / px.h, x2: 440 / px.w, y2: 440 / px.h }, yieldsTo: ['коридор'] },
+    { name: 'коридор', x: 500 / px.w, y: 370 / px.h, box: { x1: 300 / px.w, y1: 300 / px.h, x2: 700 / px.w, y2: 440 / px.h } },
+    { name: 'Кухня', areaM2: 6.4, x: 570 / px.w, y: 150 / px.h, box: { x1: 450 / px.w, y1: 40 / px.h, x2: 700 / px.w, y2: 290 / px.h } },
+  ]
+
+  it('стена комнаты в её вырез не идёт: комната выходит Г-образной, лишней клетки в углу нет', () => {
+    const res = reconstructFromRooms(rooms, u)
+    const { rooms: built } = buildRooms({ version: 1, name: '', walls: res.walls, openings: [], furniture: [], rooms: [], dims: [], settings: { grid: 10 } })
+    expect(built).toHaveLength(3)
+    // площадь гостиной — без угла коридора (16 − 1,96 ≈ 14), коридор — целиком (5,6)
+    expect(areaOf(res, 'Гостиная')).toBeCloseTo(14.4, 0)
+    expect(areaOf(res, 'коридор')).toBeCloseTo(5.6, 0)
+    expect(res.areaFit?.accuracy ?? 0).toBeGreaterThan(0.95)
+    // стены коридора по краю выреза — перегородки, не наружные
+    const inCorner = res.walls.filter((w) => Math.abs(w.a.x - 300) < 15 && Math.abs(w.b.x - 300) < 15 && Math.min(w.a.y, w.b.y) >= 280)
+    expect(inCorner).toHaveLength(1)
+    expect(inCorner[0].thickness).toBe(10)
+  })
+
+  it('размеры у стен Г-образной комнаты — по всей рамке, площадь — без выреза: они сходятся', () => {
+    const labelled = rooms.map((r) => (r.name === 'Гостиная' ? { ...r, widthCm: 400, depthCm: 400 } : r))
+    const res = reconstructFromRooms(labelled, u)
+    // угол по картинке чуть больше, чем по подписям: расхождение в полквадрата допустимо
+    expect(Math.abs((areaOf(res, 'Гостиная') ?? 0) - 14.4)).toBeLessThan(0.8)
+    // ширина по осям: 400 внутри, перегородка 10 справа и половина наружной стены (15) слева
+    const g = res.rooms.find((r) => r.name === 'Гостиная')!
+    expect(g.rect.x2 - g.rect.x1).toBeCloseTo(425, -1)
+  })
+})
