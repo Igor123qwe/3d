@@ -290,10 +290,29 @@ describe('выдуманная комната', () => {
     r4.box = { ...r4.box!, x2: r4.box!.x2 - 90 / px.w }
     r2.box = { ...r2.box!, x1: r2.box!.x1 + 90 / px.w }
     rooms.push({ name: 'Санузел', kind: 'санузел', areaM2: 4.5, x: (40 + 401 - 45) / px.w, y: 670 / px.h, box: { x1: (40 + 401 - 90) / px.w, y1: 458 / px.h, x2: (40 + 401 + 100) / px.w, y2: 884 / px.h } })
-    const res = reconstructFromRooms(rooms, u)
+    // картинка не подтверждает санузел (под его рамкой заливка комнаты не нашла) — выбросить можно
+    const res = reconstructFromRooms(rooms, u, {}, [], (r) => r.name === 'Санузел')
     expect(res.dropped).toEqual(['Санузел'])
+    expect(res.doubtful).toEqual([])
     expect(res.areaFit?.accuracy ?? 0).toBeGreaterThan(0.95)
     expect(res.rooms.map((r) => r.name)).not.toContain('Санузел')
+  })
+
+  it('без подтверждения картинки комната не выбрасывается, а помечается сомнительной', () => {
+    const rooms = aiRooms(FLAT)
+    const r4 = rooms.find((r) => r.name === '4ж')!
+    const r2 = rooms.find((r) => r.name === '2')!
+    delete r4.widthCm
+    delete r4.depthCm
+    delete r2.widthCm
+    delete r2.depthCm
+    r4.box = { ...r4.box!, x2: r4.box!.x2 - 90 / px.w }
+    r2.box = { ...r2.box!, x1: r2.box!.x1 + 90 / px.w }
+    rooms.push({ name: 'Санузел', kind: 'санузел', areaM2: 4.5, x: (40 + 401 - 45) / px.w, y: 670 / px.h, box: { x1: (40 + 401 - 90) / px.w, y1: 458 / px.h, x2: (40 + 401 + 100) / px.w, y2: 884 / px.h } })
+    const res = reconstructFromRooms(rooms, u)
+    expect(res.dropped).toEqual([])
+    expect(res.doubtful).toContain('Санузел')
+    expect(res.rooms.map((r) => r.name)).toContain('Санузел')
   })
 
   it('когда всё сходится, ничего не выбрасывается', () => {

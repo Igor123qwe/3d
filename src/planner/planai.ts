@@ -14,7 +14,7 @@
 // 3. Если модель прочитала комнаты с размерами, чертёж строится заново по
 //    числам (reconstruct.ts), а стены с картинки остаются запасным путём:
 //    берётся тот вариант, где замкнулось больше комнат.
-import type { AiBox, AiDimension, AiPlan } from './aicontract'
+import type { AiBox, AiDimension, AiPlan, AiRoom } from './aicontract'
 import type { Opening, Plan, Pt, RoomMeta, Underlay, Wall } from './types'
 import { uid } from './types'
 import { MIN_WALL_LENGTH, WALL_THICKNESSES } from './ops'
@@ -23,6 +23,7 @@ import { bboxOf, closestOnSeg, dist, pointInPoly } from './geometry'
 import { canRebuildFrom, pointOnSide, reconstructFromRooms, scaleSamplesFromRooms, type AreaFit } from './reconstruct'
 import type { RoomRegion } from './raster'
 import { roomsFromRegions } from './segment'
+import { assessQuality, type QualityReport, type RasterInfo } from './quality'
 
 export interface ConvertOptions {
   /** не трогать масштаб: пользователь уже откалибровал подложку руками */
@@ -38,6 +39,8 @@ export interface ConvertOptions {
    * геометрия берётся с них, а от модели — только подписи и проёмы
    */
   regions?: RoomRegion[]
+  /** карта расстояний до чернил очищенной картинки: по ней чертёж проверяется на совпадение со стенами */
+  raster?: RasterInfo | null
   /** допуск сведения концов стен, см */
   weldCm?: number
   /** до скольких градусов отклонения стена считается осевой */
@@ -45,7 +48,7 @@ export interface ConvertOptions {
 }
 
 /** настройки со значениями по умолчанию; привязка к картинке — необязательная */
-type ConvertSettings = Required<Omit<ConvertOptions, 'ground' | 'regions'>> & Pick<ConvertOptions, 'ground' | 'regions'>
+type ConvertSettings = Required<Omit<ConvertOptions, 'ground' | 'regions' | 'raster'>> & Pick<ConvertOptions, 'ground' | 'regions' | 'raster'>
 
 export const DEFAULT_CONVERT: ConvertSettings = { keepScale: false, weldCm: 12, axisTolDeg: 6 }
 
@@ -57,6 +60,8 @@ export interface ScaleFit {
   source: ScaleSource
   /** по скольким подписям посчитано */
   samples: number
+  /** сами подписи, по которым посчитано: чтобы было видно, чему верить и что проверить */
+  labels?: string[]
 }
 
 export type ConvertMethod = 'по комнатам с картинки' | 'по размерам комнат' | 'по линиям стен'
@@ -78,8 +83,12 @@ export interface ConvertReport {
   roomsDropped: string[]
   /** сколько рамок комнат привязано к стенам на картинке */
   grounded: number
+  /** комнаты, без которых площади сошлись бы лучше, но картинка их подтверждает — оставлены и помечены */
+  roomsDoubtful: string[]
   /** сегментация: сколько комнат найдено на картинке и скольким подписям модели нашлось место */
   segmented: { regions: number; matched: number; unmatched: string[] } | null
+  /** проверка по картинке и числам: полнота, стены, формы, размеры, проёмы */
+  quality: QualityReport
   /** где лёг чертёж относительно картинки: для разбора, если он лёг мимо */
   placement: { walls: { minX: number; minY: number; maxX: number; maxY: number } | null; underlay: { minX: number; minY: number; maxX: number; maxY: number }; shifted: boolean }
   note?: string
@@ -135,7 +144,11 @@ export function scaleFromLabels(ai: AiPlan, px: { w: number; h: number }, minSam
   const all = [...dims, ...rooms]
   if (all.length < minSamples) return null
   const source: ScaleSource = dims.length && rooms.length ? 'размеры на плане' : dims.length ? 'размерные цепочки' : 'размеры комнат'
-  return { cmPerPx: robustMedian(all), source, samples: all.length }
+  const labels = [
+    ...ai.dimensions.filter((d) => pxLen(d, px) >= 12).map((d) => `${d.cm} см`),
+    ...ai.rooms.filter((r) => r.box && (r.widthCm || r.depthCm || r.areaM2)).map((r) => (r.widthCm || r.depthCm ? `${r.name} ${r.widthCm ?? '?'}×${r.depthCm ?? '?'}` : `${r.name} ${r.areaM2} м²`)),
+  ]
+  return { cmPerPx: robustMedian(all), source, samples: all.length, labels }
 }
 
 /**
@@ -292,7 +305,7 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
       bySegments = true
       segmented = { regions: regions.length, matched: seg.matched, unmatched: seg.unmatched }
       if (!o.keepScale && seg.cmPerPx) {
-        fit = { cmPerPx: seg.cmPerPx, source: 'площади комнат', samples: seg.matched }
+        fit = { cmPerPx: seg.cmPerPx, source: 'площади комнат', samples: seg.matched, labels: seg.rooms.filter((r) => r.areaM2).map((r) => `${r.name} ${r.areaM2} м²`) }
         u = { ...underlay, scale: fit.cmPerPx }
       }
     }
@@ -341,7 +354,12 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
   // 4. чертёж заново по числам, если модель дала комнаты прямоугольниками;
   //    побеждает вариант, где замкнулось больше комнат, при равенстве — числа
   const dimSpans = ai.dimensions.map((d) => ({ a: toPlanPt(u, { x: d.x1 * px.w, y: d.y1 * px.h }), b: toPlanPt(u, { x: d.x2 * px.w, y: d.y2 * px.h }), cm: d.cm }))
-  const rebuilt = rooms.some(canRebuildFrom) ? reconstructFromRooms(rooms, u, wallThicknesses(ai), dimSpans) : null
+  // Выбросить комнату ради сходимости площадей можно только с подтверждением
+  // картинки: области с картинки — все настоящие; рамка модели, под которой
+  // заливка не нашла замкнутой области, — под подозрением. Без картинки не
+  // выбрасывается ничего: спорное остаётся и помечается
+  const canDrop = (r: AiRoom): boolean => !bySegments && !!o.ground && !groundedNames.has(r.name)
+  const rebuilt = rooms.some(canRebuildFrom) ? reconstructFromRooms(rooms, u, wallThicknesses(ai), dimSpans, canDrop) : null
   const closedByNumbers = rebuilt ? rebuilt.rooms.filter((r) => r.haveM2 !== undefined).length : 0
   const byNumbers = !!rebuilt && closedByNumbers > 0 && closedByNumbers >= closedRooms(walls, ai, u)
   const method: ConvertMethod = byNumbers ? (bySegments ? 'по комнатам с картинки' : 'по размерам комнат') : 'по линиям стен'
@@ -375,13 +393,21 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
   const openings: Opening[] = []
   let dropped = 0
   for (const op of ai.openings) {
-    let p: Pt | null = null
+    // Два кандидата: точка на стороне комнаты (точнее, когда чертёж собран по
+    // числам) и точка с картинки. У Г-образной комнаты сторона может проходить
+    // через вырез, где стены нет, — тогда выручает точка модели. Берём того
+    // кандидата, у кого стена ближе
+    const options: Pt[] = []
     if (byNumbers && rebuilt && op.room && op.side && op.at !== undefined) {
       const room = rebuilt.rooms.find((r) => r.name === op.room)
-      if (room) p = pointOnSide(room.rect, op.side, op.at)
+      if (room) options.push(pointOnSide(room.rect, op.side, op.at))
     }
-    if (!p) p = toPlanPt(u, { x: op.x * px.w, y: op.y * px.h })
-    const hit = nearestWall(walls, p)
+    options.push(toPlanPt(u, { x: op.x * px.w, y: op.y * px.h }))
+    let hit: { wall: Wall; t: number; d: number } | null = null
+    for (const p of options) {
+      const h = nearestWall(walls, p)
+      if (h && (!hit || h.d < hit.d)) hit = h
+    }
     // проём дальше полуметра от любой стены — это ошибка распознавания
     if (!hit || hit.d > 50) {
       dropped++
@@ -418,6 +444,28 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
     }
   }
 
+  // 7. проверка по картинке и числам: полнота, стены, формы, размеры, проёмы
+  const lost = new Map<string, string>()
+  if (segmented) for (const n of segmented.unmatched) lost.set(n, 'на картинке не нашлось такой области')
+  if (byNumbers && rebuilt) {
+    for (const n of rebuilt.skipped) lost.set(n, 'не удалось поставить: без рамки или уже полуметра')
+    for (const n of rebuilt.dropped) lost.set(n, 'на картинке под рамкой нет комнаты, а без неё площади соседей сошлись')
+    for (const r of rebuilt.rooms) if (r.haveM2 === undefined) lost.set(r.name, 'контур не замкнулся')
+  }
+  const quality = assessQuality({
+    ai,
+    u,
+    walls,
+    openings,
+    metas,
+    regions: bySegments ? regions : undefined,
+    raster: o.raster,
+    dims: dimSpans,
+    areas: byNumbers && rebuilt ? rebuilt.areaFit : null,
+    lost,
+    doubtful: byNumbers && rebuilt ? rebuilt.doubtful : [],
+  })
+
   return {
     walls,
     openings,
@@ -433,8 +481,10 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
       areaFit: byNumbers && rebuilt ? rebuilt.areaFit : null,
       roomsSkipped: byNumbers && rebuilt ? [...rebuilt.skipped, ...rebuilt.rooms.filter((r) => r.haveM2 === undefined).map((r) => r.name)] : [],
       roomsDropped: byNumbers && rebuilt ? rebuilt.dropped : [],
+      roomsDoubtful: byNumbers && rebuilt ? rebuilt.doubtful : [],
       grounded,
       segmented,
+      quality,
       placement: { walls: wBox ? bboxOf(walls.flatMap((w) => [w.a, w.b])) : null, underlay: uRect, shifted },
       note: shifted ? `${ai.note ? `${ai.note} ` : ''}Чертёж лёг мимо картинки и был сдвинут на неё — координаты в ответе модели подозрительны, пришлите отчёт разработчику.` : ai.note,
     },

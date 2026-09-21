@@ -136,6 +136,7 @@ export function roomsFromRegions(regions: RoomRegion[], px: { w: number; h: numb
       box: { x1: r.x1 / px.w, y1: r.y1 / px.h, x2: r.x2 / px.w, y2: r.y2 / px.h },
       neighbors,
       outer: adj[j].outer,
+      exact: true,
     }
   })
   // имена безымянных должны совпадать с теми, что записаны в соседях

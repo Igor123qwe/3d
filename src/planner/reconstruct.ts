@@ -19,6 +19,7 @@ import type { AiBox, AiRoom, AiSide } from './aicontract'
 import type { Pt, Underlay, Wall } from './types'
 import { uid } from './types'
 import { buildRooms } from './rooms'
+import { WALL_THICKNESSES } from './ops'
 import { pointInPoly } from './geometry'
 
 export interface ReconstructOptions {
@@ -63,9 +64,18 @@ export interface ReconstructResult {
   rooms: PlacedRoom[]
   /** комнаты, что не удалось поставить: без размеров, слишком узкие */
   skipped: string[]
-  /** комнаты, выброшенные как лишние: без них площади остальных сошлись заметно лучше */
+  /** комнаты, выброшенные как лишние: без них площади остальных сошлись заметно лучше, а на картинке их нет */
   dropped: string[]
+  /** комнаты, без которых площади сошлись бы лучше, но выбросить их нельзя: картинка их подтверждает */
+  doubtful: string[]
   areaFit: AreaFit | null
+}
+
+/** ближайшая типовая толщина стены */
+export function wallThickness(cm: number): number {
+  let best = WALL_THICKNESSES[0]
+  for (const t of WALL_THICKNESSES) if (Math.abs(t - cm) < Math.abs(best - cm)) best = t
+  return best
 }
 
 /** Комната, по которой можно строить: есть прямоугольник на картинке */
@@ -146,15 +156,32 @@ function sizeRoom(r: AiRoom & { box: AiBox }, u: Underlay, all: (AiRoom & { box:
     const k = A / (w * h)
     if (wLabelled && hLabelled) {
       if (Math.abs(k - 1) > 0.06) {
-        const byW = { w, h: A / w }
-        const byH = { w: A / h, h }
-        const aspect = bw > 0 && bh > 0 ? bw / bh : 1
-        if (Math.abs(byW.w / byW.h - aspect) <= Math.abs(byH.w / byH.h - aspect)) {
-          h = byW.h
+        // Подписи не сходятся с площадью: либо одна подпись — длина стены с
+        // простенком, либо комната не прямоугольная (ниша, шахта). Рассудить может
+        // точная рамка с картинки: подпись, совпавшая с ней, — верная. Совпали обе —
+        // комната с вырезом: размеры остаются, площадь пойдёт только в проверку
+        const near = (label: number, pic: number) => pic > 0 && Math.abs(label - pic) <= 0.08 * pic
+        const wOk = !!r.exact && near(w, bw)
+        const hOk = !!r.exact && near(h, bh)
+        if (wOk && hOk) {
+          // обе подписи по картинке — оставляем как есть
+        } else if (wOk && !hOk) {
+          h = A / w
           fixedH = false
-        } else {
-          w = byH.w
+        } else if (hOk && !wOk) {
+          w = A / h
           fixedW = false
+        } else {
+          const byW = { w, h: A / w }
+          const byH = { w: A / h, h }
+          const aspect = bw > 0 && bh > 0 ? bw / bh : 1
+          if (Math.abs(byW.w / byW.h - aspect) <= Math.abs(byH.w / byH.h - aspect)) {
+            h = byW.h
+            fixedH = false
+          } else {
+            w = byH.w
+            fixedW = false
+          }
         }
       }
     } else if (wLabelled) {
@@ -181,8 +208,12 @@ function sizeRoom(r: AiRoom & { box: AiBox }, u: Underlay, all: (AiRoom & { box:
  * смотрят друг на друга через такую щель, — одна стена: сводим их к середине.
  * Грани с одной стороны (правая над правой) так не трогаем — там бывает уступ.
  */
-function closeFacingGaps(rects: Rect[], rawX: number[], rawY: number[], minGap: number): void {
+function closeFacingGaps(rects: Rect[], rawX: number[], rawY: number[], minGap: number): number[] {
   const overlap1 = (a1: number, a2: number, b1: number, b2: number) => Math.max(0, Math.min(a2, b2) - Math.max(a1, b1))
+  // толщина стены между точными рамками с картинки — сама щель между гранями:
+  // по ней стена и рисуется (шахта между санузлом и коридором бывает и в полметра)
+  const edgeGap = new Array<number>(rects.length * 2).fill(0)
+  const yields = (a: Rect, b: Rect) => !!a.spec.yieldsTo?.includes(b.spec.name) || !!b.spec.yieldsTo?.includes(a.spec.name)
   // щель от сжатия рамок растёт с размером комнаты: у двух комнат по 4 м она
   // доходит до 60–90 см, а коридор между комнатами уже 90 см — редкость.
   // Рамки могут и налезть друг на друга (шум картинки): комнаты не пересекаются,
@@ -195,11 +226,16 @@ function closeFacingGaps(rects: Rect[], rawX: number[], rawY: number[], minGap: 
       if (i === j) continue
       const a = rects[i]
       const b = rects[j]
+      // сосед заходит в угол Г-образной комнаты: их грани не смотрят друг на друга через стену
+      if (yields(a, b)) continue
+      const exact = !!a.spec.exact && !!b.spec.exact
       // a слева от b: правая грань a и левая грань b
       const gapX = rawX[j * 2] - rawX[i * 2 + 1]
       const spanY = overlap1(a.cy - a.bh / 2, a.cy + a.bh / 2, b.cy - b.bh / 2, b.cy + b.bh / 2)
       if (gapX > minOverlap(a.bw, b.bw) && gapX <= maxGap(a.bw, b.bw) && spanY > Math.min(a.bh, b.bh) * 0.3) {
         const mid = (rawX[j * 2] + rawX[i * 2 + 1]) / 2
+        // между внутренними гранями — щель плюс те t/2, что уже заложены в грани
+        if (exact && gapX > 0) edgeGap[i * 2 + 1] = edgeGap[j * 2] = gapX + minGap / 2.5
         rawX[j * 2] = mid
         rawX[i * 2 + 1] = mid
       }
@@ -208,11 +244,13 @@ function closeFacingGaps(rects: Rect[], rawX: number[], rawY: number[], minGap: 
       const spanX = overlap1(a.cx - a.bw / 2, a.cx + a.bw / 2, b.cx - b.bw / 2, b.cx + b.bw / 2)
       if (gapY > minOverlap(a.bh, b.bh) && gapY <= maxGap(a.bh, b.bh) && spanX > Math.min(a.bw, b.bw) * 0.3) {
         const mid = (rawY[j * 2] + rawY[i * 2 + 1]) / 2
+        if (exact && gapY > 0) edgeGap[i * 2 + 1] = edgeGap[j * 2] = gapY + minGap / 2.5
         rawY[j * 2] = mid
         rawY[i * 2 + 1] = mid
       }
     }
   }
+  return edgeGap
 }
 
 /**
@@ -489,33 +527,41 @@ function nearestAxis(pos: number[], v: number, tol: number): number {
 }
 
 /**
- * Построить и, если площади не сходятся, поискать лишнюю комнату. Модель со
- * зрением иногда выдумывает помещение — второй «санузел» между двумя жилыми —
- * и тогда соседям не хватает места, а их подписанные площади проседают на
- * треть. Убираем по одной комнате, перестраиваем и оставляем вариант, где
- * сходимость выросла заметно; так до двух комнат.
+ * Чертёж по комнатам с проверкой площадей. Если площади сходятся хуже 90 %,
+ * по одной пробуется убрать комнату: без выдуманной моделью комнаты соседям
+ * хватает места, и сходимость растёт заметно. Но выбросить можно только то,
+ * чего на картинке нет: canDrop говорит, подтверждает ли картинка комнату.
+ * Подтверждённая остаётся, а в doubtful видно, что с ней площади не сходятся —
+ * это место стоит уточнить, а не молча стереть.
  */
-export function reconstructFromRooms(rooms: AiRoom[], u: Underlay, options: ReconstructOptions = {}, dims: DimSpan[] = []): ReconstructResult {
+export function reconstructFromRooms(rooms: AiRoom[], u: Underlay, options: ReconstructOptions = {}, dims: DimSpan[] = [], canDrop: (room: AiRoom) => boolean = () => false): ReconstructResult {
   let current = rooms.filter(canRebuildFrom)
   let best = reconstructCore(current, u, options, dims)
   const dropped: string[] = []
+  const doubtful = new Set<string>()
   for (let attempt = 0; attempt < 2; attempt++) {
     const acc = best.areaFit?.accuracy ?? 1
     if (acc >= 0.9 || current.length < 3 || (best.areaFit?.samples ?? 0) < 2) break
-    let candidate: { res: ReconstructResult; name: string } | null = null
+    let candidate: { res: ReconstructResult; room: AiRoom } | null = null
     for (const r of current) {
       const rest = current.filter((x) => x !== r)
       const res = reconstructCore(rest, u, options, dims)
       const gain = (res.areaFit?.accuracy ?? 0) - acc
       // без этой комнаты должно стать заметно лучше, и подписанных площадей — не меньше одной
-      if (gain >= 0.1 && (res.areaFit?.samples ?? 0) >= 1 && (!candidate || (res.areaFit?.accuracy ?? 0) > (candidate.res.areaFit?.accuracy ?? 0))) candidate = { res, name: r.name }
+      if (!(gain >= 0.1 && (res.areaFit?.samples ?? 0) >= 1)) continue
+      if (!candidate || (res.areaFit?.accuracy ?? 0) > (candidate.res.areaFit?.accuracy ?? 0)) candidate = { res, room: r }
     }
     if (!candidate) break
-    dropped.push(candidate.name)
-    current = current.filter((x) => x.name !== candidate!.name)
+    // лучший кандидат на выброс, но картинка его подтверждает: оставляем и помечаем
+    if (!canDrop(candidate.room)) {
+      doubtful.add(candidate.room.name)
+      break
+    }
+    dropped.push(candidate.room.name)
+    current = current.filter((x) => x !== candidate!.room)
     best = candidate.res
   }
-  return { ...best, dropped }
+  return { ...best, dropped, doubtful: [...doubtful] }
 }
 
 function reconstructCore(rooms: AiRoom[], u: Underlay, options: ReconstructOptions = {}, dims: DimSpan[] = []): ReconstructResult {
@@ -529,15 +575,34 @@ function reconstructCore(rooms: AiRoom[], u: Underlay, options: ReconstructOptio
     if (!ok) skipped.push(r.spec.name)
     return ok
   }) as Rect[]
-  if (!rects.length) return { walls: [], rooms: [], skipped, dropped: [], areaFit: null }
+  if (!rects.length) return { walls: [], rooms: [], skipped, dropped: [], doubtful: [], areaFit: null }
 
   // 1. грани → оси по картинке. Положение граней берётся с рамок картинки у всех
   //    комнат одинаково (подписанные не «вырастают» относительно неподписанных —
   //    иначе их общие стены не сведутся); подписанные размеры входят уравнениями
   const t = o.interiorCm
-  const rawX = rects.flatMap((r) => [r.cx - r.bw / 2 - t / 2, r.cx + r.bw / 2 + t / 2])
-  const rawY = rects.flatMap((r) => [r.cy - r.bh / 2 - t / 2, r.cy + r.bh / 2 + t / 2])
-  closeFacingGaps(rects, rawX, rawY, o.snapCm * 2.5)
+  // Точная рамка с картинки, которая на 15 % и больше расходится с подписью, —
+  // это обрезанное фото или закрытый чем-то край: положение граней тогда берётся
+  // по подписи, от той стороны, где сосед или стена подтверждены
+  const span = (r: Rect, axis: 'x' | 'y'): [number, number] => {
+    const c = axis === 'x' ? r.cx : r.cy
+    const b = axis === 'x' ? r.bw : r.bh
+    const v = axis === 'x' ? r.w : r.h
+    const labelled = axis === 'x' ? r.wLabelled : r.hLabelled
+    if (!r.spec.exact || !labelled || Math.abs(v - b) <= 0.15 * b) return [c - b / 2 - t / 2, c + b / 2 + t / 2]
+    const lo = axis === 'x' ? 'left' : 'top'
+    const hi = axis === 'x' ? 'right' : 'bottom'
+    const outer = (side: AiSide) => !!r.spec.outer?.includes(side)
+    const nb = (side: AiSide) => !!r.spec.neighbors?.[side]?.length
+    const anchorLo = (outer(hi) && !outer(lo)) || (nb(lo) && !nb(hi))
+    const anchorHi = (outer(lo) && !outer(hi)) || (nb(hi) && !nb(lo))
+    if (anchorLo && !anchorHi) return [c - b / 2 - t / 2, c - b / 2 + v + t / 2]
+    if (anchorHi && !anchorLo) return [c + b / 2 - v - t / 2, c + b / 2 + t / 2]
+    return [c - v / 2 - t / 2, c + v / 2 + t / 2]
+  }
+  const rawX = rects.flatMap((r) => span(r, 'x'))
+  const rawY = rects.flatMap((r) => span(r, 'y'))
+  const edgeGap = closeFacingGaps(rects, rawX, rawY, o.snapCm * 2.5)
   linkDeclaredNeighbors(rects, rawX, rawY)
   const cx = cluster(rawX, o.snapCm)
   const cy = cluster(rawY, o.snapCm)
@@ -570,9 +635,17 @@ function reconstructCore(rooms: AiRoom[], u: Underlay, options: ReconstructOptio
   }
 
   // 3. оси под размеры. Подпись весит как пять оценок с картинки
+  // половина толщины стены за каждой гранью: наружной, измеренной по картинке или типовой
+  const half = (r: Rect, side: AiSide): number => {
+    if (sideIsExterior(r, side)) return t / 2 + extra
+    const k = rects.indexOf(r)
+    const idx = side === 'left' ? k * 2 : side === 'right' ? k * 2 + 1 : side === 'top' ? k * 2 : k * 2 + 1
+    const gap = edgeGap[idx]
+    return gap > t ? wallThickness(gap) / 2 : t / 2
+  }
   const specOf = (r: Rect): AxisSpec => ({
-    dw: r.w + t + (sideIsExterior(r, 'left') ? extra : 0) + (sideIsExterior(r, 'right') ? extra : 0),
-    dh: r.h + t + (sideIsExterior(r, 'top') ? extra : 0) + (sideIsExterior(r, 'bottom') ? extra : 0),
+    dw: r.w + half(r, 'left') + half(r, 'right'),
+    dh: r.h + half(r, 'top') + half(r, 'bottom'),
     ww: r.wLabelled ? 1 : 0.02,
     wh: r.hLabelled ? 1 : 0.02,
     wExact: r.wLabelled,
@@ -650,7 +723,7 @@ function reconstructCore(rooms: AiRoom[], u: Underlay, options: ReconstructOptio
     if (!ok) skipped.push(r.spec.name)
     return ok
   })
-  if (!placed.length) return { walls: [], rooms: [], skipped, dropped: [], areaFit: null }
+  if (!placed.length) return { walls: [], rooms: [], skipped, dropped: [], doubtful: [], areaFit: null }
 
   // 4. стены: по каждой оси — отрезки между соседними поперечными осями,
   //    толщина по тому, сколько комнат прилегает. Грань Г-образной комнаты
@@ -683,11 +756,14 @@ function reconstructCore(rooms: AiRoom[], u: Underlay, options: ReconstructOptio
       const s1 = marks[m + 1]
       const mid: Pt = vertical ? { x: at, y: (s0 + s1) / 2 } : { x: (s0 + s1) / 2, y: at }
       const covers = (r: Rect) => (vertical ? Y[r.yi] <= s0 + 0.5 && Y[r.yj] >= s1 - 0.5 : X[r.xi] <= s0 + 0.5 && X[r.xj] >= s1 - 0.5) && !inNotch(r, mid)
-      const before = near.some((r) => (vertical ? r.xj === k : r.yj === k) && covers(r))
-      const after = near.some((r) => (vertical ? r.xi === k : r.yi === k) && covers(r))
+      const edge = near.filter((r) => covers(r))
+      const before = edge.some((r) => (vertical ? r.xj === k : r.yj === k))
+      const after = edge.some((r) => (vertical ? r.xi === k : r.yi === k))
       // стена соседа по краю отданного ему угла — перегородка между двумя комнатами, не наружная
       const inner = (before || after) && !(before && after) && placed.some((s) => !near.includes(s) && insideRoom(s, mid) && near.some((n) => s.spec.yieldsTo?.includes(n.spec.name)))
-      const th = (before && after) || inner ? o.interiorCm : before || after ? o.exteriorCm : 0
+      // перегородка между точными рамками — толщиной в измеренную щель
+      const measured = Math.max(0, ...edge.map((r) => edgeGap[(vertical ? (r.xj === k ? 1 : 0) : r.yj === k ? 1 : 0) + rects.indexOf(r) * 2]))
+      const th = before && after ? (measured > o.interiorCm ? wallThickness(measured) : o.interiorCm) : inner ? o.interiorCm : before || after ? o.exteriorCm : 0
       if (!th) {
         flush()
         continue
@@ -725,7 +801,7 @@ function reconstructCore(rooms: AiRoom[], u: Underlay, options: ReconstructOptio
       .map(({ name, wantM2, haveM2 }) => ({ name, wantM2, haveM2 }))
     areaFit = { accuracy: Math.max(0, 1 - errs.reduce((a, b) => a + b, 0) / errs.length), off, samples: checked.length }
   }
-  return { walls, rooms: out, skipped, dropped: [], areaFit }
+  return { walls, rooms: out, skipped, dropped: [], doubtful: [], areaFit }
 }
 
 /** Точка на стене комнаты: side — какая стена, at — доля вдоль неё */

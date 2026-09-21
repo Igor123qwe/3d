@@ -283,7 +283,13 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     setSaveState('saving')
     const t = setTimeout(() => {
       try {
-        localStorage.setItem(LS_PLAN, JSON.stringify(plan))
+        try {
+          localStorage.setItem(LS_PLAN, JSON.stringify(plan))
+        } catch (e) {
+          // исходное фото рядом с очищенным удваивает размер: без него план ещё может поместиться
+          if (!plan.underlay?.original) throw e
+          localStorage.setItem(LS_PLAN, JSON.stringify({ ...plan, underlay: { ...plan.underlay, original: undefined } }))
+        }
         saveFailed.current = false
         setSaveState('saved')
       } catch {
@@ -771,13 +777,14 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   }, [plan.underlay, magnet, layers.underlay, imageLinesPx])
 
   /** Заменить картинку подложки, сохранив масштаб и центр */
-  const replaceUnderlayImage = (img: LoadedImage) => {
+  /** заменить картинку подложки, сохранив её центр; original — исходное фото в тех же пикселях (для чтения подписей моделью) */
+  const replaceUnderlayImage = (img: LoadedImage, original?: string) => {
     history.apply((p) => {
       const u = p.underlay
       if (!u) return p
       const cx = u.x + (u.px.w * u.scale) / 2
       const cy = u.y + (u.px.h * u.scale) / 2
-      return { ...p, underlay: { ...u, src: img.src, px: { w: img.w, h: img.h }, x: cx - (img.w * u.scale) / 2, y: cy - (img.h * u.scale) / 2 } }
+      return { ...p, underlay: { ...u, src: img.src, original, px: { w: img.w, h: img.h }, x: cx - (img.w * u.scale) / 2, y: cy - (img.h * u.scale) / 2 } }
     })
   }
 
@@ -855,7 +862,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         return
       }
       const img = await rotateImage(u.src, -angle)
-      replaceUnderlayImage(img)
+      const original = u.original ? (await rotateImage(u.original, -angle)).src : undefined
+      replaceUnderlayImage(img, original)
       setToast(`Повернул на ${(-angle).toFixed(1)}°: линии стен легли по осям`)
     } catch (err) {
       setToast((err as Error).message)
@@ -871,8 +879,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     setTracing(true)
     try {
       const r = await ensureRaster(u)
-      replaceUnderlayImage(grayToImage(r.clean.gray, u.px.w, u.px.h))
-      setToast('Фото очищено: фон выровнен, цифры и засечки убраны. Ctrl+Z вернёт оригинал')
+      // очищенное — для поиска стен; исходное остаётся рядом: по нему модель читает цифры
+      replaceUnderlayImage(grayToImage(r.clean.gray, u.px.w, u.px.h), u.original ?? u.src)
+      setToast('Фото очищено: фон выровнен, цифры и засечки убраны. Модель читает подписи по исходному. Ctrl+Z вернёт оригинал')
     } catch (err) {
       setToast((err as Error).message)
     } finally {
@@ -886,8 +895,10 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     if (!u) return
     setTracing(true)
     try {
-      const img = await warpToRect(u.src, pts.map((p) => toPixel(u, p)))
-      replaceUnderlayImage(img)
+      const corners = pts.map((p) => toPixel(u, p))
+      const img = await warpToRect(u.src, corners)
+      const original = u.original ? (await warpToRect(u.original, corners)).src : undefined
+      replaceUnderlayImage(img, original)
       // пиксели теперь другие — прежний масштаб больше не факт
       setCalibrated(false)
       setScaleKnown(false)
@@ -1020,27 +1031,34 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         : undefined
       // комнаты с картинки: геометрия с растра, от модели — подписи
       const regions = raster ? await regionsOf(u).catch(() => []) : []
-      const convert = (p: AiPlan) => convertAiPlan(p, u, { keepScale: calibrated, ground, regions })
-      let { plan: read, ai: cost } = await recognizePlan(u.src)
+      const rasterInfo = raster ? { d2: raster.d2!, w: u.px.w, h: u.px.h } : null
+      const convert = (p: AiPlan) => convertAiPlan(p, u, { keepScale: calibrated, ground, regions, raster: rasterInfo })
+      // подписи модель читает по исходному фото: очистка стирает цифры вместе с засечками
+      const photo = u.original ?? u.src
+      let { plan: read, ai: cost } = await recognizePlan(photo)
       // масштаб не трогаем, если пользователь уже откалибровал подложку руками
       let result = convert(read)
       let attempts = 1
-      // Площади разошлись — модель, скорее всего, прочитала план неверно: выдумала
-      // комнату или пропустила подписи. Вторая попытка идёт к модели посильнее,
-      // с подсказкой, что именно не сошлось; остаётся лучший из двух ответов
-      const weak = (res: ReturnType<typeof convertAiPlan>) => res.report.areaFit !== null && res.report.areaFit.accuracy < 0.85
+      // Комнаты потерялись, стены легли мимо линий или площади разошлись — модель,
+      // скорее всего, прочитала план неверно. Вторая попытка идёт к модели
+      // посильнее, с подсказкой, что именно не сошлось; остаётся лучший из двух:
+      // сначала по полноте, потом по стенам на линиях, потом по площадям
+      const weak = (res: ReturnType<typeof convertAiPlan>) => res.report.quality.verdict === 'weak'
+      const score = (res: ReturnType<typeof convertAiPlan>) => {
+        const q = res.report.quality
+        return q.completeness.found * 100 + (q.walls?.onInk ?? 0) * 10 + (q.areas?.accuracy ?? 0)
+      }
       if (result.walls.length && weak(result)) {
-        setAiBusy('Площади не сошлись — перепроверяю моделью посильнее…')
-        const off = result.report.areaFit!.off.map((o) => `${o.name}: на плане ${o.wantM2} м², вышло ${o.haveM2.toFixed(1)}`).join('; ')
+        setAiBusy('Не всё сошлось — перепроверяю моделью посильнее…')
         const hint =
-          `Первая попытка разошлась с планом (${off}). Перепроверь: у каждой комнаты на плане подписаны номер и площадь — ` +
+          `Первая попытка разошлась с планом (${result.report.quality.issues.join('; ')}). Перепроверь: у каждой комнаты на плане подписаны номер и площадь — ` +
           'верни ровно те комнаты, что подписаны, не выдумывай лишних; размеры width_cm и depth_cm бери только с подписей у стен этой комнаты; box — по внутренним граням стен.'
         try {
-          const second = await recognizePlan(u.src, hint, undefined, 1)
+          const second = await recognizePlan(photo, hint, undefined, 1)
           const again = convert(second.plan)
           attempts = 2
           noteCost('план', second.ai)
-          if (again.walls.length && (again.report.areaFit?.accuracy ?? 0) > (result.report.areaFit?.accuracy ?? 0)) {
+          if (again.walls.length && score(again) > score(result)) {
             read = second.plan
             cost = second.ai
             result = again
@@ -1054,24 +1072,44 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         return
       }
       const r = result.report
-      const lines = [`Стен ${r.walls}, проёмов ${r.openings}, комнат ${r.rooms}. Масштаб — ${r.scale.source} (${r.scale.cmPerPx.toFixed(2)} см в пикселе).`]
-      if (r.method !== 'по линиям стен') {
-        lines.push(
-          r.areaFit
-            ? `Чертёж построен заново по размерам с плана: площади комнат сходятся на ${Math.round(r.areaFit.accuracy * 100)} %.`
-            : 'Чертёж построен заново по прямоугольникам комнат; площадей на плане нет, сверить не с чем.',
-        )
-        for (const off of r.areaFit?.off.slice(0, 4) ?? []) lines.push(`• ${off.name}: на плане ${fmtNum(off.wantM2)} м², получилось ${fmtNum(off.haveM2)} м²`)
-        if (r.segmented) lines.push(`Комнаты взяты с картинки: найдено ${r.segmented.regions}, подписей модели легло ${r.segmented.matched} из ${read.rooms.length}${r.segmented.unmatched.length ? ` (без места: ${r.segmented.unmatched.join(', ')})` : ''}.`)
-        else if (r.grounded) lines.push(`Рамки ${r.grounded} из ${read.rooms.length} комнат привязаны к стенам на картинке.`)
-        if (r.roomsDropped.length) lines.push(`Выброшено как выдуманное моделью: ${r.roomsDropped.join(', ')} — без этого площади соседей сошлись.`)
-        if (r.roomsSkipped.length) lines.push(`Не удалось поставить: ${r.roomsSkipped.join(', ')}.`)
-        if (attempts > 1) lines.push(`Попыток две: первая разошлась, вторая — модель ${cost.model}.`)
-      } else {
-        lines.push('Чертёж собран по линиям стен с картинки: размеров комнат модель не прочитала, поэтому точность ниже — проверьте масштаб.')
+      const q = r.quality
+      const lines: string[] = []
+      lines.push(
+        r.method === 'по комнатам с картинки'
+          ? `Комнаты взяты с картинки (найдено ${r.segmented?.regions ?? 0}), подписи от модели легли ${r.segmented?.matched ?? 0} из ${read.rooms.length}. Стен ${r.walls}, комнат ${r.rooms}.`
+          : r.method === 'по размерам комнат'
+            ? `Чертёж построен заново по размерам с плана${r.grounded ? `, рамки ${r.grounded} из ${read.rooms.length} комнат привязаны к стенам на картинке` : ''}. Стен ${r.walls}, комнат ${r.rooms}.`
+            : `Чертёж собран по линиям стен с картинки: размеров комнат модель не прочитала, точность ниже. Стен ${r.walls}, комнат ${r.rooms}.`,
+      )
+      // масштаб: по чему посчитан и как подтвердить
+      const scaleBy = r.scale.labels?.length ? ` по подписям ${r.scale.labels.slice(0, 5).join(', ')}${r.scale.labels.length > 5 ? '…' : ''} (медиана)` : ''
+      lines.push(
+        r.scale.source === 'прежняя калибровка'
+          ? `Масштаб оставлен ваш: ${r.scale.cmPerPx.toFixed(2)} см в пикселе.`
+          : `Масштаб ${r.scale.cmPerPx.toFixed(2)} см в пикселе — ${r.scale.source}${scaleBy}. Подтвердите одним известным размером: «Задать по отрезку» или площадь в свойствах комнаты.`,
+      )
+      // проверка по разделам: полнота, стены, формы, размеры, проёмы, площади
+      lines.push(
+        q.completeness.missing.length
+          ? `Полнота: на чертеже ${q.completeness.found} из ${q.completeness.expected} помещений. Нет: ${q.completeness.missing.map((m) => `${m.name} — ${m.why}`).join('; ')}.`
+          : `Полнота: все ${q.completeness.expected} помещений на чертеже.`,
+      )
+      if (q.walls) lines.push(`Стены на линиях картинки: ${Math.round(q.walls.onInk * 100)} % длины${q.walls.off.length ? `; мимо линий ${q.walls.off.length} (до ${Math.max(...q.walls.off.map((o) => (Number.isFinite(o.devCm) ? o.devCm : 0)))} см)` : ''}.`)
+      if (q.shapes?.length) {
+        const bad = q.shapes.filter((x) => x.iou < 0.8)
+        lines.push(bad.length ? `Формы комнат: расходятся с картинкой у ${bad.map((x) => `${x.name} (${Math.round(x.iou * 100)} %)`).join(', ')} — выступ потерян или лишний угол.` : 'Формы комнат совпадают с картинкой, выступы на месте.')
       }
+      const measured = q.dims.filter((d) => d.gotCm !== null)
+      if (measured.length) lines.push(`Размеры: ${measured.slice(0, 6).map((d) => `${d.cm} → ${Math.round(d.gotCm!)} (${d.gotCm! - d.cm >= 0 ? '+' : ''}${Math.round(d.gotCm! - d.cm)} см)`).join(', ')}${measured.length > 6 ? '…' : ''}.`)
+      if (q.openings.expected) lines.push(`Проёмы: ${q.openings.placed} из ${q.openings.expected} встали на стены.`)
+      if (q.areas) {
+        lines.push(`Площади: сходятся на ${Math.round(q.areas.accuracy * 100)} %${q.areas.off.length ? ` — ${q.areas.off.slice(0, 4).map((off) => `${off.name}: на плане ${fmtNum(off.wantM2)}, получилось ${fmtNum(off.haveM2)} м²`).join('; ')}` : ''}.`)
+      }
+      if (r.roomsDropped.length) lines.push(`Выброшено: ${r.roomsDropped.join(', ')} — на картинке под рамкой нет комнаты, а без неё площади соседей сошлись.`)
+      if (r.roomsDoubtful.length) lines.push(`Сомнительно: ${r.roomsDoubtful.join(', ')} — без этого площади соседей сошлись бы лучше, но на картинке комната есть, поэтому оставлена. Уточните это место.`)
+      if (attempts > 1) lines.push(`Попыток две: первая разошлась, вторая — модель ${cost.model}.`)
       if (r.note) lines.push(`Модель: ${r.note}`)
-      lines.push('Мебель внутри новых комнат останется на месте.')
+      lines.push(q.verdict === 'ok' ? 'Проверьте чертёж поверх фото и подтвердите масштаб.' : 'Результат требует проверки: смотрите разделы выше и уточните спорные места.')
       // сырой ответ модели и отчёт — в консоль и по кнопке в буфер: без них не разобрать, что пошло не так
       const debugReport = { model: cost.model, tried: cost.tried, answer: read, report: r }
       console.info('[ИИ] распознавание плана', debugReport)
