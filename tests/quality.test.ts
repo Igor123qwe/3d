@@ -103,6 +103,23 @@ describe('общая оценка', () => {
     expect(q.issues.some((i) => i.startsWith('проёмов встало 0 из 1'))).toBe(true)
   })
 
+  it('щель между разошедшимися осями видна как замечание, а не как комната', () => {
+    // между стенами на y=150 и y=170 замкнулась полоска 200 × 20 см: это не помещение
+    const gap = [
+      wall(100, 60, 300, 60),
+      wall(100, 150, 300, 150),
+      wall(100, 170, 300, 170),
+      wall(100, 240, 300, 240),
+      wall(100, 60, 100, 240),
+      wall(300, 60, 300, 240),
+    ]
+    const q = assessQuality({ ai, u, walls: gap, openings: [], metas, raster: null, dims: [], areas: null, lost: new Map(), doubtful: [] })
+    expect(q.slivers.length).toBeGreaterThan(0)
+    expect(q.slivers[0].areaM2).toBeLessThan(1)
+    expect(q.verdict).toBe('check')
+    expect(q.issues.some((i) => i.startsWith('щели между стенами'))).toBe(true)
+  })
+
   it('сомнительная комната попадает в замечания', () => {
     const q = assessQuality({ ai, u, walls, openings: [], metas, raster: null, dims: [], areas: { accuracy: 0.9, off: [], samples: 2 }, lost: new Map(), doubtful: ['Санузел'] })
     expect(q.verdict).toBe('check')

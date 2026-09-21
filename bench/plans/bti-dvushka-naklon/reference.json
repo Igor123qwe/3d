@@ -1,0 +1,277 @@
+{
+  "title": "Тот же план, снятый под углом 3,5° с тенью от руки",
+  "note": "Проверка подготовки фото: без «Выровнять» линии стен идут по диагонали и сегментация ломается. prepare нажимает те же кнопки, что и пользователь.",
+  "prepare": [
+    "Выровнять",
+    "Очистить"
+  ],
+  "labels": {
+    "rooms": [
+      {
+        "name": "5ж",
+        "kind": "жилая",
+        "area_m2": 13.9,
+        "width_cm": 372,
+        "depth_cm": 408,
+        "box": {
+          "x1": 0.1,
+          "y1": 0.15,
+          "x2": 0.4,
+          "y2": 0.45
+        },
+        "x": 0.26,
+        "y": 0.3,
+        "neighbors": {
+          "right": [
+            "6",
+            "коридор"
+          ],
+          "bottom": [
+            "4ж"
+          ]
+        },
+        "outer": [
+          "left",
+          "top"
+        ]
+      },
+      {
+        "name": "6",
+        "kind": "санузел",
+        "area_m2": 4.6,
+        "width_cm": 180,
+        "depth_cm": 258,
+        "box": {
+          "x1": 0.5,
+          "y1": 0.12,
+          "x2": 0.65,
+          "y2": 0.32
+        },
+        "x": 0.58,
+        "y": 0.22,
+        "neighbors": {
+          "left": [
+            "5ж"
+          ],
+          "right": [
+            "1"
+          ],
+          "bottom": [
+            "коридор"
+          ]
+        },
+        "outer": [
+          "top"
+        ]
+      },
+      {
+        "name": "1",
+        "kind": "кухня",
+        "area_m2": 11.4,
+        "width_cm": 234,
+        "box": {
+          "x1": 0.72,
+          "y1": 0.12,
+          "x2": 0.86,
+          "y2": 0.36
+        },
+        "x": 0.79,
+        "y": 0.24,
+        "neighbors": {
+          "left": [
+            "6",
+            "коридор"
+          ],
+          "bottom": [
+            "2"
+          ]
+        },
+        "outer": [
+          "top",
+          "right"
+        ]
+      },
+      {
+        "name": "коридор",
+        "kind": "коридор",
+        "box": {
+          "x1": 0.42,
+          "y1": 0.4,
+          "x2": 0.84,
+          "y2": 0.48
+        },
+        "x": 0.63,
+        "y": 0.44,
+        "neighbors": {
+          "left": [
+            "5ж"
+          ],
+          "top": [
+            "6",
+            "1"
+          ],
+          "bottom": [
+            "4ж",
+            "2"
+          ]
+        },
+        "outer": []
+      },
+      {
+        "name": "4ж",
+        "kind": "жилая",
+        "area_m2": 17.1,
+        "width_cm": 401,
+        "depth_cm": 426,
+        "box": {
+          "x1": 0.1,
+          "y1": 0.55,
+          "x2": 0.45,
+          "y2": 0.88
+        },
+        "x": 0.28,
+        "y": 0.71,
+        "neighbors": {
+          "top": [
+            "5ж",
+            "коридор"
+          ],
+          "right": [
+            "2"
+          ]
+        },
+        "outer": [
+          "left",
+          "bottom"
+        ]
+      },
+      {
+        "name": "2",
+        "kind": "жилая",
+        "area_m2": 13.0,
+        "width_cm": 330,
+        "depth_cm": 426,
+        "box": {
+          "x1": 0.55,
+          "y1": 0.55,
+          "x2": 0.82,
+          "y2": 0.88
+        },
+        "x": 0.68,
+        "y": 0.71,
+        "neighbors": {
+          "top": [
+            "коридор",
+            "1"
+          ],
+          "left": [
+            "4ж"
+          ]
+        },
+        "outer": [
+          "right",
+          "bottom"
+        ]
+      }
+    ],
+    "openings": [
+      {
+        "kind": "door",
+        "room": "5ж",
+        "side": "right",
+        "at": 0.85,
+        "x": 0.46,
+        "y": 0.42,
+        "width_cm": 80
+      },
+      {
+        "kind": "door",
+        "room": "4ж",
+        "side": "top",
+        "at": 0.5,
+        "x": 0.28,
+        "y": 0.5,
+        "width_cm": 80
+      },
+      {
+        "kind": "window",
+        "room": "5ж",
+        "side": "left",
+        "at": 0.5,
+        "x": 0.06,
+        "y": 0.3,
+        "width_cm": 150
+      },
+      {
+        "kind": "window",
+        "room": "4ж",
+        "side": "left",
+        "at": 0.5,
+        "x": 0.06,
+        "y": 0.7,
+        "width_cm": 150
+      }
+    ],
+    "dimensions": [],
+    "walls": []
+  },
+  "expect": {
+    "regions": 6,
+    "scaleCmPerPx": {
+      "min": 1.15,
+      "max": 1.5
+    },
+    "wallsOnInk": 0.7,
+    "openings": 4,
+    "shapeIou": {
+      "min": 0.75,
+      "skip": [
+        "1"
+      ]
+    },
+    "rooms": [
+      {
+        "name": "5ж",
+        "areaM2": 13.9,
+        "areaTolM2": 2,
+        "widthCm": 372,
+        "depthCm": 408,
+        "sizeTolCm": 30,
+        "shape": "notched"
+      },
+      {
+        "name": "6",
+        "areaM2": 4.6,
+        "areaTolM2": 1,
+        "widthCm": 180,
+        "depthCm": 258,
+        "sizeTolCm": 30,
+        "shape": "rect"
+      },
+      {
+        "name": "1",
+        "areaM2": 11.4,
+        "areaTolM2": 2.5
+      },
+      {
+        "name": "коридор"
+      },
+      {
+        "name": "4ж",
+        "areaM2": 17.1,
+        "areaTolM2": 2,
+        "widthCm": 401,
+        "sizeTolCm": 30,
+        "shape": "rect"
+      },
+      {
+        "name": "2",
+        "areaM2": 13.0,
+        "areaTolM2": 2,
+        "widthCm": 330,
+        "sizeTolCm": 35,
+        "shape": "rect"
+      }
+    ]
+  }
+}

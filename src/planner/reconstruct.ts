@@ -213,7 +213,8 @@ function closeFacingGaps(rects: Rect[], rawX: number[], rawY: number[], minGap: 
   // толщина стены между точными рамками с картинки — сама щель между гранями:
   // по ней стена и рисуется (шахта между санузлом и коридором бывает и в полметра)
   const edgeGap = new Array<number>(rects.length * 2).fill(0)
-  const yields = (a: Rect, b: Rect) => !!a.spec.yieldsTo?.includes(b.spec.name) || !!b.spec.yieldsTo?.includes(a.spec.name)
+  // кто кому уступает угол: вернёт уступающую комнату из пары или null
+  const yielder = (a: Rect, b: Rect): Rect | null => (a.spec.yieldsTo?.includes(b.spec.name) ? a : b.spec.yieldsTo?.includes(a.spec.name) ? b : null)
   // щель от сжатия рамок растёт с размером комнаты: у двух комнат по 4 м она
   // доходит до 60–90 см, а коридор между комнатами уже 90 см — редкость.
   // Рамки могут и налезть друг на друга (шум картинки): комнаты не пересекаются,
@@ -226,13 +227,21 @@ function closeFacingGaps(rects: Rect[], rawX: number[], rawY: number[], minGap: 
       if (i === j) continue
       const a = rects[i]
       const b = rects[j]
-      // сосед заходит в угол Г-образной комнаты: их грани не смотрят друг на друга через стену
-      if (yields(a, b)) continue
       const exact = !!a.spec.exact && !!b.spec.exact
+      // Сосед, заходящий в угол Г-образной комнаты, касается её грани лишь
+      // частью: такие грани не сводим — иначе вырез схлопнется. Но если грани
+      // перекрываются почти целиком, это общая стена во всю сторону, и свести
+      // её нужно, иначе между комнатами останется щель шириной в стену
+      // Сосед заходит в угол Г-образной комнаты, если касается её стороны лишь
+      // частью. Доля считается от стороны той комнаты, что уступает угол: узкий
+      // коридор перекрывает свою сторону целиком, а сторону комнаты — на четверть
+      const gives = yielder(a, b)
       // a слева от b: правая грань a и левая грань b
       const gapX = rawX[j * 2] - rawX[i * 2 + 1]
       const spanY = overlap1(a.cy - a.bh / 2, a.cy + a.bh / 2, b.cy - b.bh / 2, b.cy + b.bh / 2)
-      if (gapX > minOverlap(a.bw, b.bw) && gapX <= maxGap(a.bw, b.bw) && spanY > Math.min(a.bh, b.bh) * 0.3) {
+      if (gives && spanY <= gives.bh * 0.7) {
+        // грань уходит в вырез — пропускаем только её
+      } else if (gapX > minOverlap(a.bw, b.bw) && gapX <= maxGap(a.bw, b.bw) && spanY > Math.min(a.bh, b.bh) * 0.3) {
         const mid = (rawX[j * 2] + rawX[i * 2 + 1]) / 2
         // между внутренними гранями — щель плюс те t/2, что уже заложены в грани
         if (exact && gapX > 0) edgeGap[i * 2 + 1] = edgeGap[j * 2] = gapX + minGap / 2.5
@@ -242,7 +251,9 @@ function closeFacingGaps(rects: Rect[], rawX: number[], rawY: number[], minGap: 
       // a над b: нижняя грань a и верхняя грань b
       const gapY = rawY[j * 2] - rawY[i * 2 + 1]
       const spanX = overlap1(a.cx - a.bw / 2, a.cx + a.bw / 2, b.cx - b.bw / 2, b.cx + b.bw / 2)
-      if (gapY > minOverlap(a.bh, b.bh) && gapY <= maxGap(a.bh, b.bh) && spanX > Math.min(a.bw, b.bw) * 0.3) {
+      if (gives && spanX <= gives.bw * 0.7) {
+        // грань уходит в вырез — пропускаем только её
+      } else if (gapY > minOverlap(a.bh, b.bh) && gapY <= maxGap(a.bh, b.bh) && spanX > Math.min(a.bw, b.bw) * 0.3) {
         const mid = (rawY[j * 2] + rawY[i * 2 + 1]) / 2
         if (exact && gapY > 0) edgeGap[i * 2 + 1] = edgeGap[j * 2] = gapY + minGap / 2.5
         rawY[j * 2] = mid
@@ -716,6 +727,28 @@ function reconstructCore(rooms: AiRoom[], u: Underlay, options: ReconstructOptio
     r.yi = cy.index[k * 2]
     r.yj = cy.index[k * 2 + 1]
   })
+
+  // Две оси, разъехавшиеся при подгонке на меньше чем толщину стены, и пустой
+  // промежуток между ними — это не помещение, а щель: на чертеже она стала бы
+  // комнатой в четверть метра. Такие оси сводим в одну
+  const closeGaps = (pos: number[], lo: (r: Rect) => number, hi: (r: Rect) => number, set: (r: Rect, i: number, j: number) => void) => {
+    const map = pos.map((_, i) => i)
+    for (let k = 0; k + 1 < pos.length; k++) {
+      const gap = pos[k + 1] - pos[k]
+      if (gap <= 0 || gap >= o.interiorCm * 1.5) continue
+      // промежуток занят комнатой — это её часть, а не щель между стенами
+      if (rects.some((r) => lo(r) <= k && hi(r) >= k + 1)) continue
+      // с обеих сторон промежутка стоят грани комнат: между ними должна быть одна стена
+      if (!rects.some((r) => hi(r) === k) || !rects.some((r) => lo(r) === k + 1)) continue
+      const mid = (pos[k] + pos[k + 1]) / 2
+      pos[k] = mid
+      pos[k + 1] = mid
+      map[k + 1] = map[k]
+    }
+    for (const r of rects) set(r, map[lo(r)], map[hi(r)])
+  }
+  closeGaps(X, (r) => r.xi, (r) => r.xj, (r, i, j) => ((r.xi = i), (r.xj = j)))
+  closeGaps(Y, (r) => r.yi, (r) => r.yj, (r, i, j) => ((r.yi = i), (r.yj = j)))
 
   // узкая комната, у которой обе грани слиплись в одну ось, на чертёж не встанет
   const placed = rects.filter((r) => {

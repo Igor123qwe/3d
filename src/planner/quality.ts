@@ -40,6 +40,8 @@ export interface QualityReport {
   areas: AreaFit | null
   /** комнаты, без которых площади сошлись бы лучше, но на картинке они есть — их не трогали */
   doubtful: string[]
+  /** щели: замкнутые клетки между стенами площадью меньше метра — не помещения, а разошедшиеся оси */
+  slivers: { name: string; areaM2: number }[]
   verdict: 'ok' | 'check' | 'weak'
   /** что именно не так — короткими фразами для диалога */
   issues: string[]
@@ -177,8 +179,17 @@ export function assessQuality(inp: QualityInput): QualityReport {
 
   // 3. формы комнат против областей картинки
   let shapes: QualityReport['shapes'] = null
+  const { rooms: built } = buildRooms({ ...emptyPlan(walls), rooms: metas })
+  // щель между разошедшимися осями замыкается в «комнату» в четверть метра:
+  // помещений такого размера не бывает, и на чертеже это лишняя клетка
+  const labelPts = ai.rooms.map((r) => ({ x: u.x + r.x * u.px.w * u.scale, y: u.y + r.y * u.px.h * u.scale }))
+  const slivers = built
+    // подпись должна лежать уверенно внутри: у щели внутренний контур в пару
+    // сантиметров, и точка комнаты по соседству в него не попадёт
+    .filter((b) => b.area < 1 && !labelPts.some((p) => pointInPoly(p, b.inner)))
+    .map((b) => ({ name: b.meta.name, areaM2: +b.area.toFixed(2) }))
+  if (slivers.length) issues.push(`щели между стенами: ${slivers.map((s) => `${s.name} ${s.areaM2} м²`).join(', ')} — оси разошлись, поправьте «Уточнить участок»`)
   if (regions && regions.length) {
-    const { rooms: built } = buildRooms({ ...emptyPlan(walls), rooms: metas })
     shapes = []
     for (const region of regions) {
       const c = { x: u.x + region.cx * u.scale, y: u.y + region.cy * u.scale }
@@ -206,5 +217,5 @@ export function assessQuality(inp: QualityInput): QualityReport {
 
   const weak = missing.length > 0 || (wallsQ !== null && wallsQ.onInk < 0.6) || (areas !== null && areas.accuracy < 0.85)
   const check = !weak && (issues.length > 0 || (shapes?.some((s) => s.iou < 0.8) ?? false))
-  return { completeness, walls: wallsQ, shapes, dims: dimsQ, openings: openingsQ, areas, doubtful, verdict: weak ? 'weak' : check ? 'check' : 'ok', issues }
+  return { completeness, walls: wallsQ, shapes, dims: dimsQ, openings: openingsQ, areas, doubtful, slivers, verdict: weak ? 'weak' : check ? 'check' : 'ok', issues }
 }

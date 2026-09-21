@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit -p .",
-    "models": "node tools/models.mjs"
+    "models": "node tools/models.mjs",
+    "bench": "node tools/bench.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -25,6 +26,7 @@
     "@types/three": "^0.186.0",
     "@vitejs/plugin-react": "^4.3.0",
     "jsdom": "^25.0.1",
+    "playwright-core": "^1.63.0",
     "typescript": "^5.5.3",
     "vite": "^5.4.0",
     "vitest": "^2.1.9"

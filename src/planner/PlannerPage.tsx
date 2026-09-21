@@ -45,6 +45,7 @@ import type { Guide } from './snapping'
 import { aiStatus, askLayout, askSpot, cropForVision, lookupProductViaServer, recognizePlan, type AiStatus } from './ai'
 import { applyAiPlan, convertAiPlan } from './planai'
 import type { AiBox, AiPlan } from './aicontract'
+import { checkAiPlan } from './aicontract'
 import { applyLayout, catalogForRoom, layoutSummary, vetLayout } from './autolayout'
 import {
   DEFAULT_AUTO,
@@ -805,6 +806,42 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       },
       segmentRooms,
       segmentRoomsAuto,
+      /**
+       * Прогон распознавания на текущей подложке с готовыми подписями — для
+       * набора проверки (tools/bench.mjs): подписи берутся из проверенного
+       * вручную эталона, а геометрию и оценку качества считает тот же код, что
+       * и кнопка «Распознать с ИИ».
+       */
+      runWithLabels: async (labels: unknown) => {
+        const u = plan.underlay
+        if (!u) return null
+        const ai = checkAiPlan(labels)
+        const raster = await ensureRaster(u)
+        if (!raster.d2) raster.d2 = distanceToInk(raster.clean.bin)
+        const regions = await regionsOf(u)
+        const ground = (box: AiBox, closeCm: number) => {
+          const closePx = Math.min(80, Math.max(3, Math.round(closeCm / u.scale)))
+          const g = groundRoomBox(raster.d2!, u.px.w, u.px.h, box, closePx)
+          return g ? { x1: g.x1, y1: g.y1, x2: g.x2, y2: g.y2 } : null
+        }
+        const result = convertAiPlan(ai, u, { ground, regions, raster: { d2: raster.d2!, w: u.px.w, h: u.px.h } })
+        const { rooms } = buildRooms({ ...plan, walls: result.walls, openings: result.openings, rooms: result.rooms, furniture: [], dims: [] })
+        return {
+          report: result.report,
+          regions: regions.length,
+          walls: result.walls.map((w) => [Math.round(w.a.x), Math.round(w.a.y), Math.round(w.b.x), Math.round(w.b.y), w.thickness]),
+          regionBoxes: regions.map((g) => [Math.round(g.x1), Math.round(g.y1), Math.round(g.x2), Math.round(g.y2), g.yieldsTo ?? null]),
+          rooms: rooms.map((r) => ({
+            name: r.meta.name,
+            areaM2: r.area,
+            corners: r.polygon.length,
+            at: { x: Math.round(r.meta.anchor.x), y: Math.round(r.meta.anchor.y) },
+            box: { x1: Math.round(Math.min(...r.inner.map((p) => p.x))), y1: Math.round(Math.min(...r.inner.map((p) => p.y))), x2: Math.round(Math.max(...r.inner.map((p) => p.x))), y2: Math.round(Math.max(...r.inner.map((p) => p.y))) },
+            widthCm: Math.max(...r.inner.map((p) => p.x)) - Math.min(...r.inner.map((p) => p.x)),
+            depthCm: Math.max(...r.inner.map((p) => p.y)) - Math.min(...r.inner.map((p) => p.y)),
+          })),
+        }
+      },
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plan.underlay])
@@ -1186,6 +1223,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       if (q.areas) {
         lines.push(`Площади: сходятся на ${Math.round(q.areas.accuracy * 100)} %${q.areas.off.length ? ` — ${q.areas.off.slice(0, 4).map((off) => `${off.name}: на плане ${fmtNum(off.wantM2)}, получилось ${fmtNum(off.haveM2)} м²`).join('; ')}` : ''}.`)
       }
+      if (q.slivers.length) lines.push(`Щели между стенами: ${q.slivers.map((x) => `${x.name} ${fmtNum(x.areaM2)} м²`).join(', ')} — оси разошлись, поправьте инструментом «Уточнить участок».`)
       if (r.roomsDropped.length) lines.push(`Выброшено: ${r.roomsDropped.join(', ')} — на картинке под рамкой нет комнаты, а без неё площади соседей сошлись.`)
       if (r.roomsDoubtful.length) lines.push(`Сомнительно: ${r.roomsDoubtful.join(', ')} — без этого площади соседей сошлись бы лучше, но на картинке комната есть, поэтому оставлена. Уточните это место.`)
       if (attempts > 1) lines.push(`Попыток две: первая разошлась, вторая — модель ${cost.model}.`)
