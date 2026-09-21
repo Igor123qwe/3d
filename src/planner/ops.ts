@@ -2,7 +2,7 @@
 import type { DimensionLine, Furniture, Opening, OpeningKind, Plan, Pt, Room, RoomMeta, Selection, Underlay, Wall } from './types'
 import { uid } from './types'
 import { CATALOG_MAP, type CatalogItem } from './catalog'
-import { add, dist, eq, lerp, mul, norm, normDeg, perp, pointInPoly, sub } from './geometry'
+import { add, dist, eq, lerp, mul, norm, normDeg, perp, pointInPoly, projectT, segIntersect, sub } from './geometry'
 
 export const OPENING_DEFAULT_WIDTH: Record<OpeningKind, number> = { door: 80, window: 150, doorway: 90 }
 export const OPENING_WIDTHS: Record<OpeningKind, number[]> = {
@@ -75,6 +75,165 @@ export function addRect(plan: Plan, a: Pt, b: Pt, thickness: number): Plan {
 }
 
 /** сдвиг узлов: все концы стен в точке from переезжают в to */
+// ---------- локальная правка участка ----------
+//
+// «Уточнить участок»: пользователь обводит место на чертеже и говорит, что там
+// на самом деле. Правка не трогает остальной чертёж: стены за пределами участка
+// остаются как есть, а те, что входят в него, обрезаются ровно по его границе.
+
+export interface Area {
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+}
+
+export const normalizeArea = (a: Pt, b: Pt): Area => ({ x1: Math.min(a.x, b.x), y1: Math.min(a.y, b.y), x2: Math.max(a.x, b.x), y2: Math.max(a.y, b.y) })
+
+const inArea = (p: Pt, r: Area): boolean => p.x >= r.x1 && p.x <= r.x2 && p.y >= r.y1 && p.y <= r.y2
+
+/** отрезок стены внутри участка: доли t вдоль стены, null — не заходит */
+function areaSpan(w: Wall, r: Area): { t0: number; t1: number } | null {
+  const dx = w.b.x - w.a.x
+  const dy = w.b.y - w.a.y
+  let t0 = 0
+  let t1 = 1
+  // отсечение отрезка прямоугольником (Лианг — Барски)
+  for (const [p, q] of [
+    [-dx, w.a.x - r.x1],
+    [dx, r.x2 - w.a.x],
+    [-dy, w.a.y - r.y1],
+    [dy, r.y2 - w.a.y],
+  ]) {
+    if (Math.abs(p) < 1e-9) {
+      if (q < 0) return null
+      continue
+    }
+    const t = q / p
+    if (p < 0) t0 = Math.max(t0, t)
+    else t1 = Math.min(t1, t)
+    if (t0 > t1) return null
+  }
+  return { t0, t1 }
+}
+
+/**
+ * Убрать стены внутри участка: то, что целиком внутри, удаляется, то, что
+ * пересекает границу, обрезается по ней, а стена насквозь делится надвое.
+ * Проёмы, оставшиеся без стены или попавшие в вырезанный кусок, убираются.
+ */
+export function clearWallsIn(plan: Plan, area: Area): Plan {
+  const walls: Wall[] = []
+  const keep = new Map<string, string[]>()
+  for (const w of plan.walls) {
+    const span = areaSpan(w, area)
+    if (!span) {
+      walls.push(w)
+      keep.set(w.id, [w.id])
+      continue
+    }
+    const parts: string[] = []
+    const piece = (t0: number, t1: number) => {
+      const a = lerp(w.a, w.b, t0)
+      const b = lerp(w.a, w.b, t1)
+      if (dist(a, b) < MIN_WALL_LENGTH) return
+      const id = uid('w')
+      walls.push({ ...w, id, a, b })
+      parts.push(id)
+    }
+    piece(0, span.t0)
+    piece(span.t1, 1)
+    keep.set(w.id, parts)
+  }
+  // проём переезжает на тот кусок, куда он попал целиком
+  const openings = plan.openings.flatMap((o) => {
+    const w0 = plan.walls.find((x) => x.id === o.wallId)
+    const parts = keep.get(o.wallId)
+    if (!w0 || !parts) return []
+    if (parts.length === 1 && parts[0] === o.wallId) return [o]
+    const c = lerp(w0.a, w0.b, o.t)
+    for (const id of parts) {
+      const w = walls.find((x) => x.id === id)!
+      const L = dist(w.a, w.b)
+      const t = projectT(c, w.a, w.b)
+      const half = o.width / 2 / L
+      if (t >= half && t <= 1 - half) return [{ ...o, wallId: id, t }]
+    }
+    return []
+  })
+  return { ...plan, walls, openings }
+}
+
+/** дотянуть конец стены до ближайшей поперечной стены, если она рядом: иначе контур не замкнётся */
+function reachWall(walls: Wall[], from: Pt, to: Pt, reach: number): Pt {
+  const dir = norm(sub(to, from))
+  let best = to
+  let bestD = reach
+  for (const w of walls) {
+    const hit = segIntersect(to, add(to, mul(dir, reach)), w.a, w.b)
+    if (!hit) continue
+    const d = dist(to, hit.p)
+    if (d <= bestD) {
+      bestD = d
+      best = hit.p
+    }
+  }
+  return best
+}
+
+/**
+ * Поставить стену по участку: вдоль его длинной стороны, посередине короткой.
+ * Так обведённая полоска превращается в стену там, где распознавание её
+ * пропустило; всё лишнее внутри участка перед этим убирается, а концы
+ * дотягиваются до соседних стен — иначе комната не замкнётся.
+ */
+export function wallInArea(plan: Plan, area: Area, thickness: number, reach = 60): Plan {
+  const w = area.x2 - area.x1
+  const h = area.y2 - area.y1
+  if (Math.max(w, h) < MIN_WALL_LENGTH) return plan
+  const cleared = clearWallsIn(plan, area)
+  const [a0, b0] =
+    w >= h
+      ? [{ x: area.x1, y: (area.y1 + area.y2) / 2 }, { x: area.x2, y: (area.y1 + area.y2) / 2 }]
+      : [{ x: (area.x1 + area.x2) / 2, y: area.y1 }, { x: (area.x1 + area.x2) / 2, y: area.y2 }]
+  const a = reachWall(cleared.walls, b0, a0, reach)
+  const b = reachWall(cleared.walls, a0, b0, reach)
+  return cleanupWalls(addWall(cleared, a, b, thickness))
+}
+
+/** стена, проходящая через участок дальше всех: её и правим */
+export function wallThrough(plan: Plan, area: Area): { wall: Wall; t0: number; t1: number } | null {
+  let best: { wall: Wall; t0: number; t1: number; L: number } | null = null
+  for (const w of plan.walls) {
+    const span = areaSpan(w, area)
+    if (!span) continue
+    const L = dist(w.a, w.b) * (span.t1 - span.t0)
+    if (!best || L > best.L) best = { wall: w, t0: span.t0, t1: span.t1, L }
+  }
+  return best ? { wall: best.wall, t0: best.t0, t1: best.t1 } : null
+}
+
+/**
+ * Проём на стене внутри участка: ширина — по длине куска стены в участке,
+ * положение — по его середине. Старые проёмы на этом месте убираются, чтобы
+ * уточнение не наложилось на прежнюю догадку.
+ */
+export function openingInArea(plan: Plan, area: Area, kind: OpeningKind, rooms: Room[]): { plan: Plan; id: string } {
+  const hit = wallThrough(plan, area)
+  if (!hit) return { plan, id: '' }
+  const L = dist(hit.wall.a, hit.wall.b)
+  const width = Math.max(MIN_OPENING_WIDTH, Math.min((hit.t1 - hit.t0) * L, L - 2))
+  const t = (hit.t0 + hit.t1) / 2
+  const cleaned: Plan = {
+    ...plan,
+    openings: plan.openings.filter((o) => {
+      if (o.wallId !== hit.wall.id) return true
+      return Math.abs(o.t - t) * L > (o.width + width) / 2
+    }),
+  }
+  return addOpening(cleaned, kind, hit.wall.id, t, width, rooms)
+}
+
 export function moveNodes(plan: Plan, moves: { from: Pt; to: Pt }[]): Plan {
   const find = (p: Pt) => moves.find((m) => eq(m.from, p, 0.75))
   return {

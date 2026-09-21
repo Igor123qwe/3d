@@ -1,5 +1,6 @@
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import type { DimensionLine, Furniture, Layers, LengthUnit, Opening, Plan, Pt, Room, Selection, Tool, Wall } from './types'
+import type { Area } from './ops'
 import type { PlanHistory } from './store'
 import type { CatalogItem } from './catalog'
 import { CATALOG_MAP } from './catalog'
@@ -17,6 +18,7 @@ import {
   deleteSelection,
   duplicateFurniture,
   moveNodes,
+  normalizeArea,
   nudgeFurniture,
   OPENING_DEFAULT_WIDTH,
   rotateFurniture,
@@ -86,12 +88,15 @@ export interface CanvasProps {
   onRoomPick?: (p: Pt) => void
   /** четыре угла наружных стен на фото */
   onCorners?: (pts: Pt[]) => void
+  /** обведён спорный участок: что там на самом деле — решает страница */
+  onRefine?: (area: Area) => void
 }
 
 type Drag =
   | { kind: 'pan'; sx: number; sy: number; view0: View; moved: boolean; clickSel: Selection }
   | { kind: 'maybe'; sx: number; sy: number; view0: View }
   | { kind: 'room'; a: Pt }
+  | { kind: 'refine'; a: Pt }
   | { kind: 'move'; id: string; offset: Pt; plan0: Plan; item0: Furniture }
   | { kind: 'rotate'; id: string; plan0: Plan }
   | { kind: 'resize'; id: string; plan0: Plan; item0: Furniture }
@@ -111,7 +116,7 @@ const isEditable = (t: EventTarget | null) => {
 }
 
 export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) => {
-  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view, onViewChange, onHint, photos, onCalibrate, imageLines, onRoomPick, onCorners } = props
+  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view, onViewChange, onHint, photos, onCalibrate, imageLines, onRoomPick, onCorners, onRefine } = props
   const svgRef = useRef<SVGSVGElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({ w: 800, h: 600 })
@@ -119,6 +124,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   const [guides, setGuides] = useState<Guide[]>([])
   const [draft, setDraft] = useState<Pt[]>([])
   const [roomDraft, setRoomDraft] = useState<{ a: Pt; b: Pt } | null>(null)
+  const [areaDraft, setAreaDraft] = useState<{ a: Pt; b: Pt } | null>(null)
   const [dimStart, setDimStart] = useState<Pt | null>(null)
   const [measure, setMeasure] = useState<{ a: Pt; b: Pt; live: boolean } | null>(null)
   const [calibA, setCalibA] = useState<Pt | null>(null)
@@ -225,6 +231,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   useEffect(() => {
     setDraft([])
     setRoomDraft(null)
+    setAreaDraft(null)
     setDimStart(null)
     setMeasure(null)
     setCalibA(null)
@@ -273,6 +280,9 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         break
       case 'roomPick':
         text = 'Кликните внутри комнаты на картинке — стены вокруг неё появятся сами. Esc — выйти'
+        break
+      case 'refine':
+        text = 'Обведите спорное место — и скажите, что там: стена, проём, дверь или окно. Остальной чертёж не изменится. Esc — выйти'
         break
       case 'corners':
         text = `Угол ${cornerPts.length + 1} из 4: кликайте по углам наружных стен на фото в любом порядке. Esc — сначала`
@@ -349,6 +359,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         }
         case 'roomPick':
         case 'corners':
+        case 'refine':
           // по картинке кликают как есть: привязки к сетке и стенам тут только мешают
           setCursor({ p: raw, kind: 'free' })
           setGuides([])
@@ -498,6 +509,12 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       setRoomDraft({ a: s.p, b: s.p })
       return
     }
+    if (tool === 'refine') {
+      // участок обводится по картинке как есть: привязки к сетке тут мешают
+      drag.current = { kind: 'refine', a: raw }
+      setAreaDraft({ a: raw, b: raw })
+      return
+    }
     drag.current = { kind: 'maybe', sx: e.clientX, sy: e.clientY, view0: viewRef.current }
   }
 
@@ -612,6 +629,9 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         setGuides(s.guides)
         return
       }
+      case 'refine':
+        setAreaDraft({ a: d.a, b: raw })
+        return
       case 'move': {
         const without: Plan = { ...d.plan0, furniture: d.plan0.furniture.filter((f) => f.id !== d.id) }
         const s = snapFurniture(d.item0, add(raw, d.offset), without, { grid: 5, tol: Math.max(tol, 10), selfId: d.id })
@@ -700,6 +720,13 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         setGuides([])
         const s = snapWallPoint(raw, plan.walls, { grid, tol, ortho: false, lines: imageLines })
         history.apply((pl) => addRect(pl, d.a, s.p, wallThickness))
+        return
+      }
+      case 'refine': {
+        setAreaDraft(null)
+        // случайный клик без протяжки участком не считается
+        if (Math.abs(raw.x - d.a.x) < 10 || Math.abs(raw.y - d.a.y) < 10) return
+        onRefine?.(normalizeArea(d.a, raw))
         return
       }
       case 'node':
@@ -888,6 +915,22 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
               )
             })()}
 
+          {/* обведённый участок для уточнения */}
+          {areaDraft && (
+            <rect
+              x={Math.min(areaDraft.a.x, areaDraft.b.x)}
+              y={Math.min(areaDraft.a.y, areaDraft.b.y)}
+              width={Math.abs(areaDraft.b.x - areaDraft.a.x)}
+              height={Math.abs(areaDraft.b.y - areaDraft.a.y)}
+              fill="#d946ef22"
+              stroke="#d946ef"
+              strokeWidth={1.5}
+              strokeDasharray="6 4"
+              pointerEvents="none"
+              {...NS}
+            />
+          )}
+
           {/* призрак мебели */}
           {tool === 'place' && placing && ghost && (
             <g transform={`translate(${ghost.x} ${ghost.y}) rotate(${ghost.rot})`} opacity={0.65} pointerEvents="none">
@@ -950,7 +993,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           )}
 
           {/* маркер курсора при рисовании */}
-          {cursor && (tool === 'roomPick' || tool === 'corners') && (
+          {cursor && (tool === 'roomPick' || tool === 'corners' || tool === 'refine') && (
             <g pointerEvents="none">
               <line x1={cursor.p.x - 10 / zoom} y1={cursor.p.y} x2={cursor.p.x + 10 / zoom} y2={cursor.p.y} stroke="#d946ef" strokeWidth={1.5} {...NS} />
               <line x1={cursor.p.x} y1={cursor.p.y - 10 / zoom} x2={cursor.p.x} y2={cursor.p.y + 10 / zoom} stroke="#d946ef" strokeWidth={1.5} {...NS} />

@@ -3,7 +3,7 @@
 // Ключа здесь нет и быть не может: браузер ходит на свой же /api, а роутер
 // зовёт сервер. Если ИИ не подключён, каждая функция честно говорит об этом,
 // и приложение продолжает работать на прежних локальных алгоритмах.
-import type { AiPlacement, AiPlan } from './aicontract'
+import type { AiPlacement, AiPlan, AiSpot } from './aicontract'
 import type { ProductInfo } from './products'
 
 export interface AiTaskInfo {
@@ -113,6 +113,40 @@ export async function recognizePlan(src: string, hint?: string, signal?: AbortSi
   const image = await shrinkForVision(src)
   return post<RecognizeResult>('plan', { image, hint, escalate }, signal)
 }
+
+// ---------- вопрос про одно место на плане ----------
+export interface SpotResult {
+  spot: AiSpot
+  ai: AiCost
+}
+
+/**
+ * Вырезать кусок картинки вокруг участка и увеличить его: модель читает мелкую
+ * деталь куда надёжнее, когда та занимает весь кадр, а не сотню пикселей.
+ */
+export async function cropForVision(src: string, box: { x1: number; y1: number; x2: number; y2: number }, padPx = 24, minSide = 512): Promise<string> {
+  const img = await loadImage(src)
+  const x1 = Math.max(0, Math.floor(box.x1 - padPx))
+  const y1 = Math.max(0, Math.floor(box.y1 - padPx))
+  const x2 = Math.min(img.width, Math.ceil(box.x2 + padPx))
+  const y2 = Math.min(img.height, Math.ceil(box.y2 + padPx))
+  const w = Math.max(1, x2 - x1)
+  const h = Math.max(1, y2 - y1)
+  const k = Math.min(4, Math.max(1, minSide / Math.max(w, h)))
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.round(w * k)
+  canvas.height = Math.round(h * k)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return src
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
+  ctx.drawImage(img, x1, y1, w, h, 0, 0, canvas.width, canvas.height)
+  return canvas.toDataURL('image/png')
+}
+
+/** Спросить модель, что на обведённом месте плана: стена, дверь, окно, проём или ничего */
+export const askSpot = (image: string, question?: string, signal?: AbortSignal): Promise<SpotResult> =>
+  post<SpotResult>('plan', { image, spot: true, hint: question }, signal)
 
 // ---------- товар по ссылке ----------
 export interface ProductResult {

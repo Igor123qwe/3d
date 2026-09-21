@@ -93,6 +93,23 @@ const inRange = (v: unknown, lo: number, hi: number): number | null => {
 
 const list = (v: unknown, cap: number): unknown[] => (Array.isArray(v) ? v.slice(0, cap) : [])
 
+/** Что модель увидела на обведённом участке плана */
+export interface AiSpot {
+  what: 'wall' | 'door' | 'window' | 'doorway' | 'none'
+  /** пояснение своими словами: показывается пользователю как есть */
+  note?: string
+}
+
+/** Проверить ответ про участок: что там — стена, проём или ничего */
+export function checkAiSpot(data: unknown): AiSpot {
+  if (!data || typeof data !== 'object') throw new Error('не объект')
+  const d = data as Record<string, unknown>
+  const what = String(d.what ?? d.kind ?? '').toLowerCase()
+  if (what !== 'wall' && what !== 'door' && what !== 'window' && what !== 'doorway' && what !== 'none') throw new Error('what: ожидается wall, door, window, doorway или none')
+  const note = typeof d.note === 'string' ? d.note.slice(0, 300) : undefined
+  return note ? { what, note } : { what }
+}
+
 /** Проверить ответ на распознавание плана */
 export function checkAiPlan(data: unknown): AiPlan {
   if (!data || typeof data !== 'object') throw new Error('не объект')

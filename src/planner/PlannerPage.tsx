@@ -9,8 +9,10 @@ import { Scene, planBounds } from './Scene'
 import { Glyph } from './Glyph'
 import { TEMPLATES } from './templates'
 import { downloadJson, downloadPng, downloadSvg, normalizePlan, readPlanFile } from './exporters'
+import type { Area } from './ops'
 import {
   addOpening,
+  clearWallsIn,
   deleteSelection,
   duplicateFurniture,
   isEmptyPlan,
@@ -29,6 +31,8 @@ import {
   updateRoomMeta,
   updateUnderlay,
   updateWall,
+  wallInArea,
+  openingInArea,
   WALL_THICKNESSES,
 } from './ops'
 import { dist, fmtArea, fmtLen, fmtNum, lerp, normDeg } from './geometry'
@@ -38,7 +42,7 @@ import { decodePlan, parseHash, planShareUrl } from './share'
 import { DEFAULT_TRACE, calibrate, detectWalls, grayscaleOf, joinCorners, loadUnderlayImage, makeUnderlay, mergeCollinear, nameFromFile, planFromImage, toPixel, toPlan, tracePlan, type LoadedImage, type TraceOptions } from './underlay'
 import { cleanRaster, distanceToInk, dominantAngle, floodRoom, grayToImage, groundRoomBox, rotateImage, segmentRooms, segmentRoomsAuto, warpToRect, type CleanResult, type RoomRegion } from './raster'
 import type { Guide } from './snapping'
-import { aiStatus, askLayout, lookupProductViaServer, recognizePlan, type AiStatus } from './ai'
+import { aiStatus, askLayout, askSpot, cropForVision, lookupProductViaServer, recognizePlan, type AiStatus } from './ai'
 import { applyAiPlan, convertAiPlan } from './planai'
 import type { AiBox, AiPlan } from './aicontract'
 import { applyLayout, catalogForRoom, layoutSummary, vetLayout } from './autolayout'
@@ -912,6 +916,83 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     }
   }
 
+  /**
+   * Уточнить участок: пользователь обвёл спорное место и говорит, что там на
+   * самом деле. Правится только это место, проверенное вокруг остаётся как
+   * есть. «Спросить ИИ» шлёт увеличенный кусок исходного фото — мелкую деталь
+   * модель читает надёжнее, когда та занимает весь кадр.
+   */
+  const applySpot = (area: Area, what: 'wall' | 'door' | 'window' | 'doorway' | 'none') => {
+    if (what === 'none') {
+      history.apply((prev) => clearWallsIn(prev, area))
+      setToast('Стены на участке убраны')
+      return
+    }
+    if (what === 'wall') {
+      history.apply((prev) => wallInArea(prev, area, wallThickness))
+      setToast('Стена поставлена по участку')
+      return
+    }
+    let done = false
+    history.apply((prev) => {
+      const { plan: next, id } = openingInArea(prev, area, what, buildRooms(prev).rooms)
+      done = !!id
+      return next
+    })
+    const name = what === 'door' ? 'Дверь' : what === 'window' ? 'Окно' : 'Проём'
+    setToast(done ? `${name} поставлен${what === 'window' ? 'о' : ''} на стену участка` : 'На участке нет стены — сначала поставьте стену')
+  }
+
+  const onRefineArea = (area: Area) => {
+    const u = plan.underlay
+    setAsk({
+      title: 'Что на этом месте?',
+      text: 'Правка коснётся только обведённого участка: остальной чертёж останется как есть.',
+      options: [
+        { key: 'wall', label: 'Здесь стена', hint: 'поставить стену вдоль участка', icon: 'wall', primary: true },
+        { key: 'doorway', label: 'Здесь проём без двери', icon: 'doorway' },
+        { key: 'door', label: 'Здесь дверь', icon: 'door' },
+        { key: 'window', label: 'Здесь окно', icon: 'window' },
+        { key: 'none', label: 'Здесь ничего нет', hint: 'убрать стены с участка', icon: 'trash' },
+        ...(ai.enabled && u ? [{ key: 'ai', label: 'Спросить ИИ', hint: 'увеличенный кусок фото уйдёт модели', icon: 'sparkles' as const }] : []),
+      ],
+      onPick: (key) => {
+        setAsk(null)
+        if (key !== 'ai') {
+          applySpot(area, key as 'wall' | 'door' | 'window' | 'doorway' | 'none')
+          return
+        }
+        if (!u) return
+        void (async () => {
+          setAiBusy('Смотрю участок…')
+          try {
+            const box = { x1: (area.x1 - u.x) / u.scale, y1: (area.y1 - u.y) / u.scale, x2: (area.x2 - u.x) / u.scale, y2: (area.y2 - u.y) / u.scale }
+            const crop = await cropForVision(u.original ?? u.src, box)
+            const { spot, ai: cost } = await askSpot(crop)
+            noteCost('участок', cost)
+            const label = spot.what === 'wall' ? 'стена' : spot.what === 'door' ? 'дверь' : spot.what === 'window' ? 'окно' : spot.what === 'doorway' ? 'проём без двери' : 'ничего'
+            setAsk({
+              title: 'Модель посмотрела участок',
+              text: `Там ${label}${spot.note ? `: ${spot.note}` : ''}. Применить?`,
+              options: [
+                { key: 'yes', label: `Да, ${label}`, icon: 'check', primary: true },
+                { key: 'no', label: 'Нет, оставить как было', icon: 'close' },
+              ],
+              onPick: (k) => {
+                setAsk(null)
+                if (k === 'yes') applySpot(area, spot.what)
+              },
+            })
+          } catch (e) {
+            setToast(`Спросить не вышло: ${(e as Error).message}`)
+          } finally {
+            setAiBusy('')
+          }
+        })()
+      },
+    })
+  }
+
   /** Комната по клику: заливка по очищенному растру, стены вокруг */
   const onRoomPick = async (p: Pt) => {
     const u = plan.underlay
@@ -1671,6 +1752,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                         {tracing ? 'Обвожу…' : 'Обвести линии без ИИ'}
                       </button>
                     </div>
+                    {!!plan.walls.length && (
+                      <button className={`pl-btn small ${tool === 'refine' ? 'active' : ''}`} onClick={() => setTool(tool === 'refine' ? 'select' : 'refine')} title="Обвести спорное место и сказать, что там на самом деле">
+                        <Icon name="refine" size={16} /> Уточнить участок
+                      </button>
+                    )}
                   </>
                 ) : (
                   <>
@@ -2376,6 +2462,12 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
               </span>
               <span className="pl-tool-name">По клику</span>
             </button>
+            <button className={`pl-tool ${tool === 'refine' ? 'active' : ''}`} onClick={() => setTool('refine')} title="Обвести спорное место и сказать, что там: стена, проём, дверь или окно">
+              <span className="pl-tool-icon">
+                <Icon name="refine" size={22} />
+              </span>
+              <span className="pl-tool-name">Уточнить</span>
+            </button>
             <button className={`pl-tool ${tool === 'calibrate' ? 'active' : ''}`} onClick={() => setTool('calibrate')} title="Задать масштаб подложки по известному размеру">
               <span className="pl-tool-icon">
                 <Icon name="calibrate" size={22} />
@@ -2434,6 +2526,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           imageLines={imageLines}
           onRoomPick={(p) => void onRoomPick(p)}
           onCorners={(pts) => void onCorners(pts)}
+          onRefine={onRefineArea}
         />
       )}
 

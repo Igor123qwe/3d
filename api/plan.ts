@@ -7,7 +7,7 @@
 // Это единственная задача, где нужна модель подороже, поэтому цепочка идёт от
 // дешёвой к сильной: сильная включается, только если дешёвая вернула ерунду.
 import { askJson, aiConfig, clientIp, fail, json, rateLimit, readJsonBody } from './_lib'
-import { checkAiPlan } from '../src/planner/aicontract'
+import { checkAiPlan, checkAiSpot } from '../src/planner/aicontract'
 
 export const config = { runtime: 'edge' }
 
@@ -36,6 +36,19 @@ const PROMPT = `Ты читаешь план квартиры (обмерный 
 - Ничего не выдумывай: чего на картинке нет — не добавляй. Пустой список лучше вымысла.
 - Линии выносок, штриховку, рамку чертежа, мебель, сантехнику и таблицы стенами и комнатами не считай.`
 
+const SPOT_PROMPT = `Тебе прислали увеличенный кусок плана квартиры — одно спорное место. Ответь, что на нём изображено.
+
+Верни ТОЛЬКО JSON: {"what":"wall","note":"сплошная линия толщиной с перегородку"}
+
+Значения what:
+- "wall" — сплошная стена или перегородка без разрыва;
+- "door" — дверной проём с дверью (обычно виден разрыв в стене и дуга открывания);
+- "window" — окно (разрыв в наружной стене, тонкая двойная или тройная линия поперёк);
+- "doorway" — проём без двери: разрыв в стене, дуги нет;
+- "none" — стены здесь нет вовсе (пустое место, мебель, подпись, размерная линия).
+
+note — одна короткая фраза, почему ты так решила. Если не уверена, так и напиши в note, а what выбери наиболее вероятный.`
+
 export default async function handler(req: Request): Promise<Response> {
   if (req.method !== 'POST') return fail('нужен POST', 405)
   const cfg = aiConfig()
@@ -44,9 +57,9 @@ export default async function handler(req: Request): Promise<Response> {
   // распознавание плана — самый дорогой вызов, поэтому лимит строгий
   if (!rateLimit(ip, { limit: 10, windowMs: 10 * 60_000 })) return fail('слишком часто: не больше 10 планов за 10 минут', 429)
 
-  let body: { image?: string; hint?: string; escalate?: number }
+  let body: { image?: string; hint?: string; escalate?: number; spot?: boolean }
   try {
-    body = await readJsonBody<{ image?: string; hint?: string; escalate?: number }>(req, IMAGE_LIMIT)
+    body = await readJsonBody<{ image?: string; hint?: string; escalate?: number; spot?: boolean }>(req, IMAGE_LIMIT)
   } catch (e) {
     return fail((e as Error).message, 413)
   }
@@ -54,6 +67,30 @@ export default async function handler(req: Request): Promise<Response> {
   if (!/^data:image\/(png|jpeg|jpg|webp);base64,/.test(image)) return fail('нужна картинка в виде data:image/…;base64', 400)
 
   const hint = typeof body.hint === 'string' ? body.hint.slice(0, 800) : ''
+
+  // вопрос про одно место на плане: кусок картинки вместо всего плана
+  if (body.spot) {
+    try {
+      const answer = await askJson(cfg, {
+        task: 'plan',
+        startAt: Math.max(0, Math.min(3, Number(body.escalate) || 0)),
+        check: checkAiSpot,
+        messages: [
+          { role: 'system', content: SPOT_PROMPT },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: hint ? `Кусок плана. Вопрос: ${hint}` : 'Кусок плана. Что здесь: стена, дверь, окно, проём без двери или ничего?' },
+              { type: 'image_url', image_url: { url: image } },
+            ],
+          },
+        ],
+      })
+      return json({ spot: answer.value, ai: { model: answer.model, costRub: answer.costRub, tried: answer.tried } })
+    } catch (e) {
+      return fail((e as Error).message, 502)
+    }
+  }
   // вторая попытка после слабого ответа идёт сразу к модели посильнее
   const escalate = Math.max(0, Math.min(3, Number(body.escalate) || 0))
   try {

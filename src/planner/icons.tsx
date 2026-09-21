@@ -52,6 +52,7 @@ export type IconName =
   | 'search'
   | 'wand'
   | 'corners'
+  | 'refine'
 
 const PATHS: Record<IconName, React.ReactNode> = {
   select: <path d="M5 3l14 8-6 2-3 6z" />,
@@ -111,6 +112,12 @@ const PATHS: Record<IconName, React.ReactNode> = {
     <>
       <path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" />
       <path d="M8 8l8 1-1 7-8-1z" />
+    </>
+  ),
+  refine: (
+    <>
+      <path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4" />
+      <path d="M12 9v4M12 16h.01" />
     </>
   ),
   calibrate: (
