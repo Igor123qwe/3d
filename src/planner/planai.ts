@@ -408,6 +408,30 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
       const h = nearestWall(walls, p)
       if (h && (!hit || h.d < hit.d)) hit = h
     }
+    // Точка ушла в вырез Г-образной комнаты: там стены нет вовсе. Ищем стену на
+    // той же стороне этой комнаты — она и есть та, в которой проём
+    if ((!hit || hit.d > 50) && byNumbers && rebuilt && op.room && op.side) {
+      const room = rebuilt.rooms.find((r) => r.name === op.room)
+      if (room) {
+        const side = op.side
+        const vertical = side === 'left' || side === 'right'
+        const at = side === 'left' ? room.rect.x1 : side === 'right' ? room.rect.x2 : side === 'top' ? room.rect.y1 : room.rect.y2
+        let best: { wall: Wall; t: number; d: number } | null = null
+        for (const w of walls) {
+          const onAxis = vertical ? Math.abs(w.a.x - w.b.x) < 1 && Math.abs(w.a.x - at) < 30 : Math.abs(w.a.y - w.b.y) < 1 && Math.abs(w.a.y - at) < 30
+          if (!onAxis) continue
+          // стена должна идти вдоль стороны комнаты, а не мимо неё
+          const lo = vertical ? Math.max(room.rect.y1, Math.min(w.a.y, w.b.y)) : Math.max(room.rect.x1, Math.min(w.a.x, w.b.x))
+          const hi = vertical ? Math.min(room.rect.y2, Math.max(w.a.y, w.b.y)) : Math.min(room.rect.x2, Math.max(w.a.x, w.b.x))
+          if (hi - lo < op.widthCm) continue
+          const mid = vertical ? { x: w.a.x, y: (lo + hi) / 2 } : { x: (lo + hi) / 2, y: w.a.y }
+          const c = closestOnSeg(mid, w.a, w.b)
+          const d = dist(mid, c.p)
+          if (!best || hi - lo > 0) best = { wall: w, t: c.t, d }
+        }
+        if (best) hit = best
+      }
+    }
     // проём дальше полуметра от любой стены — это ошибка распознавания
     if (!hit || hit.d > 50) {
       dropped++

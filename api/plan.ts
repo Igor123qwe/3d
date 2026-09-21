@@ -7,7 +7,7 @@
 // Это единственная задача, где нужна модель подороже, поэтому цепочка идёт от
 // дешёвой к сильной: сильная включается, только если дешёвая вернула ерунду.
 import { askJson, aiConfig, clientIp, fail, json, rateLimit, readJsonBody } from './_lib'
-import { checkAiPlan, checkAiSpot } from '../src/planner/aicontract'
+import { checkAiPlan, checkAiRoomLabel, checkAiSpot } from '../src/planner/aicontract'
 
 export const config = { runtime: 'edge' }
 
@@ -49,24 +49,66 @@ const SPOT_PROMPT = `Тебе прислали увеличенный кусок
 
 note — одна короткая фраза, почему ты так решила. Если не уверена, так и напиши в note, а what выбери наиболее вероятный.`
 
+const ROOM_PROMPT = `Тебе прислали увеличенный кусок плана квартиры — одну комнату целиком, с подписями внутри неё и размерами у её стен. Прочитай только то, что относится к этой комнате.
+
+Верни ТОЛЬКО JSON: {"name":"5ж","kind":"жилая","area_m2":13.9,"width_cm":372,"depth_cm":408,"openings":[{"kind":"door","side":"right","at":0.85,"width_cm":80}],"note":"размер 4.08 подписан у левой стены"}
+
+Правила:
+- name — подпись комнаты как есть: «5ж», «Кухня», «1». На плане БТИ это номер над чертой, а под чертой площадь: «5ж / 13.9» значит name «5ж», area_m2 13.9.
+- area_m2 — площадь в квадратных метрах, подписанная внутри комнаты. Не считай её сам, прочитай.
+- width_cm — размер по горизонтали, подписанный у верхней или нижней стены этой комнаты; depth_cm — по вертикали, у левой или правой. «3.72» — это 372 см, «3720» — тоже 372 см. Если у стены размера нет, поле пропусти: не выдумывай и не бери размер соседней комнаты.
+- Числа у стен, повёрнутые боком, читай так же внимательно: на планах БТИ вертикальные размеры пишут вдоль стены.
+- openings — двери и окна в стенах этой комнаты: kind door, window или doorway; side — в какой стене (top, right, bottom, left); at — где вдоль неё, 0..1 слева направо или сверху вниз.
+- Если подписи нечитаемы, верни то, что уверенно прочитала, и напиши об этом в note. Пустые поля лучше выдуманных.`
+
 export default async function handler(req: Request): Promise<Response> {
   if (req.method !== 'POST') return fail('нужен POST', 405)
   const cfg = aiConfig()
   if (!cfg) return fail('ИИ не подключён: на сервере нет ключа ROUTERAI_API_KEY', 503)
   const ip = clientIp(req)
-  // распознавание плана — самый дорогой вызов, поэтому лимит строгий
-  if (!rateLimit(ip, { limit: 10, windowMs: 10 * 60_000 })) return fail('слишком часто: не больше 10 планов за 10 минут', 429)
 
-  let body: { image?: string; hint?: string; escalate?: number; spot?: boolean }
+  let body: { image?: string; hint?: string; escalate?: number; spot?: boolean; room?: boolean }
   try {
-    body = await readJsonBody<{ image?: string; hint?: string; escalate?: number; spot?: boolean }>(req, IMAGE_LIMIT)
+    body = await readJsonBody<{ image?: string; hint?: string; escalate?: number; spot?: boolean; room?: boolean }>(req, IMAGE_LIMIT)
   } catch (e) {
     return fail((e as Error).message, 413)
   }
   const image = body.image || ''
   if (!/^data:image\/(png|jpeg|jpg|webp);base64,/.test(image)) return fail('нужна картинка в виде data:image/…;base64', 400)
 
+  // Целый план — самый дорогой вызов, поэтому лимит строгий. Фрагмент комнаты
+  // или спорное место — маленькие вызовы дешёвой моделью, и их на один план
+  // уходит по числу комнат: свой лимит, иначе чтение по фрагментам упирается
+  // в потолок уже на первом плане
+  const small = !!body.room || !!body.spot
+  const limit = small ? { limit: 200, windowMs: 10 * 60_000, bucket: 'plan-part' } : { limit: 10, windowMs: 10 * 60_000, bucket: 'plan' }
+  if (!rateLimit(ip, limit)) return fail(small ? 'слишком часто: не больше 200 фрагментов за 10 минут' : 'слишком часто: не больше 10 планов за 10 минут', 429)
+
   const hint = typeof body.hint === 'string' ? body.hint.slice(0, 800) : ''
+
+  // подписи одной комнаты: её кусок вместо всего плана — мелкие цифры так читаются надёжнее
+  if (body.room) {
+    try {
+      const answer = await askJson(cfg, {
+        task: 'plan',
+        startAt: Math.max(0, Math.min(3, Number(body.escalate) || 0)),
+        check: checkAiRoomLabel,
+        messages: [
+          { role: 'system', content: ROOM_PROMPT },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: hint ? `Комната на плане. ${hint}` : 'Комната на плане. Прочитай её подписи и размеры.' },
+              { type: 'image_url', image_url: { url: image } },
+            ],
+          },
+        ],
+      })
+      return json({ room: answer.value, ai: { model: answer.model, costRub: answer.costRub, tried: answer.tried } })
+    } catch (e) {
+      return fail((e as Error).message, 502)
+    }
+  }
 
   // вопрос про одно место на плане: кусок картинки вместо всего плана
   if (body.spot) {

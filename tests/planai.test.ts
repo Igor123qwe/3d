@@ -411,3 +411,28 @@ describe('комнаты с картинки', () => {
     expect(r.report.segmented).toBeNull()
   })
 })
+
+describe('проём в стене Г-образной комнаты', () => {
+  it('точка стороны попала в вырез — проём садится на стену той же стороны, а не пропадает', () => {
+    // комната 5ж с вырезом под коридор в правом нижнем углу; дверь — в правой стене, внизу
+    const ai: AiPlan = {
+      walls: [],
+      dimensions: [],
+      rooms: [
+        { name: '5ж', areaM2: 14.4, x: 0.15, y: 0.15, box: { x1: 0.04, y1: 0.05, x2: 0.44, y2: 0.55 }, yieldsTo: ['коридор'], exact: true },
+        { name: 'коридор', x: 0.5, y: 0.47, box: { x1: 0.3, y1: 0.4, x2: 0.7, y2: 0.55 }, exact: true },
+        { name: 'Кухня', areaM2: 6.4, x: 0.6, y: 0.15, box: { x1: 0.45, y1: 0.05, x2: 0.7, y2: 0.36 }, exact: true },
+      ],
+      // дверь в правой стене 5ж на 0.85 её высоты — это как раз вырез под коридор
+      openings: [{ kind: 'door', room: '5ж', side: 'right', at: 0.85, x: 0.44, y: 0.47, widthCm: 80 }],
+    }
+    const r = convertAiPlan(ai, underlay(1), { keepScale: true })
+    expect(r.report.method).toBe('по размерам комнат')
+    expect(r.openings).toHaveLength(1)
+    expect(r.report.openingsDropped).toBe(0)
+    // проём сел на вертикальную стену по правой стороне 5ж
+    const wall = r.walls.find((w) => w.id === r.openings[0].wallId)!
+    expect(Math.abs(wall.a.x - wall.b.x)).toBeLessThan(1)
+    expect(r.report.quality.openings).toEqual({ expected: 1, placed: 1 })
+  })
+})

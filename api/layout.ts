@@ -42,7 +42,7 @@ export default async function handler(req: Request): Promise<Response> {
   if (req.method !== 'POST') return fail('нужен POST', 405)
   const cfg = aiConfig()
   if (!cfg) return fail('ИИ не подключён: на сервере нет ключа ROUTERAI_API_KEY', 503)
-  if (!rateLimit(clientIp(req), { limit: 20, windowMs: 10 * 60_000 })) return fail('слишком часто, подождите', 429)
+  if (!rateLimit(clientIp(req), { limit: 20, windowMs: 10 * 60_000, bucket: 'layout' })) return fail('слишком часто, подождите', 429)
 
   let body: LayoutRequest
   try {

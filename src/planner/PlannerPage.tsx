@@ -42,8 +42,9 @@ import { decodePlan, parseHash, planShareUrl } from './share'
 import { DEFAULT_TRACE, calibrate, detectWalls, grayscaleOf, joinCorners, loadUnderlayImage, makeUnderlay, mergeCollinear, nameFromFile, planFromImage, toPixel, toPlan, tracePlan, type LoadedImage, type TraceOptions } from './underlay'
 import { cleanRaster, distanceToInk, dominantAngle, floodRoom, grayToImage, groundRoomBox, rotateImage, segmentRooms, segmentRoomsAuto, warpToRect, type CleanResult, type RoomRegion } from './raster'
 import type { Guide } from './snapping'
-import { aiStatus, askLayout, askSpot, cropForVision, lookupProductViaServer, recognizePlan, type AiStatus } from './ai'
+import { aiStatus, askLayout, askRoomLabel, askSpot, cropForVision, lookupProductViaServer, recognizePlan, type AiStatus } from './ai'
 import { applyAiPlan, convertAiPlan } from './planai'
+import { pointOnSide } from './reconstruct'
 import type { AiBox, AiPlan } from './aicontract'
 import { checkAiPlan } from './aicontract'
 import { applyLayout, catalogForRoom, layoutSummary, vetLayout } from './autolayout'
@@ -802,7 +803,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         if (!u) return null
         const r = await ensureRaster(u)
         if (!r.d2) r.d2 = distanceToInk(r.clean.bin)
-        return { w: u.px.w, h: u.px.h, scale: u.scale, ink: r.clean.bin.ink, d2: r.d2 }
+        return { w: u.px.w, h: u.px.h, scale: u.scale, ink: r.clean.bin.ink, walls: r.clean.walls.ink, box: r.clean.box, d2: r.d2 }
       },
       segmentRooms,
       segmentRoomsAuto,
@@ -845,6 +846,64 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plan.underlay])
+
+  /**
+   * Прочитать подписи комнат по их фрагментам: каждая область с картинки
+   * уходит модели отдельной картинкой, крупно. Возвращает готовый ответ в том
+   * же виде, что и общий проход, или null, если подписей набралось слишком
+   * мало — тогда работает прежний путь по всему снимку.
+   */
+  const readRoomLabels = async (photo: string, regions: RoomRegion[], u: Underlay): Promise<{ plan: AiPlan; ai: { model: string; costRub: number; tried: string[] } } | null> => {
+    const take = regions.slice(0, 12)
+    const rooms: AiPlan['rooms'] = []
+    const openings: AiPlan['openings'] = []
+    let model = ''
+    let costRub = 0
+    const tried: string[] = []
+    let done = 0
+    // по три зараз: дешёвой модели это быстро, а лимит запросов не выбирается
+    for (let i = 0; i < take.length; i += 3) {
+      const batch = take.slice(i, i + 3)
+      setAiBusy(`Читаю подписи комнат… ${Math.min(i + batch.length, take.length)} из ${take.length}`)
+      const answers = await Promise.all(
+        batch.map(async (r, k) => {
+          try {
+            const crop = await cropForVision(photo, r, Math.round(Math.max(u.px.w, u.px.h) * 0.02), 640)
+            // номер и пропорции подсказывают модели, что перед ней: вытянутый
+            // коридор и квадратная комната путаются, если смотреть на них вслепую
+            const side = (r.x2 - r.x1) / Math.max(1, r.y2 - r.y1)
+            const hint = `Комната ${i + k + 1} из ${take.length}. На картинке она ${side >= 2 ? 'вытянута по горизонтали' : side <= 0.5 ? 'вытянута по вертикали' : 'близка к прямоугольнику'}.`
+            return await askRoomLabel(crop, hint)
+          } catch (e) {
+            console.info('[ИИ] комната не прочиталась', (e as Error).message)
+            return null
+          }
+        }),
+      )
+      answers.forEach((ans, k) => {
+        const r = batch[k]
+        const box = { x1: r.x1 / u.px.w, y1: r.y1 / u.px.h, x2: r.x2 / u.px.w, y2: r.y2 / u.px.h }
+        const at = { x: r.cx / u.px.w, y: r.cy / u.px.h }
+        if (!ans) {
+          rooms.push({ name: `Помещение ${rooms.length + 1}`, x: at.x, y: at.y, box })
+          return
+        }
+        done++
+        model = ans.ai.model
+        costRub += ans.ai.costRub
+        for (const t of ans.ai.tried ?? []) if (!tried.includes(t)) tried.push(t)
+        const name = ans.room.name || `Помещение ${rooms.length + 1}`
+        rooms.push({ name, kind: ans.room.kind, areaM2: ans.room.areaM2, widthCm: ans.room.widthCm, depthCm: ans.room.depthCm, x: at.x, y: at.y, box })
+        for (const o of ans.room.openings ?? []) {
+          const p = pointOnSide({ x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2 }, o.side, o.at)
+          openings.push({ kind: o.kind, room: name, side: o.side, at: o.at, x: p.x / u.px.w, y: p.y / u.px.h, widthCm: o.widthCm })
+        }
+      })
+    }
+    // подписей меньше половины — фрагменты не помогли, пусть модель посмотрит план целиком
+    if (done < Math.ceil(take.length / 2)) return null
+    return { plan: { walls: [], openings, rooms, dimensions: [], note: `подписи прочитаны по ${done} фрагментам комнат` }, ai: { model, costRub, tried } }
+  }
 
   /** Все комнаты с картинки: области заливки по очищенному растру */
   const regionsOf = async (u: Underlay): Promise<RoomRegion[]> => {
@@ -1153,7 +1212,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       const convert = (p: AiPlan) => convertAiPlan(p, u, { keepScale: calibrated, ground, regions, raster: rasterInfo })
       // подписи модель читает по исходному фото: очистка стирает цифры вместе с засечками
       const photo = u.original ?? u.src
-      let { plan: read, ai: cost } = await recognizePlan(photo)
+      // Комнаты уже найдены по картинке — значит модели можно показывать их по
+      // одной, крупно. Мелкие цифры на общем снимке она путает («0.82» читает
+      // как «3.84»), а на увеличенном фрагменте одной комнаты — нет
+      const byRooms = regions.length >= 2 ? await readRoomLabels(photo, regions, u) : null
+      let { plan: read, ai: cost } = byRooms ?? (await recognizePlan(photo))
       // масштаб не трогаем, если пользователь уже откалибровал подложку руками
       let result = convert(read)
       let attempts = 1

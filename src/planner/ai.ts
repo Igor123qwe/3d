@@ -3,7 +3,7 @@
 // Ключа здесь нет и быть не может: браузер ходит на свой же /api, а роутер
 // зовёт сервер. Если ИИ не подключён, каждая функция честно говорит об этом,
 // и приложение продолжает работать на прежних локальных алгоритмах.
-import type { AiPlacement, AiPlan, AiSpot } from './aicontract'
+import type { AiPlacement, AiPlan, AiRoomLabel, AiSpot } from './aicontract'
 import type { ProductInfo } from './products'
 
 export interface AiTaskInfo {
@@ -113,6 +113,16 @@ export async function recognizePlan(src: string, hint?: string, signal?: AbortSi
   const image = await shrinkForVision(src)
   return post<RecognizeResult>('plan', { image, hint, escalate }, signal)
 }
+
+// ---------- подписи одной комнаты по её фрагменту ----------
+export interface RoomLabelResult {
+  room: AiRoomLabel
+  ai: AiCost
+}
+
+/** Прочитать подписи комнаты по её увеличенному куску плана */
+export const askRoomLabel = (image: string, hint?: string, signal?: AbortSignal): Promise<RoomLabelResult> =>
+  post<RoomLabelResult>('plan', { image, room: true, hint }, signal)
 
 // ---------- вопрос про одно место на плане ----------
 export interface SpotResult {

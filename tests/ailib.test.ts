@@ -168,3 +168,18 @@ describe('вторая попытка — с модели посильнее', (
     delete process.env.AI_MODEL_PLAN
   })
 })
+
+describe('счётчик запросов по назначению', () => {
+  it('мелкие вызовы плана не съедают квоту расстановки', () => {
+    const ip = '10.0.0.7'
+    // десять фрагментов плана
+    for (let i = 0; i < 10; i++) expect(rateLimit(ip, { limit: 200, windowMs: 60_000, bucket: 'plan-part' })).toBe(true)
+    // расстановка мебели с тем же адресом всё ещё доступна
+    expect(rateLimit(ip, { limit: 2, windowMs: 60_000, bucket: 'layout' })).toBe(true)
+    expect(rateLimit(ip, { limit: 2, windowMs: 60_000, bucket: 'layout' })).toBe(true)
+    // но свой запас у неё кончается
+    expect(rateLimit(ip, { limit: 2, windowMs: 60_000, bucket: 'layout' })).toBe(false)
+    // а у фрагментов плана — нет
+    expect(rateLimit(ip, { limit: 200, windowMs: 60_000, bucket: 'plan-part' })).toBe(true)
+  })
+})

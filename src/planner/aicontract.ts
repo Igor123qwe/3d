@@ -86,6 +86,14 @@ const unit = (v: unknown): number | null => {
   return Number.isFinite(n) && n >= -0.05 && n <= 1.05 ? Math.min(1, Math.max(0, n)) : null
 }
 
+/** размер с плана в сантиметрах: «3.72» — метры, «3720» — миллиметры, «372» — уже сантиметры */
+const size = (v: unknown): number | undefined => {
+  const n = inRange(v, 0.5, 5000)
+  if (n === null) return undefined
+  const cm = n < 30 ? n * 100 : n > 1500 ? n / 10 : n
+  return cm >= 50 && cm <= 3000 ? Math.round(cm) : undefined
+}
+
 const inRange = (v: unknown, lo: number, hi: number): number | null => {
   const n = typeof v === 'string' ? Number(v.replace(/\s+/g, '').replace(',', '.')) : Number(v)
   return Number.isFinite(n) && n >= lo && n <= hi ? n : null
@@ -98,6 +106,52 @@ export interface AiSpot {
   what: 'wall' | 'door' | 'window' | 'doorway' | 'none'
   /** пояснение своими словами: показывается пользователю как есть */
   note?: string
+}
+
+/** Подписи одной комнаты, прочитанные по её увеличенному фрагменту */
+export interface AiRoomLabel {
+  name?: string
+  kind?: string
+  areaM2?: number
+  widthCm?: number
+  depthCm?: number
+  /** проёмы, видимые в стенах этого фрагмента: сторона и место вдоль неё */
+  openings?: { kind: AiOpeningKind; side: AiSide; at: number; widthCm: number }[]
+  note?: string
+}
+
+/** Проверить ответ по фрагменту комнаты: подписи внутри неё */
+export function checkAiRoomLabel(data: unknown): AiRoomLabel {
+  if (!data || typeof data !== 'object') throw new Error('не объект')
+  const d = data as Record<string, unknown>
+  const out: AiRoomLabel = {}
+  const name = typeof d.name === 'string' ? d.name.trim().slice(0, 40) : ''
+  if (name && name.toLowerCase() !== 'null') out.name = name
+  const kind = typeof d.kind === 'string' ? d.kind.trim().slice(0, 40) : ''
+  if (kind) out.kind = kind
+  const area = inRange(d.area_m2 ?? d.areaM2, 0.5, 200)
+  if (area !== null) out.areaM2 = area
+  const w = size(d.width_cm ?? d.widthCm)
+  if (w !== undefined) out.widthCm = w
+  const h = size(d.depth_cm ?? d.depthCm ?? d.height_cm)
+  if (h !== undefined) out.depthCm = h
+  const ops: NonNullable<AiRoomLabel['openings']> = []
+  for (const raw of list(d.openings, 12)) {
+    const o = raw as Record<string, unknown>
+    const kindO = String(o.kind ?? '').toLowerCase()
+    const side = String(o.side ?? '').toLowerCase()
+    const at = unit(o.at)
+    if (kindO !== 'door' && kindO !== 'window' && kindO !== 'doorway') continue
+    if (side !== 'top' && side !== 'right' && side !== 'bottom' && side !== 'left') continue
+    if (at === null) continue
+    ops.push({ kind: kindO, side: side as AiSide, at, widthCm: inRange(o.width_cm ?? o.widthCm, 30, 400) ?? (kindO === 'window' ? 150 : 80) })
+  }
+  if (ops.length) out.openings = ops
+  const note = typeof d.note === 'string' ? d.note.slice(0, 200) : ''
+  if (note) out.note = note
+  // совсем пустой ответ — это не ответ: пусть попробует следующая модель
+  if (!out.name && out.areaM2 === undefined && out.widthCm === undefined && out.depthCm === undefined && !out.openings) throw new Error('в ответе нет ни подписи, ни размеров')
+  return out
 }
 
 /** Проверить ответ про участок: что там — стена, проём или ничего */
@@ -159,13 +213,6 @@ export function checkAiPlan(data: unknown): AiPlan {
       if (x1 !== null && y1 !== null && x2 !== null && y2 !== null && x2 - x1 >= 0.01 && y2 - y1 >= 0.01) {
         room.box = { x1, y1, x2, y2 }
       }
-    }
-    // размеры на плане БТИ — в метрах с сотыми («3.72»); в мм — четыре цифры; просим см, но страхуемся
-    const size = (v: unknown): number | undefined => {
-      const n = inRange(v, 0.5, 5000)
-      if (n === null) return undefined
-      const cm = n < 30 ? n * 100 : n > 1500 ? n / 10 : n
-      return cm >= 50 && cm <= 3000 ? Math.round(cm) : undefined
     }
     const sides: AiSide[] = ['top', 'right', 'bottom', 'left']
     const nb = (r.neighbors ?? r.adjacent ?? r.neighbours) as Record<string, unknown> | undefined

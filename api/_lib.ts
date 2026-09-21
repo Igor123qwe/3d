@@ -122,17 +122,25 @@ const hits = new Map<string, number[]>()
 export interface LimitOptions {
   limit: number
   windowMs: number
+  /** назначение вызова: у каждого свой счётчик, чтобы задачи не мешали друг другу */
+  bucket?: string
 }
 
+/**
+ * Счётчик ведётся по паре «адрес и назначение»: чтение плана по фрагментам
+ * делает десяток мелких вызовов, и они не должны съедать квоту расстановки
+ * мебели или чтения товара — у каждой задачи свой запас.
+ */
 export function rateLimit(ip: string, o: LimitOptions, now = Date.now()): boolean {
+  const key = o.bucket ? `${ip}|${o.bucket}` : ip
   const from = now - o.windowMs
-  const list = (hits.get(ip) || []).filter((t) => t > from)
+  const list = (hits.get(key) || []).filter((t) => t > from)
   if (list.length >= o.limit) {
-    hits.set(ip, list)
+    hits.set(key, list)
     return false
   }
   list.push(now)
-  hits.set(ip, list)
+  hits.set(key, list)
   if (hits.size > 5000) for (const [k, v] of hits) if (!v.some((t) => t > from)) hits.delete(k)
   return true
 }

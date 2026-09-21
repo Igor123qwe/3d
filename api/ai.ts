@@ -12,7 +12,7 @@ export default async function handler(req: Request): Promise<Response> {
   // список моделей роутера: чтобы подобрать дешёвые под свои задачи
   if (url.searchParams.get('models')) {
     if (!cfg) return fail('ИИ не подключён', 503)
-    if (!rateLimit(clientIp(req), { limit: 5, windowMs: 60_000 })) return fail('слишком часто', 429)
+    if (!rateLimit(clientIp(req), { limit: 5, windowMs: 60_000, bucket: 'status' })) return fail('слишком часто', 429)
     try {
       const res = await fetch(`${cfg.base}/models`, { headers: { authorization: `Bearer ${cfg.key}` } })
       if (!res.ok) return fail(`роутер ответил ${res.status}`, 502)

@@ -170,19 +170,155 @@ export function despeckle(bin: Bin, opts: { minPixels?: number; maxSide?: number
   return { ink, w: bin.w, h: bin.h }
 }
 
+// ---------- чистка до одних стен ----------
+//
+// На снимке плана, кроме стен, есть подписи, размерные цепочки с выносками,
+// рамка листа, а на скриншоте — ещё и панели интерфейса. Всё это мешает:
+// сегментация находит «комнаты» на полях, а масштаб считается по чужим линиям.
+// Отличить одно от другого можно по толщине штриха: стена на плане — полоса в
+// несколько пикселей, выноска и буква — волосок, панель или заливка — пятно.
+
+/**
+ * Толщина штриха в каждой точке чернил: удвоенное расстояние до ближайшей
+ * бумаги. У стены это её толщина, у выноски — один-два пикселя, у залитого
+ * прямоугольника — десятки.
+ */
+export function strokeWidth(bin: Bin): Float32Array {
+  const inv: Bin = { ink: new Uint8Array(bin.ink.length), w: bin.w, h: bin.h }
+  for (let i = 0; i < bin.ink.length; i++) inv.ink[i] = bin.ink[i] ? 0 : 1
+  const d2 = distanceToInk(inv)
+  const out = new Float32Array(d2.length)
+  for (let i = 0; i < d2.length; i++) out[i] = bin.ink[i] ? 2 * Math.sqrt(d2[i]) : 0
+  return out
+}
+
+/**
+ * Типичная толщина линии на картинке. Считается только по линиям: волоски
+ * тоньше двух пикселей и пятна толще двадцатой части кадра в счёт не идут —
+ * иначе залитая панель на скриншоте одна перетянет медиану на себя.
+ */
+export function medianStroke(bin: Bin, sw = strokeWidth(bin)): number {
+  const cap = Math.max(6, 0.05 * Math.min(bin.w, bin.h))
+  const vals: number[] = []
+  for (let i = 0; i < sw.length; i++) if (sw[i] >= 2 && sw[i] <= cap) vals.push(sw[i])
+  if (!vals.length) return 0
+  vals.sort((a, b) => a - b)
+  return vals[Math.floor(vals.length / 2)]
+}
+
+/**
+ * Оставить только линии, похожие на стены: убрать волоски (выноски, размерные
+ * линии, буквы) и пятна (залитые панели, штриховку, чёрные поля скриншота).
+ * Пороги — доли от типичной толщины линии на этой картинке, поэтому работает и
+ * на скане 600 dpi, и на снимке с телефона.
+ */
+export function keepWallStrokes(bin: Bin, opts: { minFrac?: number; maxFrac?: number } = {}): Bin {
+  const sw = strokeWidth(bin)
+  const med = medianStroke(bin, sw)
+  if (med <= 0) return bin
+  const lo = Math.max(1.5, med * (opts.minFrac ?? 0.5))
+  const hi = med * (opts.maxFrac ?? 3)
+  const ink = new Uint8Array(bin.ink.length)
+  for (let i = 0; i < ink.length; i++) ink[i] = bin.ink[i] && sw[i] >= lo && sw[i] <= hi ? 1 : 0
+  return { ink, w: bin.w, h: bin.h }
+}
+
+/**
+ * Прямоугольник, в котором лежит сам план. Считается по плотности стеновых
+ * линий: строим профили по столбцам и строкам и берём самый длинный участок,
+ * где линий заметно больше, чем на полях. Так отсекаются поля листа, таблицы,
+ * подписи под планом и панели приложения, если план сняли с экрана.
+ * null — плотного участка не нашлось, план занимает весь кадр.
+ */
+export function planBox(bin: Bin, pad = 6): PxRect | null {
+  const walls = keepWallStrokes(bin)
+  const { ink, w, h } = walls
+  const col = new Float32Array(w)
+  const row = new Float32Array(h)
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!ink[y * w + x]) continue
+      col[x]++
+      row[y]++
+    }
+  }
+  // сглаживание: одиночная линия не должна выглядеть как край плана
+  const smooth = (a: Float32Array, k: number): Float32Array => {
+    const out = new Float32Array(a.length)
+    let sum = 0
+    for (let i = 0; i < a.length + k; i++) {
+      if (i < a.length) sum += a[i]
+      if (i >= k) sum -= a[i - k]
+      const at = i - Math.floor(k / 2)
+      if (at >= 0 && at < a.length) out[at] = sum / k
+    }
+    return out
+  }
+  // Полоса, занятая чертежом: там, где линии есть вовсе. На полях листа их
+  // ровно ноль, поэтому порог берётся низкий — лишь бы отсечь крапинки шума.
+  // Если полос несколько (план, а рядом панель или таблица), берётся та, где
+  // линий в сумме больше: у чертежа их куда больше, чем у рамки панели
+  const span = (a: Float32Array, k: number, other: number): [number, number] | null => {
+    const sm = smooth(a, Math.max(3, Math.round(k)))
+    const thr = Math.max(1, other * 0.01)
+    let best: { from: number; to: number; mass: number } | null = null
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+    let from = -1
+    let mass = 0
+    const close = (to: number) => {
+      if (from >= 0 && (!best || mass > best.mass)) best = { from, to, mass }
+      from = -1
+      mass = 0
+    }
+    for (let i = 0; i < sm.length; i++) {
+      if (sm[i] >= thr) {
+        if (from < 0) from = i
+        mass += sm[i]
+        // разрыв в поле шире процента кадра разделяет чертёж и соседнюю панель
+      } else if (from >= 0 && sm.slice(i, i + Math.max(3, Math.round(k))).every((v) => v < thr)) close(i - 1)
+    }
+    close(sm.length - 1)
+    const found = best as { from: number; to: number; mass: number } | null
+    return found ? [found.from, found.to] : null
+  }
+  const sx = span(col, w * 0.01, h)
+  const sy = span(row, h * 0.01, w)
+  if (!sx || !sy) return null
+  const box: PxRect = {
+    x1: Math.max(0, sx[0] - pad),
+    y1: Math.max(0, sy[0] - pad),
+    x2: Math.min(w - 1, sx[1] + pad),
+    y2: Math.min(h - 1, sy[1] + pad),
+  }
+  // план должен занимать заметную часть кадра, иначе это случайная полоса
+  const area = (box.x2 - box.x1 + 1) * (box.y2 - box.y1 + 1)
+  if (area < w * h * 0.1) return null
+  return box
+}
+
 export interface CleanResult {
   /** очищенная картинка: белая бумага, чёрные линии */
   gray: Uint8Array
   bin: Bin
+  /** только стеновые линии: без подписей, выносок и заливок */
+  walls: Bin
+  /** рамка самого плана: за ней поля листа, таблицы и панели приложения */
+  box: PxRect | null
 }
 
-/** Полная очистка: выровнять фон, бинаризовать, убрать мелочь */
+/**
+ * Полная очистка: выровнять фон, бинаризовать, убрать мелочь, оставить
+ * стеновые линии и найти рамку плана. Картинка для показа остаётся прежней —
+ * пользователь видит свой план, — а для поиска комнат берутся только стены.
+ */
 export function cleanRaster(gray: Uint8Array, w: number, h: number): CleanResult {
   const flat = flattenBackground(gray, w, h)
   const bin = despeckle(binarize(flat, w, h))
+  const walls = keepWallStrokes(bin)
+  const box = planBox(bin)
   const out = new Uint8Array(w * h)
   for (let i = 0; i < out.length; i++) out[i] = bin.ink[i] ? 0 : 255
-  return { gray: out, bin }
+  return { gray: out, bin, walls, box }
 }
 
 // ---------- выравнивание ----------

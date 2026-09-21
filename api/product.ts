@@ -52,7 +52,7 @@ const PROMPT = `Ты разбираешь страницу интернет-ма
 export default async function handler(req: Request): Promise<Response> {
   if (req.method !== 'POST') return fail('нужен POST', 405)
   const ip = clientIp(req)
-  if (!rateLimit(ip, { limit: 30, windowMs: 60_000 })) return fail('слишком часто, подождите минуту', 429)
+  if (!rateLimit(ip, { limit: 30, windowMs: 60_000, bucket: 'product' })) return fail('слишком часто, подождите минуту', 429)
 
   let url: URL
   let body: { url?: string }
