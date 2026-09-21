@@ -193,17 +193,56 @@ export function strokeWidth(bin: Bin): Float32Array {
 }
 
 /**
- * Типичная толщина линии на картинке. Считается только по линиям: волоски
- * тоньше двух пикселей и пятна толще двадцатой части кадра в счёт не идут —
- * иначе залитая панель на скриншоте одна перетянет медиану на себя.
+ * Типичная толщина линии на картинке. Не медиана по точкам: у залитой панели
+ * точек больше, чем у всего чертежа, и медиана уехала бы на неё. Считаем, на
+ * какую толщину приходится больше всего длины: точек этой толщины, делённых на
+ * неё саму. У чертежа линии длинные, у панели — только кайма по краю.
  */
 export function medianStroke(bin: Bin, sw = strokeWidth(bin)): number {
-  const cap = Math.max(6, 0.05 * Math.min(bin.w, bin.h))
-  const vals: number[] = []
-  for (let i = 0; i < sw.length; i++) if (sw[i] >= 2 && sw[i] <= cap) vals.push(sw[i])
-  if (!vals.length) return 0
-  vals.sort((a, b) => a - b)
-  return vals[Math.floor(vals.length / 2)]
+  const cap = Math.max(6, Math.round(0.05 * Math.min(bin.w, bin.h)))
+  const hist = new Float64Array(cap + 1)
+  for (let i = 0; i < sw.length; i++) {
+    const t = Math.round(sw[i])
+    if (t >= 2 && t <= cap) hist[t]++
+  }
+  let best = 0
+  let bestLen = 0
+  for (let t = 2; t <= cap; t++) {
+    const len = hist[t] / t
+    if (len > bestLen) {
+      bestLen = len
+      best = t
+    }
+  }
+  return best
+}
+
+/**
+ * Убрать сплошные пятна: тёмные панели приложения, залитые плашки, чёрные поля
+ * снимка. У такой фигуры точки заполняют почти всю её рамку, у чертежа — нет:
+ * он состоит из линий, и внутри рамки у него пусто.
+ */
+export function removeBlobs(bin: Bin, opts: { maxStroke?: number; minThickFrac?: number; sw?: Float32Array } = {}): Bin {
+  const sw = opts.sw ?? strokeWidth(bin)
+  const maxStroke = opts.maxStroke ?? Math.max(8, 0.025 * Math.min(bin.w, bin.h))
+  const minThickFrac = opts.minThickFrac ?? 0.3
+  const { labels, list } = components(bin)
+  const thick = new Float64Array(list.length + 1)
+  const total = new Float64Array(list.length + 1)
+  for (let i = 0; i < bin.ink.length; i++) {
+    const id = labels[i]
+    if (!id) continue
+    total[id]++
+    if (sw[i] > maxStroke) thick[id]++
+  }
+  const drop = new Uint8Array(list.length + 1)
+  // Фигура удаляется целиком, а не только её сердцевина: иначе от панели
+  // остаётся кайма, и она выглядит как длинная стена. Но если толстого в
+  // фигуре мало, это чертёж с парой жирных мест — его не трогаем
+  for (let id = 1; id <= list.length; id++) if (total[id] > 0 && thick[id] / total[id] >= minThickFrac) drop[id] = 1
+  const ink = new Uint8Array(bin.ink.length)
+  for (let i = 0; i < ink.length; i++) ink[i] = bin.ink[i] && !drop[labels[i]] ? 1 : 0
+  return { ink, w: bin.w, h: bin.h }
 }
 
 /**
@@ -212,88 +251,19 @@ export function medianStroke(bin: Bin, sw = strokeWidth(bin)): number {
  * Пороги — доли от типичной толщины линии на этой картинке, поэтому работает и
  * на скане 600 dpi, и на снимке с телефона.
  */
-export function keepWallStrokes(bin: Bin, opts: { minFrac?: number; maxFrac?: number } = {}): Bin {
+export function keepWallStrokes(binIn: Bin, opts: { minPx?: number; maxFrac?: number } = {}): Bin {
+  const maxStroke = Math.max(8, (opts.maxFrac ?? 0.025) * Math.min(binIn.w, binIn.h))
+  // сначала целиком убираем залитые фигуры: от них не должно остаться каймы
+  const bin = removeBlobs(binIn, { maxStroke })
   const sw = strokeWidth(bin)
-  const med = medianStroke(bin, sw)
-  if (med <= 0) return bin
-  const lo = Math.max(1.5, med * (opts.minFrac ?? 0.5))
-  const hi = med * (opts.maxFrac ?? 3)
+  // Волосок в одну точку — это засечка или растровый шум. Пятно толще
+  // сороковой части кадра — это панель, плашка или чёрное поле снимка: стена
+  // на плане столько не занимает даже на крупном скане
+  const lo = opts.minPx ?? 2
+  const hi = maxStroke
   const ink = new Uint8Array(bin.ink.length)
   for (let i = 0; i < ink.length; i++) ink[i] = bin.ink[i] && sw[i] >= lo && sw[i] <= hi ? 1 : 0
   return { ink, w: bin.w, h: bin.h }
-}
-
-/**
- * Прямоугольник, в котором лежит сам план. Считается по плотности стеновых
- * линий: строим профили по столбцам и строкам и берём самый длинный участок,
- * где линий заметно больше, чем на полях. Так отсекаются поля листа, таблицы,
- * подписи под планом и панели приложения, если план сняли с экрана.
- * null — плотного участка не нашлось, план занимает весь кадр.
- */
-export function planBox(bin: Bin, pad = 6): PxRect | null {
-  const walls = keepWallStrokes(bin)
-  const { ink, w, h } = walls
-  const col = new Float32Array(w)
-  const row = new Float32Array(h)
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      if (!ink[y * w + x]) continue
-      col[x]++
-      row[y]++
-    }
-  }
-  // сглаживание: одиночная линия не должна выглядеть как край плана
-  const smooth = (a: Float32Array, k: number): Float32Array => {
-    const out = new Float32Array(a.length)
-    let sum = 0
-    for (let i = 0; i < a.length + k; i++) {
-      if (i < a.length) sum += a[i]
-      if (i >= k) sum -= a[i - k]
-      const at = i - Math.floor(k / 2)
-      if (at >= 0 && at < a.length) out[at] = sum / k
-    }
-    return out
-  }
-  // Полоса, занятая чертежом: там, где линии есть вовсе. На полях листа их
-  // ровно ноль, поэтому порог берётся низкий — лишь бы отсечь крапинки шума.
-  // Если полос несколько (план, а рядом панель или таблица), берётся та, где
-  // линий в сумме больше: у чертежа их куда больше, чем у рамки панели
-  const span = (a: Float32Array, k: number, other: number): [number, number] | null => {
-    const sm = smooth(a, Math.max(3, Math.round(k)))
-    const thr = Math.max(1, other * 0.01)
-    let best: { from: number; to: number; mass: number } | null = null
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-    let from = -1
-    let mass = 0
-    const close = (to: number) => {
-      if (from >= 0 && (!best || mass > best.mass)) best = { from, to, mass }
-      from = -1
-      mass = 0
-    }
-    for (let i = 0; i < sm.length; i++) {
-      if (sm[i] >= thr) {
-        if (from < 0) from = i
-        mass += sm[i]
-        // разрыв в поле шире процента кадра разделяет чертёж и соседнюю панель
-      } else if (from >= 0 && sm.slice(i, i + Math.max(3, Math.round(k))).every((v) => v < thr)) close(i - 1)
-    }
-    close(sm.length - 1)
-    const found = best as { from: number; to: number; mass: number } | null
-    return found ? [found.from, found.to] : null
-  }
-  const sx = span(col, w * 0.01, h)
-  const sy = span(row, h * 0.01, w)
-  if (!sx || !sy) return null
-  const box: PxRect = {
-    x1: Math.max(0, sx[0] - pad),
-    y1: Math.max(0, sy[0] - pad),
-    x2: Math.min(w - 1, sx[1] + pad),
-    y2: Math.min(h - 1, sy[1] + pad),
-  }
-  // план должен занимать заметную часть кадра, иначе это случайная полоса
-  const area = (box.x2 - box.x1 + 1) * (box.y2 - box.y1 + 1)
-  if (area < w * h * 0.1) return null
-  return box
 }
 
 export interface CleanResult {
@@ -302,23 +272,20 @@ export interface CleanResult {
   bin: Bin
   /** только стеновые линии: без подписей, выносок и заливок */
   walls: Bin
-  /** рамка самого плана: за ней поля листа, таблицы и панели приложения */
-  box: PxRect | null
 }
 
 /**
- * Полная очистка: выровнять фон, бинаризовать, убрать мелочь, оставить
- * стеновые линии и найти рамку плана. Картинка для показа остаётся прежней —
- * пользователь видит свой план, — а для поиска комнат берутся только стены.
+ * Полная очистка: выровнять фон, бинаризовать, убрать мелочь и отдельно
+ * выделить стеновые линии. Картинка для показа остаётся прежней — пользователь
+ * видит свой план, — а комнаты ищутся по линиям, похожим на стены.
  */
 export function cleanRaster(gray: Uint8Array, w: number, h: number): CleanResult {
   const flat = flattenBackground(gray, w, h)
   const bin = despeckle(binarize(flat, w, h))
   const walls = keepWallStrokes(bin)
-  const box = planBox(bin)
   const out = new Uint8Array(w * h)
   for (let i = 0; i < out.length; i++) out[i] = bin.ink[i] ? 0 : 255
-  return { gray: out, bin, walls, box }
+  return { gray: out, bin, walls }
 }
 
 // ---------- выравнивание ----------

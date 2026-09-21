@@ -240,7 +240,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   /** линии, найденные на подложке, в пикселях картинки; в план переводятся по текущему положению подложки */
   const [imageLinesPx, setImageLinesPx] = useState<Guide[]>([])
   /** очищенный растр подложки: считается один раз на картинку и служит обводке, комнате по клику и магниту */
-  const rasterRef = useRef<{ src: string; gray: Uint8Array; clean: CleanResult; d2: Float32Array | null } | null>(null)
+  const rasterRef = useRef<{ src: string; gray: Uint8Array; clean: CleanResult; d2: Float32Array | null; wallD2: Float32Array | null } | null>(null)
   const [tracing, setTracing] = useState(false)
   /** масштаб подложки задан руками — распознавание его не переопределяет */
   const [calibrated, setCalibrated] = useState(false)
@@ -748,7 +748,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     if (cur && cur.src === u.src) return cur
     const gray = await grayscaleOf(u)
     const clean = cleanRaster(gray, u.px.w, u.px.h)
-    const next = { src: u.src, gray, clean, d2: null }
+    const next = { src: u.src, gray, clean, d2: null, wallD2: null }
     rasterRef.current = next
     return next
   }
@@ -803,7 +803,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         if (!u) return null
         const r = await ensureRaster(u)
         if (!r.d2) r.d2 = distanceToInk(r.clean.bin)
-        return { w: u.px.w, h: u.px.h, scale: u.scale, ink: r.clean.bin.ink, walls: r.clean.walls.ink, box: r.clean.box, d2: r.d2 }
+        return { w: u.px.w, h: u.px.h, scale: u.scale, ink: r.clean.bin.ink, walls: r.clean.walls.ink, d2: r.d2 }
       },
       segmentRooms,
       segmentRoomsAuto,
@@ -909,9 +909,17 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const regionsOf = async (u: Underlay): Promise<RoomRegion[]> => {
     const r = await ensureRaster(u)
     if (!r.d2) r.d2 = distanceToInk(r.clean.bin)
+    // Комнаты ищем по одним стеновым линиям: подписи, выноски и панели
+    // приложения на скриншоте иначе дают «комнаты» на полях. Рамка плана
+    // отсекает всё, что лежит за чертежом
+    if (!r.wallD2) r.wallD2 = distanceToInk(r.clean.walls)
     // дверной проём до 90 см закрывается радиусом в полпроёма; точный радиус подбирается сам
     const closePx = Math.min(80, Math.max(3, Math.round(45 / u.scale)))
-    return segmentRoomsAuto(r.d2, u.px.w, u.px.h, closePx).regions
+    const byWalls = segmentRoomsAuto(r.wallD2, u.px.w, u.px.h, closePx).regions
+    // стеновые линии бывают прерывистыми: если по ним комнат нашлось меньше,
+    // чем по всей графике, берём прежний путь
+    const byAll = segmentRoomsAuto(r.d2, u.px.w, u.px.h, closePx).regions
+    return byWalls.length >= byAll.length ? byWalls : byAll
   }
 
   /** Комнаты с картинки без ИИ: сегментация даёт геометрию, имена — по номерам */

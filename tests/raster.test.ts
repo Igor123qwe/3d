@@ -1,20 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import {
-  applyH,
-  binarize,
-  boxBlur,
-  cleanRaster,
-  components,
-  despeckle,
-  distanceToInk,
-  dominantAngle,
-  flattenBackground,
-  floodRoom,
-  groundRoomBox,
-  homography,
-  segmentRooms,
-  orderCorners,
-} from '../src/planner/raster'
+import { applyH, binarize, boxBlur, cleanRaster, components, despeckle, distanceToInk, dominantAngle, flattenBackground, floodRoom, groundRoomBox, homography, keepWallStrokes, orderCorners, removeBlobs, segmentRooms, strokeWidth } from '../src/planner/raster'
 
 /** серый лист w × h с рисовалкой прямоугольников */
 function sheet(w: number, h: number, bg = 255) {
@@ -390,4 +375,40 @@ describe('Г-образная комната рядом с коридором', 
     // площадь комнаты — по заполнению, а не по рамке: без угла коридора
     expect(room.areaPx).toBeLessThan((room.x2 - room.x1) * (room.y2 - room.y1) * 0.95)
   })
+})
+
+describe('очистка до одних стен', () => {
+  /** лист: план из линий слева, залитая панель с текстом справа, подпись снизу */
+  function screen() {
+    const W = 600
+    const H = 500
+    const { g, rect } = sheet(W, H)
+    // план 40..300 × 40..300, стены 6 px, перегородка посередине
+    rect(40, 40, 300, 300)
+    rect(46, 46, 294, 294, 255)
+    rect(166, 46, 172, 294)
+    // панель приложения справа: сплошная заливка с «текстом» белым
+    rect(400, 0, 599, 499)
+    for (let r = 0; r < 8; r++) for (let c = 0; c < 10; c++) rect(420 + c * 16, 40 + r * 40, 428 + c * 16, 56 + r * 40, 255)
+    // подпись под планом: мелкие штрихи
+    for (let c = 0; c < 12; c++) rect(50 + c * 14, 330, 56 + c * 14, 342)
+    return { g, W, H }
+  }
+
+  it('толстая заливка панели уходит, линии плана остаются', () => {
+    const { g, W, H } = screen()
+    const bin = binarize(g, W, H)
+    const walls = keepWallStrokes(bin)
+    const inside = (x: number, y: number) => walls.ink[y * W + x] === 1
+    // стены плана на месте
+    expect(inside(42, 150)).toBe(true)
+    expect(inside(169, 150)).toBe(true)
+    // середина панели — нет
+    expect(inside(500, 250)).toBe(false)
+    // пикселей стало заметно меньше: панель была больше самого плана
+    const before = bin.ink.reduce((a, b) => a + b, 0)
+    const after = walls.ink.reduce((a, b) => a + b, 0)
+    expect(after).toBeLessThan(before * 0.5)
+  })
+
 })
