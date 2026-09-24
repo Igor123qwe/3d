@@ -22,7 +22,7 @@ import { buildRooms } from './rooms'
 import { bboxOf, closestOnSeg, dist, lerp, norm, pointInPoly, sub } from './geometry'
 import { canRebuildFrom, DEFAULT_RECONSTRUCT, pointOnSide, reconstructFromRooms, scaleSamplesFromRooms, type AreaFit } from './reconstruct'
 import { detectOpenings, pointOnOutline, wallsFromPicture } from './picture'
-import { fitToLabels, type SizeFix } from './fitlabels'
+import { fitToLabels, type SizeFix, type WallLabelsReport } from './fitlabels'
 import { evenWalls } from './rectify'
 import type { RoomRegion } from './raster'
 import { regionPoly, roomsFromRegions, type LabelDispute } from './segment'
@@ -96,6 +96,8 @@ export interface ConvertReport {
   quality: QualityReport
   /** ширина и глубина комнат, подогнанные под подписи: чертёж на бумаге не точно в масштабе */
   sizesFitted: SizeFix[]
+  /** подписи вдоль стен: сколько модель прочитала и какие не легли ни на одну грань */
+  wallLabels?: WallLabelsReport
   /** где лёг чертёж относительно картинки: для разбора, если он лёг мимо */
   placement: { walls: { minX: number; minY: number; maxX: number; maxY: number } | null; underlay: { minX: number; minY: number; maxX: number; maxY: number }; shifted: boolean }
   note?: string
@@ -629,17 +631,18 @@ export function fitResultToLabels(res: ConvertResult, labels: AiRoom[]): Convert
     return [{ name: m.name, axes: room.polygon, inner: room.inner, widthCm: label.widthCm, depthCm: label.depthCm, areaM2: label.areaM2, walls: label.walls }]
   })
   const fitted = fitToLabels(res.walls, labelled)
-  if (!fitted.fixes.length) return res
+  const noted = { ...res, report: { ...res.report, wallLabels: fitted.wallLabels } }
+  if (!fitted.fixes.length) return noted
   const rooms = res.rooms.map((m) => ({ ...m, anchor: fitted.map(m.anchor) }))
   // подгонка не должна ломать чертёж: каждая комната по-прежнему замкнута
   const { rooms: after } = buildRooms(emptyPlan(fitted.walls))
-  if (after.length < built.length || rooms.some((m) => !after.some((b) => pointInPoly(m.anchor, b.polygon)))) return res
+  if (after.length < built.length || rooms.some((m) => !after.some((b) => pointInPoly(m.anchor, b.polygon)))) return noted
   // Подгонка могла свести внутренние грани соседних кусков стены в одну —
   // тогда и вся стена одна. Размеры по подписям не трогаем: сводятся только
   // куски, чьи грани у комнат уже совпали до сантиметра
   const walls = evenWalls(fitted.walls, { faceTol: 1, innerTol: 1, shift: 0 })
   const ids = new Set(walls.map((w) => w.id))
-  return { ...res, walls, openings: res.openings.filter((o) => ids.has(o.wallId)), rooms, report: { ...res.report, sizesFitted: fitted.fixes } }
+  return { ...res, walls, openings: res.openings.filter((o) => ids.has(o.wallId)), rooms, report: { ...res.report, sizesFitted: fitted.fixes, wallLabels: fitted.wallLabels } }
 }
 
 /**

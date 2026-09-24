@@ -965,7 +965,26 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             const side = (r.x2 - r.x1) / Math.max(1, r.y2 - r.y1)
             const shape = r.poly && r.poly.length > 4 ? 'непрямоугольная, с уступами' : side >= 2 ? 'вытянута по горизонтали' : side <= 0.5 ? 'вытянута по вертикали' : 'близка к прямоугольнику'
             const hint = `На картинке она ${shape}.`
-            return await askRoomLabel(crop, hint)
+            const first = await askRoomLabel(crop, hint)
+            // Без размеров комната остаётся как на картинке: у 4ж «4,26» написано
+            // посреди комнаты, и дешёвая модель его пропускает, а у комнаты с
+            // нишами без размеров вдоль стен ниша и коридор не подгоняются.
+            // Переспросить следующую модель (она заточена под чтение
+            // документов) и взять у неё то, чего не хватило
+            const noSizes = !first.room.widthCm && !first.room.depthCm
+            const noWalls = shape.startsWith('непрямоугольная') && !first.room.walls?.length
+            if (!first.room.notRoom && (noSizes || noWalls)) {
+              const again = await askRoomLabel(crop, `${hint} Прочитай ширину, глубину и все размеры, подписанные вдоль её стен (walls).`, undefined, 1).catch(() => null)
+              if (again && !again.room.notRoom && (again.room.widthCm || again.room.depthCm || again.room.walls?.length)) {
+                const tried = [...(first.ai.tried ?? []), ...(again.ai.tried ?? [])]
+                return {
+                  // прочитанное первой моделью остаётся, недостающее — от второй
+                  room: { ...again.room, ...first.room, walls: first.room.walls?.length ? first.room.walls : again.room.walls },
+                  ai: { ...again.ai, costRub: first.ai.costRub + again.ai.costRub, tried },
+                }
+              }
+            }
+            return first
           } catch (e) {
             console.info('[ИИ] комната не прочиталась', (e as Error).message)
             return null
@@ -1532,6 +1551,18 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         const shown = fixes.filter((f) => f.axis !== 'wall' || !fixes.some((g) => g.axis !== 'wall' && g.name === f.name && g.fromCm === f.fromCm && g.toCm === f.toCm))
         const what = (f: (typeof fixes)[number]) => (f.axis === 'width' ? 'ширина' : f.axis === 'depth' ? 'глубина' : 'у стены')
         lines.push(`Размеры — по подписям плана: ${shown.slice(0, 10).map((f) => `${f.name} ${what(f)} ${f.fromCm} → ${f.toCm}`).join(', ')}${shown.length > 10 ? '…' : ''} см. «Размеры как на картинке» оставит стены по линиям фото.`)
+      }
+      // подписи вдоль стен: без них ниши, уступы и коридор остаются как на картинке
+      const wl = fitted.report.wallLabels
+      if (wl) {
+        const cm = (v: number) => fmtNum(v / 100)
+        lines.push(
+          !wl.read
+            ? 'Размеры вдоль стен (0,26, 1,29, 2,77…) модель не прочитала — ниши и уступы остались как на картинке. Нажмите «Распознать с ИИ» ещё раз или пришлите отчёт.'
+            : wl.unmatched.length
+              ? `Размеры вдоль стен: прочитано ${wl.read}, не нашли своей стены ${wl.unmatched.length} — ${wl.unmatched.slice(0, 8).map((u) => `${u.name} ${cm(u.cm)}`).join(', ')}${wl.unmatched.length > 8 ? '…' : ''}: на картинке такой грани нет или она сильно другой длины.`
+              : `Размеры вдоль стен: прочитано ${wl.read}, все легли на свои стены.`,
+        )
       }
       if (q.openings.expected) {
         const pic = r.openingsFromPicture

@@ -238,10 +238,17 @@ function edgeCandidates(inner: Pt[], label: WallLabel, relaxed = false): { lo: n
  * Возвращает новые стены, отображение точек (для подписей комнат) и что
  * поменялось.
  */
-export function fitToLabels(walls: Wall[], rooms: LabelledRoom[]): { walls: Wall[]; map: (p: Pt) => Pt; fixes: SizeFix[] } {
+/** что вышло с подписями вдоль стен: сколько прочитано и какие не нашли своей грани */
+export interface WallLabelsReport {
+  read: number
+  unmatched: { name: string; side: WallLabel['side']; cm: number }[]
+}
+
+export function fitToLabels(walls: Wall[], rooms: LabelledRoom[]): { walls: Wall[]; map: (p: Pt) => Pt; fixes: SizeFix[]; wallLabels: WallLabelsReport } {
   const xs: AxisSpan[] = []
   const ys: AxisSpan[] = []
   const fixes: SizeFix[] = []
+  const wallLabels: WallLabelsReport = { read: 0, unmatched: [] }
   // где мерить подпись вдоль стены после подгонки
   const edges = new Map<SizeFix, { lo: number; hi: number; alongX: boolean }>()
   const fits = (have: number, want: number) => Math.abs(have - want) <= Math.max(12, 0.06 * want)
@@ -300,9 +307,13 @@ export function fitToLabels(walls: Wall[], rooms: LabelledRoom[]): { walls: Wall
       fixes.push(fix)
       edges.set(fix, { lo: e.lo, hi: e.hi, alongX })
     }
+    wallLabels.read += (r.walls ?? []).length
+    ;(r.walls ?? []).forEach((label, k) => {
+      if (!usedLabel.has(k)) wallLabels.unmatched.push({ name: r.name, side: label.side, cm: label.cm })
+    })
   }
   const same = (p: Pt) => p
-  if (!fixes.some((f) => Math.abs(f.fromCm - f.toCm) >= 2)) return { walls, map: same, fixes: [] }
+  if (!fixes.some((f) => Math.abs(f.fromCm - f.toCm) >= 2)) return { walls, map: same, fixes: [], wallLabels }
   // узлы — грани стен и концы стен: у вертикальной стены грани по x, у горизонтальной — по y
   const vertical = (w: Wall) => Math.abs(w.a.x - w.b.x) < 0.5
   const horizontal = (w: Wall) => Math.abs(w.a.y - w.b.y) < 0.5
@@ -339,5 +350,5 @@ export function fitToLabels(walls: Wall[], rooms: LabelledRoom[]): { walls: Wall
   }
   // в отчёт — только то, что сдвинулось
   const changed = fixes.filter((f) => f.fromCm !== f.toCm)
-  return { walls: moved, map, fixes: changed }
+  return { walls: moved, map, fixes: changed, wallLabels }
 }
