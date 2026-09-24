@@ -1467,6 +1467,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       }
       const measured = q.dims.filter((d) => d.gotCm !== null)
       if (measured.length) lines.push(`Размеры: ${measured.slice(0, 6).map((d) => `${d.cm} → ${Math.round(d.gotCm!)} (${d.gotCm! - d.cm >= 0 ? '+' : ''}${Math.round(d.gotCm! - d.cm)} см)`).join(', ')}${measured.length > 6 ? '…' : ''}.`)
+      const fitted = r.sizesFitted.filter((f) => Math.abs(f.toCm - f.fromCm) >= 2)
+      if (fitted.length) lines.push(`Размеры по подписям: чертёж на бумаге нарисован не точно в масштабе, стены сдвинуты, чтобы сошлись подписи — ${fitted.map((f) => `${f.name} ${f.axis === 'width' ? 'ширина' : 'глубина'} ${f.fromCm} → ${f.toCm}`).join(', ')} см.`)
       if (q.openings.expected) {
         const pic = r.openingsFromPicture
         lines.push(`Проёмы: ${q.openings.placed} из ${q.openings.expected} встали на стены${pic ? ` — ${pic} найдено по самой картинке, ${q.openings.placed - pic} назвала модель` : ''}.`)

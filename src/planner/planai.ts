@@ -22,6 +22,7 @@ import { buildRooms } from './rooms'
 import { bboxOf, closestOnSeg, dist, lerp, norm, pointInPoly, sub } from './geometry'
 import { canRebuildFrom, DEFAULT_RECONSTRUCT, pointOnSide, reconstructFromRooms, scaleSamplesFromRooms, type AreaFit } from './reconstruct'
 import { detectOpenings, pointOnOutline, wallsFromPicture } from './picture'
+import { fitToLabels, type SizeFix } from './fitlabels'
 import type { RoomRegion } from './raster'
 import { regionPoly, roomsFromRegions, type LabelDispute } from './segment'
 import { assessQuality, type QualityReport, type RasterInfo } from './quality'
@@ -92,6 +93,8 @@ export interface ConvertReport {
   segmented: { regions: number; matched: number; unmatched: string[] } | null
   /** проверка по картинке и числам: полнота, стены, формы, размеры, проёмы */
   quality: QualityReport
+  /** ширина и глубина комнат, подогнанные под подписи: чертёж на бумаге не точно в масштабе */
+  sizesFitted: SizeFix[]
   /** где лёг чертёж относительно картинки: для разбора, если он лёг мимо */
   placement: { walls: { minX: number; minY: number; maxX: number; maxY: number } | null; underlay: { minX: number; minY: number; maxX: number; maxY: number }; shifted: boolean }
   note?: string
@@ -522,6 +525,28 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
     }
   }
 
+  // 6б. Размеры по подписям. Чертёж БТИ нарисован не точно в масштабе: у
+  //     каждой комнаты свой масштаб, и один на весь лист даёт одним +12 см,
+  //     другим −7. Подпись — обмер: оси стен сдвигаются так, чтобы ширина и
+  //     глубина подписанных комнат сошлись с числами. Проёмы держатся за стены
+  //     долей длины и едут вместе с ними
+  let sizesFitted: SizeFix[] = []
+  if (bySegments && byNumbers && rebuilt) {
+    const { rooms: built } = buildRooms(emptyPlan(walls))
+    const labelled = metas.flatMap((m) => {
+      const label = rooms.find((r) => r.name === m.name)
+      const room = built.find((b) => pointInPoly(m.anchor, b.polygon))
+      if (!label || !room) return []
+      return [{ name: m.name, axes: room.polygon, inner: room.inner, widthCm: label.widthCm, depthCm: label.depthCm }]
+    })
+    const fitted = fitToLabels(walls, labelled)
+    if (fitted.fixes.length) {
+      walls = fitted.walls
+      for (const m of metas) m.anchor = fitted.map(m.anchor)
+      sizesFitted = fitted.fixes
+    }
+  }
+
   // 7. проверка по картинке и числам: полнота, стены, формы, размеры, проёмы
   const lost = new Map<string, string>()
   if (segmented) for (const n of segmented.unmatched) lost.set(n, 'на картинке не нашлось такой области')
@@ -566,6 +591,7 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
       grounded,
       segmented,
       quality,
+      sizesFitted,
       placement: { walls: wBox ? bboxOf(walls.flatMap((w) => [w.a, w.b])) : null, underlay: uRect, shifted },
       note: shifted ? `${ai.note ? `${ai.note} ` : ''}Чертёж лёг мимо картинки и был сдвинут на неё — координаты в ответе модели подозрительны, пришлите отчёт разработчику.` : ai.note,
     },
