@@ -47,12 +47,18 @@ export interface ConvertOptions {
   weldCm?: number
   /** до скольких градусов отклонения стена считается осевой */
   axisTolDeg?: number
+  /**
+   * Подогнать оси стен под подписанные ширину и глубину комнат. По умолчанию
+   * нет: геометрия — с картинки (снимок под углом выпрямляется до
+   * распознавания); подгонка — по просьбе пользователя
+   */
+  fitLabels?: boolean
 }
 
 /** настройки со значениями по умолчанию; привязка к картинке — необязательная */
 type ConvertSettings = Required<Omit<ConvertOptions, 'ground' | 'regions' | 'raster'>> & Pick<ConvertOptions, 'ground' | 'regions' | 'raster'>
 
-export const DEFAULT_CONVERT: ConvertSettings = { keepScale: false, weldCm: 12, axisTolDeg: 6 }
+export const DEFAULT_CONVERT: ConvertSettings = { keepScale: false, weldCm: 12, axisTolDeg: 6, fitLabels: false }
 
 export type ScaleSource = 'размерные цепочки' | 'размеры комнат' | 'размеры на плане' | 'площади комнат' | 'прежняя калибровка'
 
@@ -531,7 +537,7 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
   //     глубина подписанных комнат сошлись с числами. Проёмы держатся за стены
   //     долей длины и едут вместе с ними
   let sizesFitted: SizeFix[] = []
-  if (bySegments && byNumbers && rebuilt) {
+  if (o.fitLabels && bySegments && byNumbers && rebuilt) {
     const { rooms: built } = buildRooms(emptyPlan(walls))
     const labelled = metas.flatMap((m) => {
       const label = rooms.find((r) => r.name === m.name)

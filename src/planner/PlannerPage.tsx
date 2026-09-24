@@ -40,10 +40,11 @@ import { getTelegramWebApp } from '../telegram'
 import { guessType, modelRefFromAsset, modelRefFromUrl, phAssets, phCategories, phDimsCm, phInfo, phPage, type PhAsset } from './polyhaven'
 import { decodePlan, parseHash, planShareUrl } from './share'
 import { DEFAULT_TRACE, calibrate, detectWalls, grayscaleOf, joinCorners, loadUnderlayImage, makeUnderlay, mergeCollinear, nameFromFile, planFromImage, toPixel, toPlan, tracePlan, type LoadedImage, type TraceOptions } from './underlay'
-import { cleanRaster, distanceToInk, dominantAngle, floodRoom, grayToImage, groundRoomBox, hatchedStrips, rotateImage, segmentRooms, segmentRoomsAuto, textHeight, warpToRect, withoutLooseText, type CleanResult, type RoomRegion } from './raster'
+import { applyH, cleanRaster, distanceToInk, dominantAngle, floodRoom, grayToImage, groundRoomBox, hatchedStrips, perspectiveQuad, rectTarget, rotateImage, segmentRooms, segmentRoomsAuto, textHeight, warpToRect, withoutLooseText, type CleanResult, type RoomRegion } from './raster'
 import type { Guide } from './snapping'
 import { aiStatus, askLayout, askRoomLabel, askSpot, cropForVision, lookupProductViaServer, recognizePlan, type AiStatus } from './ai'
 import { applyAiPlan, convertAiPlan, type ConvertResult } from './planai'
+import { rectifyWalls } from './rectify'
 import { pointOnSide } from './reconstruct'
 import { pointOnOutline } from './picture'
 import type { LabelDispute } from './segment'
@@ -883,9 +884,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
        * вручную эталона, а геометрию и оценку качества считает тот же код, что
        * и кнопка «Распознать с ИИ».
        */
-      runWithLabels: async (labels: unknown, opts: { apply?: boolean } = {}) => {
-        const u = plan.underlay
-        if (!u) return null
+      runWithLabels: async (labels: unknown, opts: { apply?: boolean; fitLabels?: boolean } = {}) => {
+        const u0 = plan.underlay
+        if (!u0) return null
+        const u = u0
+        const straight = await planStraighten(u)
         const ai = checkAiPlan(labels)
         const { regions, wu, r: raster } = await regionsOf(u)
         const ground = (box: AiBox, closeCm: number) => {
@@ -893,7 +896,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           const g = groundRoomBox(raster.d2!, wu.px.w, wu.px.h, box, closePx)
           return g ? { x1: g.x1, y1: g.y1, x2: g.x2, y2: g.y2 } : null
         }
-        const result = fromWork(convertAiPlan(ai, wu, { ground, regions, raster: { d2: raster.d2!, w: wu.px.w, h: wu.px.h } }), u)
+        const result = straightenResult(fromWork(convertAiPlan(ai, wu, { ground, regions, raster: { d2: raster.d2!, w: wu.px.w, h: wu.px.h }, fitLabels: opts.fitLabels }), u), straight)
         const { rooms } = buildRooms({ ...plan, walls: result.walls, openings: result.openings, rooms: result.rooms, furniture: [], dims: [] })
         // для снимков: чертёж как после «Распознать с ИИ»
         if (opts.apply) {
@@ -1081,16 +1084,18 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
 
   /** Комнаты с картинки без ИИ: сегментация даёт геометрию, имена — по номерам */
   const roomsFromPicture = async () => {
-    const u = plan.underlay
-    if (!u || tracing) return
+    const u0 = plan.underlay
+    if (!u0 || tracing) return
     setTracing(true)
     try {
+      const u = u0
+      const straight = await planStraighten(u).catch(() => null)
       const { regions, wu, r } = await regionsOf(u)
       if (regions.length < 2) {
         setToast(regions.length ? 'На картинке нашлась только одна замкнутая область — попробуйте «Очистить» фото или «Комната по клику»' : 'Замкнутых комнат на картинке не нашлось: линии стен прерываются. Попробуйте «Очистить» или «Комната по клику»')
         return
       }
-      const result = fromWork(convertAiPlan({ walls: [], openings: [], rooms: [], dimensions: [] }, wu, { keepScale: true, regions, raster: r.d2 ? { d2: r.d2, w: wu.px.w, h: wu.px.h } : null }), u)
+      const result = straightenResult(fromWork(convertAiPlan({ walls: [], openings: [], rooms: [], dimensions: [] }, wu, { keepScale: true, regions, raster: r.d2 ? { d2: r.d2, w: wu.px.w, h: wu.px.h } : null }), u), straight)
       if (!result.walls.length) {
         setToast('Комнаты нашлись, но стены из них не собрались — проверьте картинку')
         return
@@ -1111,6 +1116,47 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       setToast((err as Error).message)
     } finally {
       setTracing(false)
+    }
+  }
+
+  /**
+   * Снимок под углом. По линиям стен находятся точки схода; если прямые
+   * сходятся заметно (углы сдвинулись бы больше чем на полторы точки),
+   * картинка выпрямляется так же, как «По 4 углам». Разбор при этом идёт по
+   * исходному снимку — пересчёт картинки размывает тонкие черты дверей, — а
+   * выпрямляется готовый чертёж (straightenResult)
+   */
+  const planStraighten = async (u: Underlay): Promise<{ img: LoadedImage; original?: string; forward: number[] } | null> => {
+    const r = await ensureRaster(u)
+    const quad = perspectiveQuad(r.clean.walls, textHeight(r.clean.marks))
+    if (!quad) return null
+    const img = await warpToRect(u.src, quad)
+    const original = u.original ? (await warpToRect(u.original, quad)).src : undefined
+    return { img, original, forward: rectTarget(quad).forward }
+  }
+
+  /**
+   * Готовый чертёж — на выпрямленную картинку: концы стен и подписи комнат
+   * переводятся тем же преобразованием, стены ложатся строго по осям, а
+   * почти соосные сводятся на одну прямую — верхняя стена, которую каждая
+   * комната видела на своей высоте, становится одной. Проёмы держатся за стены
+   */
+  const straightenResult = (res: ConvertResult, st: { img: LoadedImage; original?: string; forward: number[] } | null): ConvertResult => {
+    if (!st) return res
+    const from = res.underlay
+    const s = from.scale
+    const cx = from.x + (from.px.w * s) / 2
+    const cy = from.y + (from.px.h * s) / 2
+    const to: Underlay = { ...from, src: st.img.src, original: st.original ?? from.original, px: { w: st.img.w, h: st.img.h }, x: cx - (st.img.w * s) / 2, y: cy - (st.img.h * s) / 2 }
+    const map = (p: Pt) => toPlan(to, applyH(st.forward, toPixel(from, p)))
+    const walls = rectifyWalls(res.walls, map)
+    const ids = new Set(walls.map((w) => w.id))
+    return {
+      ...res,
+      walls,
+      openings: res.openings.filter((o) => ids.has(o.wallId)),
+      rooms: res.rooms.map((m) => ({ ...m, anchor: map(m.anchor) })),
+      underlay: to,
     }
   }
 
@@ -1357,10 +1403,13 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
 
   /** Прочитать подложку моделью: стены, проёмы, названия комнат и масштаб разом */
   const recognizeWithAi = async () => {
-    const u = plan.underlay
-    if (!u || aiBusy) return
+    const u0 = plan.underlay
+    if (!u0 || aiBusy) return
     setAiBusy('Читаю план…')
     try {
+      const u = u0
+      // снимок под углом: выпрямится готовый чертёж вместе с подложкой
+      const straight = await planStraighten(u).catch(() => null)
       // комнаты с картинки: геометрия с растра, от модели — подписи. Крупную
       // картинку разбираем уменьшенной копией wu, результат — обратно на подложку
       const work = await regionsOf(u).catch(() => null)
@@ -1376,7 +1425,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           }
         : undefined
       const rasterInfo = d2 ? { d2, w: wu.px.w, h: wu.px.h } : null
-      const convert = (p: AiPlan) => fromWork(convertAiPlan(p, wu, { keepScale: calibrated, ground, regions, raster: rasterInfo }), u)
+      const convert = (p: AiPlan, fitLabels = false) => fromWork(convertAiPlan(p, wu, { keepScale: calibrated, ground, regions, raster: rasterInfo, fitLabels }), u)
       // подписи модель читает по исходному фото: очистка стирает цифры вместе с засечками
       const photo = u.original ?? u.src
       // Комнаты уже найдены по картинке — значит модели можно показывать их по
@@ -1439,7 +1488,13 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       }
       const r = result.report
       const q = r.quality
+      // Подгонка под подписи — по желанию: геометрия с картинки, подписи — обмер.
+      // Вариант с подгонкой считается сразу, чтобы показать, что он поменяет
+      const fitted = r.method === 'по комнатам с картинки' ? straightenResult(convert(read, true), straight) : null
+      result = straightenResult(result, straight)
+      const fixes = fitted ? fitted.report.sizesFitted.filter((f) => Math.abs(f.toCm - f.fromCm) >= 3) : []
       const lines: string[] = []
+      if (straight) lines.push('Фото снято под углом: чертёж и подложка выпрямлены по линиям стен, почти соосные стены сведены на одну прямую.')
       lines.push(
         r.method === 'по комнатам с картинки'
           ? `Комнаты взяты с картинки (найдено ${r.segmented?.regions ?? 0}), подписи от модели легли ${r.segmented?.matched ?? 0} из ${read.rooms.length}. Стен ${r.walls}, комнат ${r.rooms}.`
@@ -1467,8 +1522,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       }
       const measured = q.dims.filter((d) => d.gotCm !== null)
       if (measured.length) lines.push(`Размеры: ${measured.slice(0, 6).map((d) => `${d.cm} → ${Math.round(d.gotCm!)} (${d.gotCm! - d.cm >= 0 ? '+' : ''}${Math.round(d.gotCm! - d.cm)} см)`).join(', ')}${measured.length > 6 ? '…' : ''}.`)
-      const fitted = r.sizesFitted.filter((f) => Math.abs(f.toCm - f.fromCm) >= 2)
-      if (fitted.length) lines.push(`Размеры по подписям: чертёж на бумаге нарисован не точно в масштабе, стены сдвинуты, чтобы сошлись подписи — ${fitted.map((f) => `${f.name} ${f.axis === 'width' ? 'ширина' : 'глубина'} ${f.fromCm} → ${f.toCm}`).join(', ')} см.`)
+      if (fixes.length) lines.push(`Размеры по картинке и по подписям расходятся: ${fixes.map((f) => `${f.name} ${f.axis === 'width' ? 'ширина' : 'глубина'} ${f.fromCm} вместо ${f.toCm}`).join(', ')} см. Стены стоят по картинке; «Подогнать под подписи» сдвинет их под числа.`)
       if (q.openings.expected) {
         const pic = r.openingsFromPicture
         lines.push(`Проёмы: ${q.openings.placed} из ${q.openings.expected} встали на стены${pic ? ` — ${pic} найдено по самой картинке, ${q.openings.placed - pic} назвала модель` : ''}.`)
@@ -1497,6 +1551,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         text: lines.join('\n'),
         options: [
           { key: 'apply', label: 'Заменить чертёж распознанным', hint: 'прежний вернёт Ctrl+Z', icon: 'check', primary: true },
+          ...(fitted && fixes.length ? [{ key: 'fit', label: 'Подогнать под подписи и заменить', hint: 'стены сдвинутся под размеры с плана', icon: 'check' as const }] : []),
           { key: 'copy', label: 'Скопировать отчёт распознавания', hint: 'ответ модели и разбор — чтобы прислать разработчику', icon: 'clipboard' },
         ],
         onPick: (key) => {
@@ -1509,8 +1564,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           }
           setAsk(null)
           let lost = 0
+          const chosen = key === 'fit' && fitted ? fitted : result
           history.apply((prev) => {
-            const done = applyAiPlan(prev, result)
+            const done = applyAiPlan(prev, chosen)
             lost = done.furnitureDropped
             return done.plan
           })

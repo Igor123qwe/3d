@@ -715,24 +715,285 @@ export function orderCorners(pts: Pt[]): Pt[] {
   return [0, 1, 2, 3].map((i) => sorted[(start + i) % 4])
 }
 
+/** прямая стены на картинке: точки концов и вес — длина */
+export interface WallLine {
+  a: Pt
+  b: Pt
+  len: number
+}
+
+/**
+ * Прямые стен с картинки: почти горизонтальные и почти вертикальные. Точки
+ * стены, лежащие на длинном прогоне своего направления, связываются по восьми
+ * соседям (наклонная линия идёт ступеньками); к каждому куску длиной от minLen
+ * прямая подбирается по средней точке каждого столбца (строки) — толщина
+ * линии и примыкающие стены на неё не влияют.
+ */
+export function wallLines(walls: Bin, minRun: number, minLen: number): { horizontal: WallLine[]; vertical: WallLine[] } {
+  const { ink, w, h } = walls
+  const out = { horizontal: [] as WallLine[], vertical: [] as WallLine[] }
+  for (const dir of [0, 1]) {
+    const on = new Uint8Array(w * h)
+    eachRun(ink, w, h, dir, (pts) => {
+      if (pts.length >= minRun) for (const i of pts) on[i] = 1
+    })
+    const seen = new Uint8Array(w * h)
+    const stack: number[] = []
+    for (let s = 0; s < on.length; s++) {
+      if (!on[s] || seen[s]) continue
+      const pix: number[] = []
+      stack.push(s)
+      seen[s] = 1
+      while (stack.length) {
+        const i = stack.pop()!
+        pix.push(i)
+        const x = i % w
+        const y = (i - x) / w
+        for (let dy = -1; dy <= 1; dy++)
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = x + dx
+            const ny = y + dy
+            if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
+            const j = ny * w + nx
+            if (on[j] && !seen[j]) (seen[j] = 1), stack.push(j)
+          }
+      }
+      // вдоль прямой — u, поперёк — v: для горизонтальной u = x, v = y
+      const sum = new Map<number, [number, number]>()
+      for (const i of pix) {
+        const x = i % w
+        const y = (i - x) / w
+        const u = dir === 0 ? x : y
+        const v = dir === 0 ? y : x
+        const acc = sum.get(u) ?? [0, 0]
+        acc[0] += v
+        acc[1]++
+        sum.set(u, acc)
+      }
+      if (sum.size < minLen) continue
+      const us = [...sum.keys()]
+      const vs = us.map((u) => sum.get(u)![0] / sum.get(u)![1])
+      const n = us.length
+      const mu = us.reduce((a, b) => a + b, 0) / n
+      const mv = vs.reduce((a, b) => a + b, 0) / n
+      let suu = 0
+      let suv = 0
+      for (let k = 0; k < n; k++) (suu += (us[k] - mu) ** 2), (suv += (us[k] - mu) * (vs[k] - mv))
+      if (suu <= 0) continue
+      const m = suv / suu
+      // наклон больше 5° — это не стена своего направления
+      if (Math.abs(m) > 0.09) continue
+      let rss = 0
+      for (let k = 0; k < n; k++) rss += (vs[k] - (mv + m * (us[k] - mu))) ** 2
+      if (Math.sqrt(rss / n) > 1.5) continue
+      const u1 = Math.min(...us)
+      const u2 = Math.max(...us)
+      const p = (u: number): Pt => (dir === 0 ? { x: u, y: mv + m * (u - mu) } : { x: mv + m * (u - mu), y: u })
+      ;(dir === 0 ? out.horizontal : out.vertical).push({ a: p(u1), b: p(u2), len: u2 - u1 })
+    }
+  }
+  return out
+}
+
+/** собственный вектор симметричной 3×3 при наименьшем собственном числе (вращения Якоби) */
+function smallestEigen(A: number[][]): number[] {
+  const a = A.map((r) => [...r])
+  const V = [
+    [1, 0, 0],
+    [0, 1, 0],
+    [0, 0, 1],
+  ]
+  for (let sweep = 0; sweep < 50; sweep++) {
+    let off = 0
+    for (let p = 0; p < 3; p++) for (let q = p + 1; q < 3; q++) off += a[p][q] ** 2
+    if (off < 1e-20) break
+    for (let p = 0; p < 3; p++)
+      for (let q = p + 1; q < 3; q++) {
+        if (Math.abs(a[p][q]) < 1e-30) continue
+        const theta = (a[q][q] - a[p][p]) / (2 * a[p][q])
+        const t = Math.sign(theta || 1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1))
+        const c = 1 / Math.sqrt(t * t + 1)
+        const s = t * c
+        for (let k = 0; k < 3; k++) {
+          const akp = a[k][p]
+          const akq = a[k][q]
+          a[k][p] = c * akp - s * akq
+          a[k][q] = s * akp + c * akq
+        }
+        for (let k = 0; k < 3; k++) {
+          const apk = a[p][k]
+          const aqk = a[q][k]
+          a[p][k] = c * apk - s * aqk
+          a[q][k] = s * apk + c * aqk
+        }
+        for (let k = 0; k < 3; k++) {
+          const vkp = V[k][p]
+          const vkq = V[k][q]
+          V[k][p] = c * vkp - s * vkq
+          V[k][q] = s * vkp + c * vkq
+        }
+      }
+  }
+  let best = 0
+  for (let k = 1; k < 3; k++) if (a[k][k] < a[best][best]) best = k
+  return [V[0][best], V[1][best], V[2][best]]
+}
+
+function inverse3(m: number[][]): number[][] | null {
+  const [[a, b, c], [d, e, f], [g, h, i]] = m
+  const A = e * i - f * h
+  const B = -(d * i - f * g)
+  const C = d * h - e * g
+  const det = a * A + b * B + c * C
+  if (Math.abs(det) < 1e-12) return null
+  return [
+    [A / det, -(b * i - c * h) / det, (b * f - c * e) / det],
+    [B / det, (a * i - c * g) / det, -(a * f - c * d) / det],
+    [C / det, -(a * h - b * g) / det, (a * e - b * d) / det],
+  ]
+}
+
+/**
+ * Перспектива снимка по самим стенам. Стены плана идут в двух
+ * перпендикулярных направлениях; на фото, снятом под углом, прямые каждого
+ * направления сходятся в свою точку схода (у плана пользователя верхняя
+ * стена поднималась к правому краю на 9 точек, нижняя шла ровно, и стены
+ * строились ступеньками, а размеры справа выходили на 3 % больше). Точка
+ * схода — та, к которой все прямые семейства ближе всего; преобразование
+ * отправляет обе точки на бесконечность вдоль осей. Возвращает четыре угла на
+ * исходной картинке, которые после выпрямления станут прямоугольником вокруг
+ * чертежа (для warpToRect), или null, если снимок и так ровный — углы
+ * сдвинулись бы меньше чем на полторы точки.
+ */
+export function perspectiveQuad(walls: Bin, text: number | null): Pt[] | null {
+  const { w, h } = walls
+  const minRun = text ? Math.round(1.15 * text) + 2 : 8
+  const minLen = Math.max(20, text ? 6 * text : 0.08 * Math.min(w, h))
+  const { horizontal, vertical } = wallLines(walls, minRun, minLen)
+  if (horizontal.length + vertical.length < 3) return null
+  // нормированные координаты: центр картинки — ноль, полстороны — единица
+  const cx = w / 2
+  const cy = h / 2
+  const s = Math.max(w, h) / 2
+  const norm = (p: Pt) => ({ x: (p.x - cx) / s, y: (p.y - cy) / s })
+  const vanishing = (lines: WallLine[], horizontalFamily: boolean): number[] => {
+    if (lines.length < 2) {
+      // одной прямой мало для точки схода: только наклон
+      const l = lines[0]
+      const m = l ? (horizontalFamily ? (l.b.y - l.a.y) / (l.b.x - l.a.x || 1) : (l.b.x - l.a.x) / (l.b.y - l.a.y || 1)) : 0
+      return horizontalFamily ? [1, m, 0] : [m, 1, 0]
+    }
+    const M = [
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+    ]
+    for (const l of lines) {
+      const a = norm(l.a)
+      const b = norm(l.b)
+      // прямая через две точки: (a, 1) × (b, 1)
+      let L = [a.y - b.y, b.x - a.x, a.x * b.y - a.y * b.x]
+      const k = Math.hypot(L[0], L[1]) || 1
+      L = L.map((v) => v / k)
+      const wgt = l.len / s
+      for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) M[i][j] += wgt * L[i] * L[j]
+    }
+    const v = smallestEigen(M)
+    // направление к точке схода — вдоль своей оси
+    const lead = horizontalFamily ? v[0] : v[1]
+    return lead ? v.map((x) => x / lead) : v
+  }
+  const vh = vanishing(horizontal, true)
+  const vv = vanishing(vertical, false)
+  const H = inverse3([
+    [vh[0], vv[0], 0],
+    [vh[1], vv[1], 0],
+    [vh[2], vv[2], 1],
+  ])
+  if (!H) return null
+  const Hinv = inverse3(H)
+  if (!Hinv) return null
+  const map = (p: Pt): Pt | null => {
+    const q = norm(p)
+    const X = H[0][0] * q.x + H[0][1] * q.y + H[0][2]
+    const Y = H[1][0] * q.x + H[1][1] * q.y + H[1][2]
+    const Z = H[2][0] * q.x + H[2][1] * q.y + H[2][2]
+    return Z > 1e-6 ? { x: X / Z, y: Y / Z } : null
+  }
+  const unmap = (p: Pt): Pt => {
+    const X = Hinv[0][0] * p.x + Hinv[0][1] * p.y + Hinv[0][2]
+    const Y = Hinv[1][0] * p.x + Hinv[1][1] * p.y + Hinv[1][2]
+    const Z = Hinv[2][0] * p.x + Hinv[2][1] * p.y + Hinv[2][2]
+    return { x: (X / Z) * s + cx, y: (Y / Z) * s + cy }
+  }
+  // рамка чертежа — по прямым стен
+  const ends = [...horizontal, ...vertical].flatMap((l) => [l.a, l.b])
+  const x1 = Math.min(...ends.map((p) => p.x))
+  const x2 = Math.max(...ends.map((p) => p.x))
+  const y1 = Math.min(...ends.map((p) => p.y))
+  const y2 = Math.max(...ends.map((p) => p.y))
+  const mapped = [
+    { x: x1, y: y1 },
+    { x: x2, y: y1 },
+    { x: x2, y: y2 },
+    { x: x1, y: y2 },
+  ].map(map)
+  if (mapped.some((p) => !p)) return null
+  const mx1 = Math.min(...mapped.map((p) => p!.x))
+  const mx2 = Math.max(...mapped.map((p) => p!.x))
+  const my1 = Math.min(...mapped.map((p) => p!.y))
+  const my2 = Math.max(...mapped.map((p) => p!.y))
+  const quad = [
+    { x: mx1, y: my1 },
+    { x: mx2, y: my1 },
+    { x: mx2, y: my2 },
+    { x: mx1, y: my2 },
+  ].map(unmap)
+  // выпрямлять нечего: четырёхугольник — почти прямоугольник по осям
+  const qx1 = Math.min(...quad.map((p) => p.x))
+  const qx2 = Math.max(...quad.map((p) => p.x))
+  const qy1 = Math.min(...quad.map((p) => p.y))
+  const qy2 = Math.max(...quad.map((p) => p.y))
+  const rect = [
+    { x: qx1, y: qy1 },
+    { x: qx2, y: qy1 },
+    { x: qx2, y: qy2 },
+    { x: qx1, y: qy2 },
+  ]
+  const dev = Math.max(...quad.map((p, k) => Math.max(Math.abs(p.x - rect[k].x), Math.abs(p.y - rect[k].y))))
+  if (!(dev >= 1.5) || dev > 0.15 * Math.max(w, h)) return null
+  return quad
+}
+
 /**
  * Выпрямить фото: четыре угла наружных стен (пиксели картинки) становятся
  * прямоугольником. Вокруг остаётся поле, чтобы не потерять размеры и подписи.
  */
-export async function warpToRect(src: string, cornersPx: Pt[], padFrac = 0.12): Promise<LoadedImage> {
-  const img = await loadImg(src)
+/**
+ * Куда встанут четыре угла при выпрямлении: прямоугольник со сторонами как
+ * средние стороны четырёхугольника и полем вокруг. forward — преобразование
+ * пикселей исходной картинки в пиксели выпрямленной
+ */
+export function rectTarget(cornersPx: Pt[], padFrac = 0.12): { outW: number; outH: number; src: Pt[]; dst: Pt[]; forward: number[] } {
   const [tl, tr, br, bl] = orderCorners(cornersPx)
   const W = Math.max(40, Math.round((Math.hypot(tr.x - tl.x, tr.y - tl.y) + Math.hypot(br.x - bl.x, br.y - bl.y)) / 2))
   const Hh = Math.max(40, Math.round((Math.hypot(bl.x - tl.x, bl.y - tl.y) + Math.hypot(br.x - tr.x, br.y - tr.y)) / 2))
   const pad = Math.round(Math.max(W, Hh) * padFrac)
-  const outW = W + pad * 2
-  const outH = Hh + pad * 2
   const dst = [
     { x: pad, y: pad },
     { x: pad + W, y: pad },
     { x: pad + W, y: pad + Hh },
     { x: pad, y: pad + Hh },
   ]
+  const src = [tl, tr, br, bl]
+  return { outW: W + pad * 2, outH: Hh + pad * 2, src, dst, forward: homography(src, dst) }
+}
+
+export async function warpToRect(src: string, cornersPx: Pt[], padFrac = 0.12): Promise<LoadedImage> {
+  const img = await loadImg(src)
+  const t = rectTarget(cornersPx, padFrac)
+  const { outW, outH, dst } = t
+  const [tl, tr, br, bl] = t.src
   const Hinv = homography(dst, [tl, tr, br, bl])
   const sw = img.naturalWidth
   const sh = img.naturalHeight

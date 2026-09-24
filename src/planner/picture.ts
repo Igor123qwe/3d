@@ -704,9 +704,15 @@ export function detectOpenings(polys: Pt[][], d2: Float32Array, w: number, h: nu
       } else spans.push({ rooms: [f.room, g.room], vertical: f.vertical, lo, hi, a, b })
     }
   })
-  for (const { rooms: pair, vertical, lo, hi, a, b } of spans) {
+  for (const { rooms: pair, vertical, lo, hi, a: a0, b: b0 } of spans) {
     const gap = hi - lo
-    if (b - a < minDoor) continue
+    if (b0 - a0 < minDoor) continue
+    // Профиль стены — с запасом в пять точек за концами общей грани: черта
+    // двери у самого угла (дверь 4ж–прихожая упирается в перегородку) на
+    // выпрямленном снимке уходит на точку-другую за конец грани
+    const ext = 5
+    const a = Math.max(0, a0 - ext)
+    const b = Math.min(vertical ? h : w, b0 + ext)
     const across: number[] = []
     for (let t = a; t < b; t++) {
       let n = 0
@@ -757,6 +763,11 @@ export function detectOpenings(polys: Pt[][], d2: Float32Array, w: number, h: nu
       if (prev && from - prev.to <= 2) (prev.to = to), (prev.peak = Math.max(prev.peak, peak))
       else ticks.push({ from, to, peak })
       k = m
+    }
+    // черта, упёртая в край запаса, — край поперечной стены, а не черта двери
+    for (let k = ticks.length - 1; k >= 0; k--) {
+      const t = ticks[k]
+      if ((t.from === 0 && a < a0) || (t.to === full.length && b > b0)) ticks.splice(k, 1)
     }
     const thin = Math.max(5, 0.6 * gap)
     for (let k = 0; k + 1 < ticks.length; k++) {
