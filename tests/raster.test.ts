@@ -457,6 +457,14 @@ describe('заштрихованная полоса — не комната', ()
     const regions = [room(10, 10, 110, 110), room(115, 10, 215, 110), room(220, 10, 315, 110), room(320, 5, 348, 115)]
     expect(hatchedStrips(regions, { ink, w: W, h: H })).toEqual([3])
   })
+
+  it('санузел в полкомнаты шириной на фото с фоновой сеткой — комната, а не шахта', () => {
+    const ink = new Uint8Array(W * H)
+    // сетка фона: каждая четвёртая строка и столбец — примерно та же плотность, что у штриховки
+    for (let y = 0; y < H; y += 4) for (let x = 0; x < W; x++) ink[y * W + x] = 1
+    const regions = [room(10, 10, 110, 110), room(115, 10, 215, 110), room(220, 10, 265, 75)]
+    expect(hatchedStrips(regions, { ink, w: W, h: H })).toEqual([])
+  })
 })
 
 describe('цифра, прилипшая к стене', () => {

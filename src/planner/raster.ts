@@ -421,29 +421,28 @@ export function dropSpurs(bin: Bin, minRun: number): Bin {
 export function keepLongRuns(bin: Bin, minRun: number): Bin {
   const { ink, w, h } = bin
   const keep = new Uint8Array(ink.length)
-  const scan = (x0: number, y0: number, dx: number, dy: number) => {
-    let x = x0
-    let y = y0
-    let from = -1
-    let len = 0
-    const flush = () => {
-      if (len >= minRun) for (let k = 0; k < len; k++) keep[(y0 + (from + k) * dy) * w + (x0 + (from + k) * dx)] = 1
-      len = 0
-    }
-    for (let t = 0; x >= 0 && y >= 0 && x < w && y < h; t++, x += dx, y += dy) {
-      if (ink[y * w + x]) {
-        if (!len) from = t
-        len++
-      } else flush()
-    }
-    flush()
-  }
-  for (let y = 0; y < h; y++) scan(0, y, 1, 0)
-  for (let x = 0; x < w; x++) scan(x, 0, 0, 1)
-  // диагонали: скошенная стена не должна пропасть вместе с цифрами
-  for (let x = 0; x < w; x++) (scan(x, 0, 1, 1), scan(x, 0, -1, 1))
-  for (let y = 1; y < h; y++) (scan(0, y, 1, 1), scan(w - 1, y, -1, 1))
-  for (let i = 0; i < ink.length; i++) keep[i] = keep[i] & ink[i]
+  // Косой прогон — стена, только если он тонкий: косая стена и штриховка —
+  // линии с бумагой по бокам. Жирная цифра, прижатая к стене («1,29» в нише
+  // прихожей), — сплошное пятно, и косых хорд длиной в стену в нём полно;
+  // поперёк такой хорды — всё пятно
+  const diag = [2, 3].map((d) => {
+    const m = new Uint16Array(w * h)
+    eachRun(ink, w, h, d, (pts) => {
+      for (const i of pts) m[i] = Math.min(65535, pts.length)
+    })
+    return m
+  })
+  const thinMax = Math.max(3, 0.5 * minRun)
+  for (let d = 0; d < RUN_DIRS.length; d++)
+    eachRun(ink, w, h, d, (pts) => {
+      if (pts.length < minRun) return
+      if (d >= 2) {
+        const across = diag[d === 2 ? 1 : 0]
+        const t = pts.map((i) => across[i]).sort((a, b) => a - b)[pts.length >> 1]
+        if (t > thinMax) return
+      }
+      for (const i of pts) keep[i] = 1
+    })
   return { ink: keep, w, h }
 }
 
@@ -1316,7 +1315,9 @@ export function hatchedStrips(regions: RoomRegion[], marks: Bin): number[] {
     const others = regions.filter((s) => s !== r).map(shortSide).sort((a, b) => a - b)
     const typical = others.length ? others[Math.floor(others.length / 2)] : Infinity
     const long = Math.max(r.x2 - r.x1, r.y2 - r.y1)
-    if (shortSide(r) < 0.5 * typical || long >= 2.5 * shortSide(r)) out.push(k)
+    // шахта — полоса в треть комнаты шириной или вытянутая; санузел в полкомнаты
+    // шириной на фото с фоновой сеткой бывает не светлее штриховки
+    if (shortSide(r) < 0.35 * typical || long >= 2.5 * shortSide(r)) out.push(k)
   })
   return out
 }
