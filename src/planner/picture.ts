@@ -329,8 +329,39 @@ export function fillDents(poly: Pt[], maxDepth: number, blocked: (x: number, y: 
       const along = horizontal ? 'x' : 'y'
       const dirP = Math.sign(a[c] - p0[c])
       const dirN = Math.sign(n1[c] - b[c])
-      if (dirP !== -dirN) continue
       const out = horizontal ? (b.x > a.x ? -1 : 1) : b.y > a.y ? 1 : -1
+      // Ступенька в углу: обе боковые идут в одну сторону, и сторона a–b —
+      // её площадка. Цифры «0,68», лежащие на стене ниши, не пускают рост
+      // области в угол, и остаётся вмятина в 7 см — по ней строилась
+      // лесенка. Площадка сдвигается наружу до уровня соседней стороны, если
+      // между ними нет стены (одна бумага и цифры): настоящий уступ ограничен
+      // стеновой линией и остаётся
+      if (dirP === dirN && dirP !== 0) {
+        // за подступенком грань идёт дальше в ту же сторону, что площадка, —
+        // иначе это бок выреза-корыта, его закрывает правило ниже
+        const step = Math.sign(b[along] - a[along])
+        const beyond = dirN === out ? pts[(i + 3) % n] : pts[(i - 2 + n) % n]
+        const from = dirN === out ? n1 : p0
+        const cont = dirN === out ? Math.sign(beyond[along] - from[along]) : Math.sign(from[along] - beyond[along])
+        if (cont !== step) continue
+        const rise = dirN === out ? Math.abs(n1[c] - b[c]) : Math.abs(a[c] - p0[c])
+        if (rise > maxDepth || edgeLen(a, b) > 2 * maxDepth) continue
+        const v = a[c] + out * rise
+        const lo = Math.min(a[along], b[along])
+        const hi = Math.max(a[along], b[along])
+        const c1 = out > 0 ? a[c] : v + 2
+        const c2 = out > 0 ? v - 2 : a[c]
+        let wall = false
+        for (let s = lo; s < hi && !wall; s++) for (let t = c1; t < c2 && !wall; t++) wall = horizontal ? blocked(s, t) : blocked(t, s)
+        if (wall) continue
+        const next = pts.map((p) => ({ ...p }))
+        next[i][c] = v
+        next[(i + 1) % n][c] = v
+        const tidied = tidy(next)
+        if (tidied.length >= 4 && polyArea(tidied) > 0 && Math.abs(polyArea(tidied)) >= Math.abs(polyArea(pts))) fill = tidied
+        continue
+      }
+      if (dirP !== -dirN) continue
       // вырез: боковая сторона уходит внутрь комнаты, дно выреза — сторона a–b
       if (dirP !== -out) continue
       const depth = Math.min(Math.abs(a[c] - p0[c]), Math.abs(n1[c] - b[c]))

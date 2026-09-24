@@ -415,6 +415,108 @@ export function dropSpurs(bin: Bin, minRun: number): Bin {
 }
 
 /**
+ * Выносные черты размеров — не стена. На плане БТИ у размера «1,29» от стены
+ * внутрь комнаты идёт тонкая черта: одним концом она держится за стену,
+ * другой висит в воздухе, а рядом стоит сама подпись. На крупном снимке
+ * черта длиннее порога отростков (1,15 высоты цифр) и оставалась стеной:
+ * делила нишу у входа, и ниша выходила 38 см вместо 0,68 со ступенькой.
+ * Убираем тонкую черту до 2,5 высоты цифр, если один её конец держится за
+ * стену, другой свободен, а вдоль неё — штрихи, что не стена (text: число
+ * размера, узнанное подписью или нет). Стенка, что
+ * держится за стены обоими концами (уступ 0,26), и черта без подписи рядом
+ * остаются.
+ */
+export function dropDimensionTicks(walls: Bin, labels: Uint8Array, text: number): Bin {
+  // labels — точки подписей или любых штрихов, что не стена
+  const { ink, w, h } = walls
+  const minRun = Math.round(1.15 * text) + 2
+  const maxLen = Math.round(2.5 * text)
+  const thin = Math.max(3, Math.round(0.25 * text))
+  const near = Math.max(2, Math.round(0.7 * text))
+  const len = [0, 1].map((d) => {
+    const m = new Uint16Array(w * h)
+    eachRun(ink, w, h, d, (pts) => {
+      for (const i of pts) m[i] = Math.min(65535, pts.length)
+    })
+    return m
+  })
+  const out = ink.slice()
+  for (const d of [0, 1]) {
+    const across = len[1 - d]
+    const inWall = (i: number) => across[i] >= minRun
+    // черта размера и стенка обычно заходят за поперечную стену на пару
+    // точек: конец держится за стену, если она пересекает черту у конца
+    const tol = Math.max(3, Math.round(0.6 * text))
+    eachRun(ink, w, h, d, (pts) => {
+      const walls = pts.map((i, k) => (inWall(i) ? k : -1)).filter((k) => k >= 0)
+      if (!walls.length) return
+      const first = walls[0]
+      const last = walls[walls.length - 1]
+      const atStart = first <= tol
+      const atEnd = pts.length - 1 - last <= tol
+      // держится за стену ровно одним концом, и стена только там
+      if (atStart === atEnd) return
+      if (atStart ? last > first + 2 * tol : first < last - 2 * tol) return
+      const own = atStart ? pts.slice(last + 1) : pts.slice(0, first)
+      // своя часть — не длиннее 2,5 высоты цифр
+      if (own.length < 3 || own.length > maxLen) return
+      // свободный конец висит в пустоте: у выносной черты там ничего нет, а
+      // стенка уступа 0,38 упирается в стенку 0,26 — пусть и короткую
+      const tip = atStart ? own.slice(-3) : own.slice(0, 3)
+      if (tip.some((i) => across[i] > thin)) return
+      // и вокруг кончика пусто на высоту цифр: у стенки уступа 0,26, чей угол
+      // съели цифры «0,26», рядом стенка 0,38, а черта в нише висит в воздухе
+      const end = atStart ? own[own.length - 1] : own[0]
+      const ex = end % w
+      const ey = (end - ex) / w
+      const ownSet = new Set(own)
+      const r = Math.round(text)
+      for (let y = Math.max(0, ey - r); y <= Math.min(h - 1, ey + r); y++)
+        for (let x = Math.max(0, ex - r); x <= Math.min(w - 1, ex + r); x++) {
+          const i = y * w + x
+          if (!ink[i] || ownSet.has(i)) continue
+          // толщина самой черты — не сосед
+          const offAxis = d === 0 ? Math.abs(y - ey) : Math.abs(x - ex)
+          const along = d === 0 ? x : y
+          const lo = d === 0 ? Math.min(...own.map((k) => k % w)) : Math.min(...own.map((k) => Math.floor(k / w)))
+          const hi = d === 0 ? Math.max(...own.map((k) => k % w)) : Math.max(...own.map((k) => Math.floor(k / w)))
+          if (offAxis <= thin && along >= lo - 1 && along <= hi + 1) continue
+          return
+        }
+      if (own.filter((i) => across[i] <= thin).length < 0.8 * own.length) return
+      // одиночная: стена на этом плане — две тонкие линии, у каждой рядом
+      // параллельный близнец; у выносной черты его нет
+      const [px, py] = d === 0 ? [0, 1] : [1, 0]
+      const twin = own.filter((i) => {
+        const x = i % w
+        const y = (i - x) / w
+        for (let k = 2; k <= near; k++)
+          for (const sgn of [-1, 1]) {
+            const nx = x + sgn * k * px
+            const ny = y + sgn * k * py
+            if (nx >= 0 && ny >= 0 && nx < w && ny < h && ink[ny * w + nx]) return true
+          }
+        return false
+      }).length
+      if (twin > 0.3 * own.length) return
+      // подпись вдоль черты
+      const xs = own.map((i) => i % w)
+      const ys = own.map((i) => Math.floor(i / w))
+      const x1 = Math.max(0, Math.min(...xs) - (d === 1 ? near : 0))
+      const x2 = Math.min(w - 1, Math.max(...xs) + (d === 1 ? near : 0))
+      const y1 = Math.max(0, Math.min(...ys) - (d === 0 ? near : 0))
+      const y2 = Math.min(h - 1, Math.max(...ys) + (d === 0 ? near : 0))
+      let n = 0
+      for (let y = y1; y <= y2; y++) for (let x = x1; x <= x2; x++) if (labels[y * w + x]) n++
+      // вдоль черты стоит число: штрихов не меньше, чем точек в самой черте
+      if (n < own.length) return
+      for (const i of own) out[i] = 0
+    })
+  }
+  return { ink: out, w, h }
+}
+
+/**
  * Оставить только длинные штрихи: точку, через которую проходит отрезок
  * чернил не короче minRun по горизонтали, вертикали или диагонали. Стена —
  * длинная линия; цифра размера, прилипшая к стене, — короткие штрихи, и
@@ -536,6 +638,13 @@ export function cleanRaster(gray: Uint8Array, w: number, h: number): CleanResult
   // подписи у стен вынимаем из стеновых линий целиком
   const labels = text ? textMask(bin, walls, text) : undefined
   if (labels) for (let i = 0; i < labels.length; i++) if (labels[i]) walls.ink[i] = 0
+  // рядом с выносной чертой — её число: подпись или просто штрихи, что не стена
+  // (повёрнутое «1,29» подписью узнаётся не всегда)
+  if (text) {
+    const notWall = new Uint8Array(w * h)
+    for (let i = 0; i < notWall.length; i++) notWall[i] = bin.ink[i] && !walls.ink[i] ? 1 : 0
+    walls.ink = dropDimensionTicks(walls, notWall, text).ink
+  }
   // Стена примыкает к стенам. Короткая тонкая черта, что стоит особняком
   // (размерная линия «1,29» в нише прихожей), — не стена. Край кадра в этом
   // не помощник: у плана, обрезанного по наружной стене, в крайнем столбце —
