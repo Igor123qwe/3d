@@ -135,6 +135,24 @@ describe('размеры по подписям', () => {
     expect(face('b', -1) - face('nb', -1)).toBeCloseTo(271, 0)
   })
 
+  it('глубина не прочитана — у прямоугольной комнаты она из площади: 17,1 / 4,01 = 4,26', () => {
+    const w = (id: string, ax: number, ay: number, bx: number, by: number): Wall => ({ id, a: { x: ax, y: ay }, b: { x: bx, y: by }, thickness: 10 })
+    const walls = [w('t', 0, 0, 411, 0), w('b', 0, 428, 411, 428), w('l', 0, 0, 0, 428), w('r', 411, 0, 411, 428)]
+    const inner = [
+      { x: 5, y: 5 },
+      { x: 406, y: 5 },
+      { x: 406, y: 423 },
+      { x: 5, y: 423 },
+    ]
+    const res = fitToLabels(walls, [{ name: '4ж', axes: [], inner, widthCm: 401, areaM2: 17.1 }])
+    const at = (id: string) => res.walls.find((x) => x.id === id)!
+    expect(at('b').a.y - at('t').a.y - 10).toBeCloseTo(426, 0)
+    // у комнаты не прямоугольной (закуток) площадь меньше рамки — так не считаем
+    const notched = [...inner.slice(0, 2), { x: 406, y: 350 }, { x: 330, y: 350 }, { x: 330, y: 423 }, { x: 5, y: 423 }]
+    const none = fitToLabels(walls, [{ name: '2', axes: [], inner: notched, widthCm: 401, areaM2: 16.2 }])
+    expect(none.fixes.some((f) => f.axis === 'depth')).toBe(false)
+  })
+
   it('подпись, что расходится с картинкой сильнее 6 %, — ошибка чтения: стены не двигаются', () => {
     const res = fitToLabels(walls, [room('4ж', 0, 410, 310), room('2', 410, 762, 342)])
     expect(res.fixes).toEqual([])

@@ -109,6 +109,8 @@ function score(ref, out) {
       const bad = w.shape === 'rect' ? fill < (w.shapeFill ?? 0.97) : fill > (w.shapeFill ?? 0.95)
       if (bad) shapeOff.push({ name: w.name, fill: +fill.toFixed(2), want: w.shape === 'rect' ? 'прямоугольная' : 'с вырезом' })
     }
+    // мелкие уступы площадь почти не меняют (выступ 0,64 × 0,13 — 0,08 м²): их видно по числу углов
+    if (w.minCorners && (got.corners ?? 0) < w.minCorners) shapeOff.push({ name: w.name, fill: got.corners ?? 0, want: `не меньше ${w.minCorners} углов — пропал уступ` })
   }
 
   const skip = new Set(exp.shapeIou?.skip ?? [])
@@ -226,7 +228,7 @@ async function main() {
           ...r.missing.map((n) => `нет комнаты ${n}`),
           ...r.extra.map((n) => `лишняя комната ${n}`),
           ...r.iouBad.map((s) => `форма ${s.name}: ${Math.round(s.iou * 100)} %`),
-          ...r.shapeOff.map((s) => `${s.name}: заполнение рамки ${s.fill}, ждали ${s.want}`),
+          ...r.shapeOff.map((s) => (s.want.includes('углов') ? `${s.name}: углов ${s.fill}, ждали ${s.want}` : `${s.name}: заполнение рамки ${s.fill}, ждали ${s.want}`)),
           ...r.areaBad.map((a) => `площадь ${a.name}: ${a.deltaM2} м² мимо`),
           ...r.sizeBad.map((s) => `${s.name}: ${s.deltaCm} см мимо`),
           ...r.unflagged.map((n) => `${n} закрыта на снимке, но отчёт не пометил её подпись спорной`),

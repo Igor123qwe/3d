@@ -167,6 +167,8 @@ export interface LabelledRoom {
   inner: Pt[]
   widthCm?: number
   depthCm?: number
+  /** площадь, подписанная на плане, м² */
+  areaM2?: number
   walls?: WallLabel[]
 }
 
@@ -253,13 +255,30 @@ export function fitToLabels(walls: Wall[], rooms: LabelledRoom[]): { walls: Wall
     const boxy = Math.abs(polyArea(r.inner)) >= 0.85 * haveW * haveD
     // и уже сошедшийся размер держим: иначе его растянут соседи. Комната без
     // годной подписи держит свой размер с картинки, но слабее подписи
-    if (r.widthCm && fits(haveW, r.widthCm)) {
-      xs.push({ lo: f.x1, hi: f.x2, want: r.widthCm })
-      fixes.push({ name: r.name, axis: 'width', fromCm: Math.round(haveW), toCm: r.widthCm })
+    // Размер не прочитан, а площадь есть: у прямоугольной комнаты он —
+    // площадь, делённая на другой размер (17,1 / 4,01 = 4,26). Берём, только
+    // если сходится с картинкой до 3 %, и слабее подписи: у кухни с закутком
+    // площадь меньше рамки, и так считать нельзя
+    let widthCm = r.widthCm
+    let depthCm = r.depthCm
+    let guessed: 'width' | 'depth' | null = null
+    if (r.areaM2 && Math.abs(polyArea(r.inner)) >= 0.97 * haveW * haveD) {
+      const near = (v: number, have: number) => Math.abs(v - have) <= Math.max(6, 0.03 * v)
+      if (!depthCm && widthCm && near((r.areaM2 * 1e4) / widthCm, haveD)) {
+        depthCm = Math.round((r.areaM2 * 1e4) / widthCm)
+        guessed = 'depth'
+      } else if (!widthCm && depthCm && near((r.areaM2 * 1e4) / depthCm, haveW)) {
+        widthCm = Math.round((r.areaM2 * 1e4) / depthCm)
+        guessed = 'width'
+      }
+    }
+    if (widthCm && fits(haveW, widthCm)) {
+      xs.push({ lo: f.x1, hi: f.x2, want: widthCm, weight: guessed === 'width' ? 0.5 : 1 })
+      fixes.push({ name: r.name, axis: 'width', fromCm: Math.round(haveW), toCm: widthCm })
     } else if (boxy) xs.push({ lo: f.x1, hi: f.x2, want: haveW, weight: 0.2 })
-    if (r.depthCm && fits(haveD, r.depthCm)) {
-      ys.push({ lo: f.y1, hi: f.y2, want: r.depthCm })
-      fixes.push({ name: r.name, axis: 'depth', fromCm: Math.round(haveD), toCm: r.depthCm })
+    if (depthCm && fits(haveD, depthCm)) {
+      ys.push({ lo: f.y1, hi: f.y2, want: depthCm, weight: guessed === 'depth' ? 0.5 : 1 })
+      fixes.push({ name: r.name, axis: 'depth', fromCm: Math.round(haveD), toCm: depthCm })
     } else if (boxy) ys.push({ lo: f.y1, hi: f.y2, want: haveD, weight: 0.2 })
     // Одна грань — одна подпись, и сначала самые уверенные пары: подпись 0,64
     // выступа не должна забрать грань закутка, которой ближе подпись 0,73

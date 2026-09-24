@@ -626,7 +626,7 @@ export function fitResultToLabels(res: ConvertResult, labels: AiRoom[]): Convert
     const label = labels.find((r) => r.name === m.name)
     const room = built.find((b) => pointInPoly(m.anchor, b.polygon))
     if (!label || !room) return []
-    return [{ name: m.name, axes: room.polygon, inner: room.inner, widthCm: label.widthCm, depthCm: label.depthCm, walls: label.walls }]
+    return [{ name: m.name, axes: room.polygon, inner: room.inner, widthCm: label.widthCm, depthCm: label.depthCm, areaM2: label.areaM2, walls: label.walls }]
   })
   const fitted = fitToLabels(res.walls, labelled)
   if (!fitted.fixes.length) return res

@@ -108,7 +108,10 @@ const asPlan = (walls: Wall[]): Plan => ({ version: 1, name: '', walls, openings
  *   совпали (не дальше innerTol), а наружные — не дальше maxStep: толщину
  *   намерило по-разному;
  * - или у наружной стены толщина та же (±6 см), а сдвиг оси не больше shift
- *   и 0,4 толщины: кусок стены съехал целиком.
+ *   и 0,4 толщины, и оба куска длиннее 1,5 м: кусок стены вдоль целой
+ *   комнаты съехал целиком;
+ * - или это короткий кусок у угла (до 40 см), что вобрал толщину
+ *   поперечной стены.
  * Настоящий уступ меняет одну внутреннюю грань (выступ 0,13 — толщину на
  * 13 см) или больше этого (ниша, закуток) и остаётся. Концы примыкающих стен
  * переезжают на новую ось; если что-то размыкается — стены не трогаются.
@@ -168,11 +171,16 @@ export function evenWalls(walls: Wall[], opts: { faceTol?: number; innerTol?: nu
       const tA = Math.abs(A.outer - A.inner)
       const tB = Math.abs(B.outer - B.inner)
       const measured = Math.abs(A.inner - B.inner) <= innerTol && Math.abs(A.outer - B.outer) <= maxStep
-      const slid = Math.abs(tA - tB) <= 6 && Math.abs((A.outer + A.inner) / 2 - (B.outer + B.inner) / 2) <= Math.min(maxShift, 0.4 * Math.max(tA, tB))
+      // съезжает целиком кусок стены вдоль всей комнаты; выступ 0,64 × 0,13
+      // на кухне сдвинут на те же 13 см, но короткий — он настоящий
+      const long = Math.min(A.hi - A.lo, B.hi - B.lo) >= 150
+      const slid = long && Math.abs(tA - tB) <= 6 && Math.abs((A.outer + A.inner) / 2 - (B.outer + B.inner) / 2) <= Math.min(maxShift, 0.4 * Math.max(tA, tB))
       // короткий кусок у угла вобрал толщину поперечной стены: грань к комнате
       // съехала на 12 см, и низ ниши 0,68 вышел двумя ступеньками (37 + 33)
-      const short = (P: Piece, t: number) => P.hi - P.lo <= Math.max(40, 1.2 * t)
-      const corner = maxShift > 0 && (short(A, tA) || short(B, tB)) && Math.abs(A.inner - B.inner) <= maxStep
+      // (не длиннее 40 см и заметно толще соседа; выступ на кухне той же
+      // толщины, что стена рядом, только сдвинут — он настоящий, даже короткий)
+      const short = (P: Piece) => P.hi - P.lo <= 40
+      const corner = maxShift > 0 && (short(A) || short(B)) && Math.abs(tA - tB) > 6 && Math.abs(A.inner - B.inner) <= maxStep
       if (!measured && !slid && !corner) continue
       parent[find(p)] = find(q)
     }
