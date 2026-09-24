@@ -121,8 +121,8 @@ export interface RoomLabelResult {
 }
 
 /** Прочитать подписи комнаты по её увеличенному куску плана */
-export const askRoomLabel = (image: string, hint?: string, signal?: AbortSignal): Promise<RoomLabelResult> =>
-  post<RoomLabelResult>('plan', { image, room: true, hint }, signal)
+export const askRoomLabel = (image: string, hint?: string, signal?: AbortSignal, escalate = 0): Promise<RoomLabelResult> =>
+  post<RoomLabelResult>('plan', { image, room: true, hint, escalate }, signal)
 
 // ---------- вопрос про одно место на плане ----------
 export interface SpotResult {

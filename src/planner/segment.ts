@@ -10,17 +10,72 @@ import type { AiRoom, AiSide } from './aicontract'
 import type { RoomRegion } from './raster'
 import { robustMedian } from './planai'
 
+/** подпись, которая не сходится с картинкой: скорее всего, модель прочитала её неверно */
+export interface LabelDispute {
+  room: string
+  field: 'area' | 'width' | 'depth'
+  /** что прочитала модель: м² для площади, см для размеров */
+  label: number
+  /** что выходит по картинке при общем масштабе, в тех же единицах */
+  picture: number
+}
+
 export interface RegionRooms {
   rooms: AiRoom[]
   /** подписи модели, которым нашлась область */
   matched: number
   /** подписи, которым области не нашлось — скорее всего, выдуманные комнаты */
   unmatched: string[]
-  /** сантиметров в пикселе по совпавшим площадям; null — совпадений нет */
+  /** сантиметров в пикселе по согласию подписей; null — согласия нет */
   cmPerPx: number | null
+  /** подписи, по которым посчитан масштаб: «5ж 13.9 м²», «4ж ширина 401» */
+  scaleLabels: string[]
+  /** подписи, расходящиеся с картинкой больше чем на десятую часть */
+  disputes: LabelDispute[]
+}
+
+/** одна оценка масштаба по одной подписи */
+interface ScaleSample {
+  s: number
+  room: string
+  field: LabelDispute['field']
+  label: number
+  /** величина на картинке: пиксели для размера, квадратные пиксели для площади */
+  px: number
+}
+
+/**
+ * Масштаб по согласию подписей. Каждая подпись — площадь, ширина, глубина —
+ * даёт свою оценку сантиметров в пикселе. Верные подписи дают одно и то же
+ * число, неверно прочитанная — случайное. Берём оценку, с которой согласны
+ * больше всего других (в пределах 7 %), и медиану этих согласных. Так одна
+ * «3.84» вместо «0.82» не уводит масштаб, а сама оказывается спорной.
+ */
+export function consensusScale(samples: ScaleSample[]): { s: number; inliers: ScaleSample[] } | null {
+  if (!samples.length) return null
+  let best: { inliers: ScaleSample[]; spread: number } | null = null
+  for (const c of samples) {
+    const inliers = samples.filter((x) => Math.abs(x.s / c.s - 1) <= 0.07)
+    const spread = inliers.reduce((a, x) => a + Math.abs(x.s / c.s - 1), 0)
+    if (!best || inliers.length > best.inliers.length || (inliers.length === best.inliers.length && spread < best.spread)) best = { inliers, spread }
+  }
+  // одно случайное совпадение — не согласие: при двух подписях и больше нужно хотя бы две согласных
+  if (!best || (samples.length >= 2 && best.inliers.length < 2)) return null
+  const vals = best.inliers.map((x) => x.s).sort((a, b) => a - b)
+  return { s: vals[Math.floor(vals.length / 2)], inliers: best.inliers }
 }
 
 const inside = (r: RoomRegion, x: number, y: number) => x >= r.x1 && x <= r.x2 && y >= r.y1 && y <= r.y2
+
+/** стороны области, упёршиеся в край кадра: фото там обрезано */
+const cutSides = (r: RoomRegion, px: { w: number; h: number }): AiSide[] => {
+  const out: AiSide[] = []
+  if (r.x1 <= 2) out.push('left')
+  if (r.y1 <= 2) out.push('top')
+  if (r.x2 >= px.w - 3) out.push('right')
+  if (r.y2 >= px.h - 3) out.push('bottom')
+  return out
+}
 
 /**
  * Соседство областей: две комнаты соседи по стороне, если их рамки, растянутые
@@ -67,14 +122,22 @@ export function roomsFromRegions(regions: RoomRegion[], px: { w: number; h: numb
       taken.add(k)
     }
   })
-  // 2. по площадям: у верных пар корень из (подпись / площадь области) — один и тот же масштаб
-  const ratios: number[] = []
-  regions.forEach((r, j) => {
-    if (owner[j] < 0) return
-    const a = ai[owner[j]]
-    if (a.areaM2) ratios.push(Math.sqrt((a.areaM2 * 1e4) / r.areaPx))
-  })
-  let scale = ratios.length ? robustMedian(ratios) : null
+  // 2. масштаб по согласию всех подписей легших комнат: площади, ширины, глубины
+  const samplesOf = (): ScaleSample[] => {
+    const out: ScaleSample[] = []
+    regions.forEach((r, j) => {
+      if (owner[j] < 0) return
+      const a = ai[owner[j]]
+      const bw = r.x2 - r.x1
+      const bh = r.y2 - r.y1
+      if (a.areaM2 && r.areaPx > 0) out.push({ s: Math.sqrt((a.areaM2 * 1e4) / r.areaPx), room: a.name, field: 'area', label: a.areaM2, px: r.areaPx })
+      if (a.widthCm && bw > 8) out.push({ s: a.widthCm / bw, room: a.name, field: 'width', label: a.widthCm, px: bw })
+      if (a.depthCm && bh > 8) out.push({ s: a.depthCm / bh, room: a.name, field: 'depth', label: a.depthCm, px: bh })
+    })
+    return out
+  }
+  let consensus = consensusScale(samplesOf())
+  let scale: number | null = consensus ? consensus.s : null
   if (scale === null) {
     // точек не хватило — ищем масштаб, при котором совпадает больше всего пар
     const cands: number[] = []
@@ -114,6 +177,27 @@ export function roomsFromRegions(regions: RoomRegion[], px: { w: number; h: numb
       }
     }
   }
+  // после дораспределения подписей по площадям масштаб пересчитывается по всем легшим
+  if (scale !== null) {
+    const again = consensusScale(samplesOf())
+    if (again) {
+      consensus = again
+      scale = again.s
+    }
+  }
+  // подписи, расходящиеся с картинкой при общем масштабе больше чем на десятую
+  // часть, — скорее всего, прочитаны неверно; геометрию они не трогают, но их
+  // стоит перечитать
+  const disputes: LabelDispute[] = []
+  if (scale !== null) {
+    for (const x of samplesOf()) {
+      if (Math.abs(x.s / scale - 1) <= 0.1) continue
+      const picture = x.field === 'area' ? (x.px * scale * scale) / 1e4 : x.px * scale
+      disputes.push({ room: x.room, field: x.field, label: x.label, picture: Math.round(picture * (x.field === 'area' ? 10 : 1)) / (x.field === 'area' ? 10 : 1) })
+    }
+  }
+  const scaleLabels = (consensus?.inliers ?? []).map((x) => (x.field === 'area' ? `${x.room} ${x.label} м²` : `${x.room} ${x.field === 'width' ? 'ширина' : 'глубина'} ${x.label}`))
+
   // 3. комнаты: геометрия с области, подписи — от модели, соседство — с областей
   const adj = regionNeighbors(regions, wallPx)
   let unnamed = 0
@@ -137,6 +221,8 @@ export function roomsFromRegions(regions: RoomRegion[], px: { w: number; h: numb
       neighbors,
       outer: adj[j].outer,
       exact: true,
+      ...(r.wallPx && Object.keys(r.wallPx).length ? { wallPx: r.wallPx } : {}),
+      ...(cutSides(r, px).length ? { cut: cutSides(r, px) } : {}),
     }
   })
   // имена безымянных должны совпадать с теми, что записаны в соседях
@@ -148,5 +234,5 @@ export function roomsFromRegions(regions: RoomRegion[], px: { w: number; h: numb
     const names = (r.yieldsTo ?? []).map((i) => rooms[i].name)
     if (names.length) rooms[j].yieldsTo = names
   })
-  return { rooms, matched: taken.size, unmatched: ai.filter((_, k) => !taken.has(k)).map((a) => a.name), cmPerPx: scale }
+  return { rooms, matched: taken.size, unmatched: ai.filter((_, k) => !taken.has(k)).map((a) => a.name), cmPerPx: scale, scaleLabels, disputes }
 }

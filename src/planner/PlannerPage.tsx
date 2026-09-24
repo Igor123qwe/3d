@@ -45,6 +45,7 @@ import type { Guide } from './snapping'
 import { aiStatus, askLayout, askRoomLabel, askSpot, cropForVision, lookupProductViaServer, recognizePlan, type AiStatus } from './ai'
 import { applyAiPlan, convertAiPlan } from './planai'
 import { pointOnSide } from './reconstruct'
+import type { LabelDispute } from './segment'
 import type { AiBox, AiPlan } from './aicontract'
 import { checkAiPlan } from './aicontract'
 import { applyLayout, catalogForRoom, layoutSummary, vetLayout } from './autolayout'
@@ -905,6 +906,53 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     return { plan: { walls: [], openings, rooms, dimensions: [], note: `подписи прочитаны по ${done} фрагментам комнат` }, ai: { model, costRub, tried } }
   }
 
+  /**
+   * Перечитать спорные подписи: для каждой комнаты, где цифра не сошлась с
+   * картинкой, — тот же фрагмент модели посильнее и прямой вопрос. Правильный
+   * ответ мы ей не подсказываем, только направление: «стена короче, чем ты
+   * прочитала» — иначе она просто согласится с нами.
+   */
+  const rereadDisputed = async (photo: string, regions: RoomRegion[], u: Underlay, read: AiPlan, disputes: LabelDispute[]): Promise<{ plan: AiPlan; ai: { model: string; costRub: number; tried: string[] } } | null> => {
+    const names = [...new Set(disputes.map((d) => d.room))].slice(0, 4)
+    if (!names.length) return null
+    setAiBusy(`Перечитываю спорные подписи: ${names.join(', ')}…`)
+    const rooms = read.rooms.map((r) => ({ ...r }))
+    let model = ''
+    let costRub = 0
+    const tried: string[] = []
+    let changed = 0
+    await Promise.all(
+      names.map(async (name) => {
+        const room = rooms.find((r) => r.name === name)
+        if (!room?.box) return
+        const region = regions.find((g) => room.x * u.px.w >= g.x1 && room.x * u.px.w <= g.x2 && room.y * u.px.h >= g.y1 && room.y * u.px.h <= g.y2)
+        if (!region) return
+        const what = disputes
+          .filter((d) => d.room === name)
+          .map((d) => {
+            const field = d.field === 'area' ? 'площадь' : d.field === 'width' ? 'размер у верхней или нижней стены' : 'размер у левой или правой стены'
+            const dir = d.label > d.picture ? 'на чертеже эта величина заметно меньше' : 'на чертеже эта величина заметно больше'
+            return `${field}: ты прочитала ${d.label}, но ${dir}`
+          })
+          .join('; ')
+        try {
+          const crop = await cropForVision(photo, region, Math.round(Math.max(u.px.w, u.px.h) * 0.02), 800)
+          const ans = await askRoomLabel(crop, `Перечитай подписи этой комнаты очень внимательно, цифру за цифрой. Не сходится: ${what}. Если подпись и правда такая — оставь её.`, undefined, 1)
+          model = ans.ai.model
+          costRub += ans.ai.costRub
+          for (const t of ans.ai.tried ?? []) if (!tried.includes(t)) tried.push(t)
+          if (ans.room.areaM2 !== undefined) room.areaM2 = ans.room.areaM2
+          if (ans.room.widthCm !== undefined) room.widthCm = ans.room.widthCm
+          if (ans.room.depthCm !== undefined) room.depthCm = ans.room.depthCm
+          changed++
+        } catch (e) {
+          console.info('[ИИ] перечитать не вышло', name, (e as Error).message)
+        }
+      }),
+    )
+    return changed ? { plan: { ...read, rooms }, ai: { model, costRub, tried } } : null
+  }
+
   /** Все комнаты с картинки: области заливки по очищенному растру */
   const regionsOf = async (u: Underlay): Promise<RoomRegion[]> => {
     const r = await ensureRaster(u)
@@ -1228,6 +1276,21 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       // масштаб не трогаем, если пользователь уже откалибровал подложку руками
       let result = convert(read)
       let attempts = 1
+      // Подписи, не сходящиеся с картинкой, переспрашиваем один раз у модели
+      // посильнее — по тому же увеличенному фрагменту, с указанием, что именно не
+      // сошлось. Стены от этого не двигаются: геометрия уже взята с фото, а
+      // верная подпись нужна для масштаба и для названий в отчёте
+      if (byRooms && result.report.quality.disputes.length) {
+        const again = await rereadDisputed(photo, regions, u, read, result.report.quality.disputes)
+        if (again) {
+          const next = convert(again.plan)
+          noteCost('подписи', again.ai)
+          if (next.walls.length && next.report.quality.disputes.length < result.report.quality.disputes.length) {
+            read = again.plan
+            result = next
+          }
+        }
+      }
       // Комнаты потерялись, стены легли мимо линий или площади разошлись — модель,
       // скорее всего, прочитала план неверно. Вторая попытка идёт к модели
       // посильнее, с подсказкой, что именно не сошлось; остаётся лучший из двух:
@@ -1293,6 +1356,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       if (q.openings.expected) lines.push(`Проёмы: ${q.openings.placed} из ${q.openings.expected} встали на стены.`)
       if (q.areas) {
         lines.push(`Площади: сходятся на ${Math.round(q.areas.accuracy * 100)} %${q.areas.off.length ? ` — ${q.areas.off.slice(0, 4).map((off) => `${off.name}: на плане ${fmtNum(off.wantM2)}, получилось ${fmtNum(off.haveM2)} м²`).join('; ')}` : ''}.`)
+      }
+      if (q.disputes.length) {
+        const field = (f: string) => (f === 'area' ? 'площадь' : f === 'width' ? 'ширина' : 'глубина')
+        const unit = (f: string) => (f === 'area' ? ' м²' : ' см')
+        lines.push(`Спорные подписи — не сходятся с картинкой, стены по ним не двигались: ${q.disputes.map((d) => `${d.room} ${field(d.field)} ${fmtNum(d.label)}${unit(d.field)}, по картинке ${fmtNum(d.picture)}${unit(d.field)}`).join('; ')}.`)
       }
       if (q.slivers.length) lines.push(`Щели между стенами: ${q.slivers.map((x) => `${x.name} ${fmtNum(x.areaM2)} м²`).join(', ')} — оси разошлись, поправьте инструментом «Уточнить участок».`)
       if (r.roomsDropped.length) lines.push(`Выброшено: ${r.roomsDropped.join(', ')} — на картинке под рамкой нет комнаты, а без неё площади соседей сошлись.`)

@@ -712,6 +712,8 @@ export interface RoomRegion {
   points: number
   /** комната Г-образная: области с этими номерами (в выдаче) заходят в её рамку углом, и там место их */
   yieldsTo?: number[]
+  /** толщина стены за каждой стороной, измеренная по картинке, px; нет — не измерилась */
+  wallPx?: Partial<Record<'top' | 'right' | 'bottom' | 'left', number>>
 }
 
 /**
@@ -1034,7 +1036,56 @@ export function segmentRooms(d2: Float32Array, w: number, h: number, closePx: nu
   const near = Math.max(2 * closePx + 6, Math.min(w, h) * 0.06)
   const kept = (out.length < 2 ? out : out.filter((r) => out.some((s) => s !== r && adjacent(r, s, near)))).sort((a, b) => b.areaPx - a.areaPx)
   resolveOverlaps(kept, labels, w)
+  for (const r of kept) r.wallPx = sideWallPx(d2, w, h, r)
   return kept
+}
+
+/**
+ * Толщина стены за каждой стороной комнаты — прямо по картинке: от грани
+ * шагаем наружу через чернила до бумаги. Замер в нескольких местах вдоль
+ * стороны, берётся медиана: проём или цифра у стены на одном замере не
+ * сбивают. Если стена упирается в край кадра, замер не считается.
+ */
+export function sideWallPx(d2: Float32Array, w: number, h: number, r: PxRect): Partial<Record<'top' | 'right' | 'bottom' | 'left', number>> {
+  const ink = (x: number, y: number) => d2[y * w + x] === 0
+  const limit = Math.max(20, Math.round(Math.min(w, h) * 0.08))
+  const out: Partial<Record<'top' | 'right' | 'bottom' | 'left', number>> = {}
+  const sides: ['top' | 'right' | 'bottom' | 'left', number, number][] = [
+    ['left', -1, 0],
+    ['right', 1, 0],
+    ['top', 0, -1],
+    ['bottom', 0, 1],
+  ]
+  for (const [side, dx, dy] of sides) {
+    const runs: number[] = []
+    for (let k = 1; k <= 9; k++) {
+      const t = 0.1 + (0.8 * k) / 10
+      let x = Math.round(dx ? (dx < 0 ? r.x1 : r.x2) : r.x1 + (r.x2 - r.x1) * t)
+      let y = Math.round(dy ? (dy < 0 ? r.y1 : r.y2) : r.y1 + (r.y2 - r.y1) * t)
+      // грань стоит на краю чернил с точностью в пару точек: сначала дойти до них
+      let step = 0
+      while (step < 6 && x >= 0 && y >= 0 && x < w && y < h && !ink(x, y)) {
+        x += dx
+        y += dy
+        step++
+      }
+      if (x < 0 || y < 0 || x >= w || y >= h || !ink(x, y)) continue
+      let run = 0
+      while (x >= 0 && y >= 0 && x < w && y < h && ink(x, y) && run <= limit) {
+        x += dx
+        y += dy
+        run++
+      }
+      // до края кадра или дальше разумного — это не стена, а поле или рамка
+      if (x < 0 || y < 0 || x >= w || y >= h || run > limit) continue
+      runs.push(run)
+    }
+    if (runs.length >= 3) {
+      runs.sort((a, b) => a - b)
+      out[side] = runs[Math.floor(runs.length / 2)]
+    }
+  }
+  return out
 }
 
 /**

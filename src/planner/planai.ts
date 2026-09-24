@@ -22,7 +22,7 @@ import { buildRooms } from './rooms'
 import { bboxOf, closestOnSeg, dist, pointInPoly } from './geometry'
 import { canRebuildFrom, pointOnSide, reconstructFromRooms, scaleSamplesFromRooms, type AreaFit } from './reconstruct'
 import type { RoomRegion } from './raster'
-import { roomsFromRegions } from './segment'
+import { roomsFromRegions, type LabelDispute } from './segment'
 import { assessQuality, type QualityReport, type RasterInfo } from './quality'
 
 export interface ConvertOptions {
@@ -292,6 +292,7 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
   let segmented: ConvertReport['segmented'] = null
   let rooms = ai.rooms
   let bySegments = false
+  let disputes: LabelDispute[] = []
   const regions = o.regions ?? []
   if (regions.length >= 2) {
     // толщина стены между соседними областями — в пикселях картинки; масштаб здесь
@@ -304,8 +305,9 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
       rooms = seg.rooms
       bySegments = true
       segmented = { regions: regions.length, matched: seg.matched, unmatched: seg.unmatched }
+      disputes = seg.disputes
       if (!o.keepScale && seg.cmPerPx) {
-        fit = { cmPerPx: seg.cmPerPx, source: 'площади комнат', samples: seg.matched, labels: seg.rooms.filter((r) => r.areaM2).map((r) => `${r.name} ${r.areaM2} м²`) }
+        fit = { cmPerPx: seg.cmPerPx, source: 'площади комнат', samples: seg.scaleLabels.length, labels: seg.scaleLabels }
         u = { ...underlay, scale: fit.cmPerPx }
       }
     }
@@ -359,7 +361,8 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
   // заливка не нашла замкнутой области, — под подозрением. Без картинки не
   // выбрасывается ничего: спорное остаётся и помечается
   const canDrop = (r: AiRoom): boolean => !bySegments && !!o.ground && !groundedNames.has(r.name)
-  const rebuilt = rooms.some(canRebuildFrom) ? reconstructFromRooms(rooms, u, wallThicknesses(ai), dimSpans, canDrop) : null
+  // комнаты сняты с картинки — стены встают по ней, подписи их не двигают
+  const rebuilt = rooms.some(canRebuildFrom) ? reconstructFromRooms(rooms, u, { ...wallThicknesses(ai), fixed: bySegments }, bySegments ? [] : dimSpans, canDrop) : null
   const closedByNumbers = rebuilt ? rebuilt.rooms.filter((r) => r.haveM2 !== undefined).length : 0
   const byNumbers = !!rebuilt && closedByNumbers > 0 && closedByNumbers >= closedRooms(walls, ai, u)
   const method: ConvertMethod = byNumbers ? (bySegments ? 'по комнатам с картинки' : 'по размерам комнат') : 'по линиям стен'
@@ -488,6 +491,7 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
     areas: byNumbers && rebuilt ? rebuilt.areaFit : null,
     lost,
     doubtful: byNumbers && rebuilt ? rebuilt.doubtful : [],
+    disputes,
   })
 
   return {

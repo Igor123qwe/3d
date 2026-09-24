@@ -86,8 +86,13 @@ describe('настоящее фото плана БТИ', () => {
 
   it('5ж Г-образная: коридор заходит в её угол, лишней клетки нет', () => {
     const r = byName('5ж')!
-    expect(r.polygon).toHaveLength(6)
+    // форма — по заполнению рамки: у Г-образной комнаты угол рамки пустой
+    const xs = r.inner.map((p) => p.x)
+    const ys = r.inner.map((p) => p.y)
+    const fill = (r.area * 1e4) / ((Math.max(...xs) - Math.min(...xs)) * (Math.max(...ys) - Math.min(...ys)))
+    expect(fill).toBeLessThan(0.95)
     expect(Math.abs(r.area - 13.9)).toBeLessThan(1.6)
+    expect(q.slivers).toEqual([])
   })
 
   it('подтверждённые размеры на месте: 5ж 3,72, 4ж 4,01, 2 3,30, 6 1,80 × 2,58', () => {
@@ -101,17 +106,73 @@ describe('настоящее фото плана БТИ', () => {
     }
     expect(Math.abs(width('5ж') - 372)).toBeLessThan(15)
     expect(Math.abs(width('4ж') - 401)).toBeLessThan(15)
-    expect(Math.abs(width('2') - 330)).toBeLessThan(20)
+    // у 2 в правой стене ниша: подпись 3,30 — по узкой части, рамка с картинки — по медиане
+    expect(Math.abs(width('2') - 330)).toBeLessThan(25)
     expect(Math.abs(width('6') - 180)).toBeLessThan(15)
     expect(Math.abs(depth('6') - 258)).toBeLessThan(15)
   })
 
   it('стены лежат на линиях фото, формы целых комнат совпадают с областями', () => {
-    console.log('QUALITY', JSON.stringify({ ...q, walls: q.walls && { onInk: q.walls.onInk, off: q.walls.off.map((o) => [Math.round(o.a.x), Math.round(o.a.y), Math.round(o.b.x), Math.round(o.b.y), o.devCm]) } }, null, 0))
-    console.log('ROOMS', JSON.stringify(rooms.map((r) => [r.meta.name, r.area.toFixed(1), r.inner.map((p) => [Math.round(p.x), Math.round(p.y)])])))
-    console.log('REGIONS', JSON.stringify(regions.map((g) => [Math.round(g.x1), Math.round(g.y1), Math.round(g.x2), Math.round(g.y2), g.yieldsTo])))
-    expect(q.walls!.onInk).toBeGreaterThan(0.8)
-    // комната «1» обрезана панелью на фото — её форма по подписи и не должна совпасть
-    for (const s of q.shapes!.filter((x) => x.name !== '1')) expect(s.iou, s.name).toBeGreaterThan(0.8)
+    // стены встают по картинке, а не по подписям: почти вся их длина — на линиях фото
+    expect(q.walls!.onInk).toBeGreaterThan(0.9)
+    for (const s of q.shapes!) expect(s.iou, s.name).toBeGreaterThan(0.8)
+  })
+
+  it('кухня «1» обрезана на фото тёмной панелью: подпись честно помечена как несходящаяся, стены за край не уходят', () => {
+    expect(q.disputes.some((d) => d.room === '1' && d.field === 'area')).toBe(true)
+    // спорная подпись не двигает геометрию: кухня осталась в пределах картинки
+    const k = byName('1')!
+    expect(Math.max(...k.inner.map((p) => p.x))).toBeLessThan(fx.w * fx.scale)
+  })
+})
+
+describe('настоящее фото плана БТИ: модель прочитала часть цифр неверно', () => {
+  // так было у пользователя: «0.82» прочитано как 3.84, площадь с лишней цифрой
+  const misread = JSON.parse(JSON.stringify(LABELS))
+  const room = (n: string) => misread.rooms.find((r: { name: string }) => r.name === n)
+  room('6').width_cm = 384
+  room('2').area_m2 = 31.0
+  room('4ж').depth_cm = 150
+
+  function run(labels: unknown) {
+    const ink = inkMask()
+    const d2 = distanceToInk({ ink, w: fx.w, h: fx.h })
+    const u: Underlay = { src: '', px: { w: fx.w, h: fx.h }, x: 0, y: 0, scale: fx.scale, opacity: 0.6, visible: true, locked: false }
+    const { regions } = segmentRoomsAuto(d2, fx.w, fx.h, Math.min(80, Math.max(3, Math.round(45 / u.scale))))
+    const result = convertAiPlan(checkAiPlan(labels), u, { regions, raster: { d2, w: fx.w, h: fx.h } })
+    const { rooms } = buildRooms({ version: 1, name: '', walls: result.walls, openings: result.openings, furniture: [], rooms: result.rooms, dims: [], settings: { grid: 10 } })
+    return { result, rooms }
+  }
+  const good = run(LABELS)
+  const bad = run(misread)
+
+  it('масштаб держится на согласии остальных подписей', () => {
+    expect(Math.abs(bad.result.report.scale.cmPerPx - good.result.report.scale.cmPerPx)).toBeLessThan(0.03)
+  })
+
+  it('неверные цифры не двигают стены: чертёж тот же, что при верных', () => {
+    const size = (rs: typeof good.rooms, n: string) => {
+      const p = rs.find((r) => r.meta.name === n)!.inner
+      return [Math.max(...p.map((v) => v.x)) - Math.min(...p.map((v) => v.x)), Math.max(...p.map((v) => v.y)) - Math.min(...p.map((v) => v.y))]
+    }
+    for (const n of ['6', '2', '4ж', '5ж']) {
+      const [gw, gh] = size(good.rooms, n)
+      const [bw, bh] = size(bad.rooms, n)
+      expect(Math.abs(gw - bw), `${n} ширина`).toBeLessThan(5)
+      expect(Math.abs(gh - bh), `${n} глубина`).toBeLessThan(5)
+    }
+    expect(bad.result.report.quality.walls!.onInk).toBeGreaterThan(0.9)
+    expect(bad.result.report.quality.slivers).toEqual([])
+  })
+
+  it('каждая неверная цифра названа спорной, с тем, что выходит по картинке', () => {
+    const d = bad.result.report.quality.disputes
+    const has = (room: string, field: string) => d.find((x) => x.room === room && x.field === field)
+    expect(has('6', 'width')?.label).toBe(384)
+    expect(Math.abs(has('6', 'width')!.picture - 180)).toBeLessThan(15)
+    expect(has('2', 'area')?.label).toBe(31)
+    expect(has('4ж', 'depth')?.label).toBe(150)
+    // верные подписи спорными не названы
+    expect(has('5ж', 'area')).toBeUndefined()
   })
 })

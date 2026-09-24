@@ -19,6 +19,7 @@ import type { AiPlan } from './aicontract'
 import type { Opening, Plan, Pt, RoomMeta, Underlay, Wall } from './types'
 import type { RoomRegion } from './raster'
 import type { AreaFit, DimSpan } from './reconstruct'
+import type { LabelDispute } from './segment'
 import { buildRooms } from './rooms'
 import { pointInPoly } from './geometry'
 
@@ -42,6 +43,8 @@ export interface QualityReport {
   doubtful: string[]
   /** щели: замкнутые клетки между стенами площадью меньше метра — не помещения, а разошедшиеся оси */
   slivers: { name: string; areaM2: number }[]
+  /** подписи, не сходящиеся с картинкой: скорее всего, прочитаны неверно */
+  disputes: LabelDispute[]
   verdict: 'ok' | 'check' | 'weak'
   /** что именно не так — короткими фразами для диалога */
   issues: string[]
@@ -60,6 +63,7 @@ export interface QualityInput {
   /** почему комнаты модели не попали на чертёж: имя → причина */
   lost: Map<string, string>
   doubtful: string[]
+  disputes?: LabelDispute[]
 }
 
 const emptyPlan = (walls: Wall[]): Plan => ({ version: 1, name: '', walls, openings: [], furniture: [], rooms: [], dims: [], settings: { grid: 10 } })
@@ -161,6 +165,7 @@ export function measureDim(d: DimSpan, walls: Wall[]): number | null {
 
 export function assessQuality(inp: QualityInput): QualityReport {
   const { ai, u, walls, openings, metas, regions, raster, dims, areas, lost, doubtful } = inp
+  const disputes = inp.disputes ?? []
   const issues: string[] = []
 
   // 1. полнота: каждое помещение модели должно быть на чертеже
@@ -213,9 +218,10 @@ export function assessQuality(inp: QualityInput): QualityReport {
 
   // 6. площади — дополнительно
   if (areas && areas.accuracy < 0.85) issues.push(`площади сходятся на ${Math.round(areas.accuracy * 100)} %`)
+  if (disputes.length) issues.push(`подписи не сходятся с картинкой: ${disputes.map((d) => `${d.room} ${d.field === 'area' ? 'площадь' : d.field === 'width' ? 'ширина' : 'глубина'} ${d.label} — по картинке ${d.picture}`).join(', ')}`)
   if (doubtful.length) issues.push(`сомнительно: ${doubtful.join(', ')} — без них площади соседей сошлись бы лучше, но на картинке они есть`)
 
   const weak = missing.length > 0 || (wallsQ !== null && wallsQ.onInk < 0.6) || (areas !== null && areas.accuracy < 0.85)
   const check = !weak && (issues.length > 0 || (shapes?.some((s) => s.iou < 0.8) ?? false))
-  return { completeness, walls: wallsQ, shapes, dims: dimsQ, openings: openingsQ, areas, doubtful, slivers, verdict: weak ? 'weak' : check ? 'check' : 'ok', issues }
+  return { completeness, walls: wallsQ, shapes, dims: dimsQ, openings: openingsQ, areas, doubtful, slivers, disputes, verdict: weak ? 'weak' : check ? 'check' : 'ok', issues }
 }

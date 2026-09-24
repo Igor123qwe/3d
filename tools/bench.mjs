@@ -80,9 +80,17 @@ function score(ref, out) {
   const areaOff = []
   const sizeOff = []
   const shapeOff = []
+  // комната частично закрыта на снимке: её размеры по картинке не проверить, но
+  // отчёт обязан сказать, что подпись с картинкой не сходится
+  const disputed = new Set((q.disputes ?? []).map((d) => d.room))
+  const unflagged = []
   for (const w of wanted) {
     const got = byName.get(w.name)
     if (!got) continue
+    if (w.covered) {
+      if (!disputed.has(w.name)) unflagged.push(w.name)
+      continue
+    }
     if (w.areaM2 !== undefined) {
       const d = Math.abs(got.areaM2 - w.areaM2)
       areaOff.push({ name: w.name, deltaM2: +d.toFixed(2), tol: w.areaTolM2 ?? 1, bad: d > (w.areaTolM2 ?? 1) })
@@ -114,6 +122,7 @@ function score(ref, out) {
   const openingsWant = exp.openings ?? q.openings.expected
 
   const fixes =
+    unflagged.length +
     missing.length +
     extra.length +
     iouBad.length +
@@ -140,6 +149,7 @@ function score(ref, out) {
     sizeMax: sizeOff.length ? Math.max(...sizeOff.map((s) => s.deltaCm)) : null,
     sizeBad: sizeOff.filter((s) => s.bad),
     shapeOff,
+    unflagged,
     openings: `${openingsPlaced}/${openingsWant}`,
     fixes,
   }
@@ -202,6 +212,7 @@ async function main() {
           ...r.shapeOff.map((s) => `${s.name}: заполнение рамки ${s.fill}, ждали ${s.want}`),
           ...r.areaBad.map((a) => `площадь ${a.name}: ${a.deltaM2} м² мимо`),
           ...r.sizeBad.map((s) => `${s.name}: ${s.deltaCm} см мимо`),
+          ...r.unflagged.map((n) => `${n} закрыта на снимке, но отчёт не пометил её подпись спорной`),
         ]
         console.log(`${r.name}: ${notes.length ? notes.join('; ') : 'всё в допуске'} (${(r.ms / 1000).toFixed(1)} с)`)
       }
