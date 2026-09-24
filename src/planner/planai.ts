@@ -23,6 +23,7 @@ import { bboxOf, closestOnSeg, dist, lerp, norm, pointInPoly, sub } from './geom
 import { canRebuildFrom, DEFAULT_RECONSTRUCT, pointOnSide, reconstructFromRooms, scaleSamplesFromRooms, type AreaFit } from './reconstruct'
 import { detectOpenings, pointOnOutline, wallsFromPicture } from './picture'
 import { fitToLabels, type SizeFix } from './fitlabels'
+import { evenOuterWalls } from './rectify'
 import type { RoomRegion } from './raster'
 import { regionPoly, roomsFromRegions, type LabelDispute } from './segment'
 import { assessQuality, type QualityReport, type RasterInfo } from './quality'
@@ -47,18 +48,12 @@ export interface ConvertOptions {
   weldCm?: number
   /** до скольких градусов отклонения стена считается осевой */
   axisTolDeg?: number
-  /**
-   * Подогнать оси стен под подписанные ширину и глубину комнат. По умолчанию
-   * нет: геометрия — с картинки (снимок под углом выпрямляется до
-   * распознавания); подгонка — по просьбе пользователя
-   */
-  fitLabels?: boolean
 }
 
 /** настройки со значениями по умолчанию; привязка к картинке — необязательная */
 type ConvertSettings = Required<Omit<ConvertOptions, 'ground' | 'regions' | 'raster'>> & Pick<ConvertOptions, 'ground' | 'regions' | 'raster'>
 
-export const DEFAULT_CONVERT: ConvertSettings = { keepScale: false, weldCm: 12, axisTolDeg: 6, fitLabels: false }
+export const DEFAULT_CONVERT: ConvertSettings = { keepScale: false, weldCm: 12, axisTolDeg: 6 }
 
 export type ScaleSource = 'размерные цепочки' | 'размеры комнат' | 'размеры на плане' | 'площади комнат' | 'прежняя калибровка'
 
@@ -531,28 +526,6 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
     }
   }
 
-  // 6б. Размеры по подписям. Чертёж БТИ нарисован не точно в масштабе: у
-  //     каждой комнаты свой масштаб, и один на весь лист даёт одним +12 см,
-  //     другим −7. Подпись — обмер: оси стен сдвигаются так, чтобы ширина и
-  //     глубина подписанных комнат сошлись с числами. Проёмы держатся за стены
-  //     долей длины и едут вместе с ними
-  let sizesFitted: SizeFix[] = []
-  if (o.fitLabels && bySegments && byNumbers && rebuilt) {
-    const { rooms: built } = buildRooms(emptyPlan(walls))
-    const labelled = metas.flatMap((m) => {
-      const label = rooms.find((r) => r.name === m.name)
-      const room = built.find((b) => pointInPoly(m.anchor, b.polygon))
-      if (!label || !room) return []
-      return [{ name: m.name, axes: room.polygon, inner: room.inner, widthCm: label.widthCm, depthCm: label.depthCm }]
-    })
-    const fitted = fitToLabels(walls, labelled)
-    if (fitted.fixes.length) {
-      walls = fitted.walls
-      for (const m of metas) m.anchor = fitted.map(m.anchor)
-      sizesFitted = fitted.fixes
-    }
-  }
-
   // 7. проверка по картинке и числам: полнота, стены, формы, размеры, проёмы
   const lost = new Map<string, string>()
   if (segmented) for (const n of segmented.unmatched) lost.set(n, 'на картинке не нашлось такой области')
@@ -597,7 +570,7 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
       grounded,
       segmented,
       quality,
-      sizesFitted,
+      sizesFitted: [],
       placement: { walls: wBox ? bboxOf(walls.flatMap((w) => [w.a, w.b])) : null, underlay: uRect, shifted },
       note: shifted ? `${ai.note ? `${ai.note} ` : ''}Чертёж лёг мимо картинки и был сдвинут на неё — координаты в ответе модели подозрительны, пришлите отчёт разработчику.` : ai.note,
     },
@@ -636,6 +609,35 @@ export function floorFor(name: string, kind?: string): RoomMeta['floor'] {
   if (/кладов|гардероб/.test(n)) return 'plain'
   if (/гостин|зал|комнат|спальн|кабинет|детск|жил/.test(n)) return 'laminate'
   return 'laminate'
+}
+
+/**
+ * Размеры по подписям — последним шагом, после выпрямления снимка. Форма
+ * комнат — с картинки, а подпись — обмер: грани стен сдвигаются так, чтобы
+ * ширина, глубина и размеры вдоль стен сошлись с числами плана. Подпись,
+ * что расходится с картинкой больше 6 % (ошибка чтения, размер части
+ * Г-образной комнаты), стены не двигает. Проёмы держатся за стены долей
+ * длины и едут вместе с ними
+ */
+export function fitResultToLabels(res: ConvertResult, labels: AiRoom[]): ConvertResult {
+  if (res.report.method !== 'по комнатам с картинки') return res
+  const { rooms: built } = buildRooms(emptyPlan(res.walls))
+  const labelled = res.rooms.flatMap((m) => {
+    const label = labels.find((r) => r.name === m.name)
+    const room = built.find((b) => pointInPoly(m.anchor, b.polygon))
+    if (!label || !room) return []
+    return [{ name: m.name, axes: room.polygon, inner: room.inner, widthCm: label.widthCm, depthCm: label.depthCm, walls: label.walls }]
+  })
+  const fitted = fitToLabels(res.walls, labelled)
+  if (!fitted.fixes.length) return res
+  const rooms = res.rooms.map((m) => ({ ...m, anchor: fitted.map(m.anchor) }))
+  // подгонка не должна ломать чертёж: каждая комната по-прежнему замкнута
+  const { rooms: after } = buildRooms(emptyPlan(fitted.walls))
+  if (after.length < built.length || rooms.some((m) => !after.some((b) => pointInPoly(m.anchor, b.polygon)))) return res
+  // Подгонка могла свести внутренние грани соседних кусков наружной стены в
+  // одну — тогда и наружная грань одна. Размеры по подписям не трогаем:
+  // сводятся только куски, чьи внутренние грани уже совпали
+  return { ...res, walls: evenOuterWalls(fitted.walls, { innerTol: 1, shift: 0 }), rooms, report: { ...res.report, sizesFitted: fitted.fixes } }
 }
 
 /**

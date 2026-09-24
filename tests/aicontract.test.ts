@@ -153,4 +153,22 @@ describe('ответ по фрагменту комнаты', () => {
   it('пустой ответ без пометки — не ответ', () => {
     expect(() => checkAiRoomLabel({ note: 'ничего' })).toThrow()
   })
+  it('размеры вдоль стен: метры с дробью и целые сантиметры, короткие куски тоже', () => {
+    const label = checkAiRoomLabel({
+      name: '1',
+      walls: [
+        { side: 'top', at: 0.77, cm: 234 },
+        { side: 'bottom', at: 0.84, cm: 26 },
+        { side: 'right', cm: 0.38 },
+        { side: 'left', at: 0.84, cm: '1.37' },
+        { side: 'нигде', cm: 100 },
+      ],
+    })
+    expect(label.walls).toEqual([
+      { side: 'top', at: 0.77, cm: 234 },
+      { side: 'bottom', at: 0.84, cm: 26 },
+      { side: 'right', at: 0.5, cm: 38 },
+      { side: 'left', at: 0.84, cm: 137 },
+    ])
+  })
 })

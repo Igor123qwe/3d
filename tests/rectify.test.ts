@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { rectifyWalls } from '../src/planner/rectify'
+import { evenOuterWalls, rectifyWalls } from '../src/planner/rectify'
+import { buildRooms } from '../src/planner/rooms'
 import { applyH, perspectiveQuad, rectTarget } from '../src/planner/raster'
-import type { Pt, Wall } from '../src/planner/types'
+import type { Plan, Pt, Wall } from '../src/planner/types'
 
 const wall = (id: string, ax: number, ay: number, bx: number, by: number): Wall => ({ id, a: { x: ax, y: ay }, b: { x: bx, y: by }, thickness: 10 })
 
@@ -64,5 +65,43 @@ describe('выпрямление готового чертежа', () => {
 
   it('ровный снимок не трогается', () => {
     expect(perspectiveQuad(photo(0), 10)).toBeNull()
+  })
+})
+
+describe('наружная стена — одна прямая', () => {
+  const w = (id: string, ax: number, ay: number, bx: number, by: number, thickness = 40): Wall => ({ id, a: { x: ax, y: ay }, b: { x: bx, y: by }, thickness })
+  const asPlan = (walls: Wall[]): Plan => ({ version: 1, name: '', walls, openings: [], furniture: [], rooms: [], dims: [], settings: { grid: 10 } })
+  // две комнаты рядом; верхняя наружная стена над правой съехала на 10 см
+  const slid = [
+    w('tl', 0, 0, 400, 0),
+    w('tr', 400, 10, 800, 10),
+    w('l', 0, 0, 0, 400),
+    w('r', 800, 10, 800, 400),
+    w('m', 400, 0, 400, 400, 12),
+    w('b', 0, 400, 800, 400),
+  ]
+
+  it('кусок той же толщины, съехавший на 10 см, встаёт в линию; концы соседних стен — за ним', () => {
+    const out = evenOuterWalls(slid)
+    const at = (id: string) => out.find((x) => x.id === id)!
+    expect(at('tr').a.y).toBeCloseTo(at('tl').a.y, 6)
+    expect(at('tr').b.y).toBeCloseTo(at('tl').a.y, 6)
+    expect(at('tr').thickness).toBeCloseTo(40, 6)
+    // правая стена по-прежнему упирается в верхнюю
+    expect(Math.min(at('r').a.y, at('r').b.y)).toBeCloseTo(at('tr').a.y, 6)
+    expect(buildRooms(asPlan(out)).rooms).toHaveLength(2)
+  })
+
+  it('настоящий выступ меняет толщину, а не сдвигает стену, — он остаётся', () => {
+    // над правой комнатой стена толще на 13 см внутрь (выступ 0,13): наружная грань та же
+    const bump = slid.map((x) => (x.id === 'tr' ? { ...x, a: { x: 400, y: 6.5 }, b: { x: 800, y: 6.5 }, thickness: 53 } : x.id === 'r' ? { ...x, a: { x: 800, y: 6.5 } } : x))
+    const out = evenOuterWalls(bump)
+    expect(out.find((x) => x.id === 'tr')).toEqual(bump.find((x) => x.id === 'tr'))
+  })
+
+  it('перегородки между комнатами не трогаются', () => {
+    const out = evenOuterWalls(slid)
+    expect(out.find((x) => x.id === 'm')!.thickness).toBe(12)
+    expect(out.find((x) => x.id === 'm')!.a.x).toBe(400)
   })
 })

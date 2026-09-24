@@ -53,6 +53,8 @@ export interface AiRoom {
   /** размеры комнаты, подписанные на плане: по горизонтали и по вертикали */
   widthCm?: number
   depthCm?: number
+  /** все размеры, подписанные вдоль стен комнаты (у ниш, выступов, коридора): у какой стены, где вдоль неё, сколько */
+  walls?: AiWallLabel[]
   /** кто за какой стеной: имена соседних комнат по сторонам — общая стена одна на двоих */
   neighbors?: Partial<Record<AiSide, string[]>>
   /** стороны, выходящие на наружный контур квартиры */
@@ -61,6 +63,13 @@ export interface AiRoom {
   yieldsTo?: string[]
   /** рамка снята с картинки по внутренним граням стен (сегментация), а не нарисована моделью «по подписи» */
   exact?: boolean
+}
+
+/** размер вдоль стены комнаты: side — у какой стены, at — середина числа вдоль неё (0..1) */
+export interface AiWallLabel {
+  side: AiSide
+  at: number
+  cm: number
 }
 
 /** размерная цепочка с плана: по ней чертёж встаёт в масштаб */
@@ -94,6 +103,29 @@ const size = (v: unknown): number | undefined => {
   return cm >= 50 && cm <= 3000 ? Math.round(cm) : undefined
 }
 
+/** размер у стены: «0.26» — 26 см, короткие у ниш и выступов тоже в счёт */
+const wallSize = (v: unknown): number | undefined => {
+  const n = inRange(v, 0.05, 5000)
+  if (n === null) return undefined
+  // «0.26» и «4.08» — метры; целые 10..29 — сантиметры (стена в 26 м в квартире не бывает)
+  const cm = n < 10 || (n < 30 && !Number.isInteger(n)) ? n * 100 : n > 1500 ? n / 10 : n
+  return cm >= 10 && cm <= 3000 ? Math.round(cm) : undefined
+}
+
+/** размеры вдоль стен из ответа модели */
+function wallLabels(v: unknown): AiWallLabel[] | undefined {
+  const out: AiWallLabel[] = []
+  for (const raw of list(v, 24)) {
+    const o = raw as Record<string, unknown>
+    const side = String(o.side ?? '').toLowerCase()
+    if (side !== 'top' && side !== 'right' && side !== 'bottom' && side !== 'left') continue
+    const cm = wallSize(o.cm ?? o.size_cm ?? o.length_cm ?? o.value)
+    if (cm === undefined) continue
+    out.push({ side, at: unit(o.at) ?? 0.5, cm })
+  }
+  return out.length ? out : undefined
+}
+
 const inRange = (v: unknown, lo: number, hi: number): number | null => {
   const n = typeof v === 'string' ? Number(v.replace(/\s+/g, '').replace(',', '.')) : Number(v)
   return Number.isFinite(n) && n >= lo && n <= hi ? n : null
@@ -117,6 +149,8 @@ export interface AiRoomLabel {
   depthCm?: number
   /** проёмы, видимые в стенах этого фрагмента: сторона и место вдоль неё */
   openings?: { kind: AiOpeningKind; side: AiSide; at: number; widthCm: number }[]
+  /** размеры, подписанные вдоль стен комнаты */
+  walls?: AiWallLabel[]
   /** на фрагменте не помещение, а штриховка стены, вентшахта или колонна */
   notRoom?: boolean
   note?: string
@@ -149,6 +183,8 @@ export function checkAiRoomLabel(data: unknown): AiRoomLabel {
     ops.push({ kind: kindO, side: side as AiSide, at, widthCm: inRange(o.width_cm ?? o.widthCm, 30, 400) ?? (kindO === 'window' ? 150 : 80) })
   }
   if (ops.length) out.openings = ops
+  const walls = wallLabels(d.walls ?? d.wall_sizes ?? d.dims)
+  if (walls) out.walls = walls
   const note = typeof d.note === 'string' ? d.note.slice(0, 200) : ''
   if (note) out.note = note
   if (d.not_room === true || d.notRoom === true) out.notRoom = true
@@ -240,6 +276,8 @@ export function checkAiPlan(data: unknown): AiPlan {
       room.widthCm ??= size(pair[1].replace(',', '.'))
       room.depthCm ??= size(pair[2].replace(',', '.'))
     }
+    const walls = wallLabels(r.walls ?? r.wall_sizes)
+    if (walls) room.walls = walls
     rooms.push(room)
   }
 
