@@ -23,7 +23,7 @@ import { bboxOf, closestOnSeg, dist, lerp, norm, pointInPoly, sub } from './geom
 import { canRebuildFrom, DEFAULT_RECONSTRUCT, pointOnSide, reconstructFromRooms, scaleSamplesFromRooms, type AreaFit } from './reconstruct'
 import { detectOpenings, pointOnOutline, wallsFromPicture } from './picture'
 import { fitToLabels, type SizeFix } from './fitlabels'
-import { evenOuterWalls } from './rectify'
+import { evenWalls } from './rectify'
 import type { RoomRegion } from './raster'
 import { regionPoly, roomsFromRegions, type LabelDispute } from './segment'
 import { assessQuality, type QualityReport, type RasterInfo } from './quality'
@@ -634,10 +634,12 @@ export function fitResultToLabels(res: ConvertResult, labels: AiRoom[]): Convert
   // подгонка не должна ломать чертёж: каждая комната по-прежнему замкнута
   const { rooms: after } = buildRooms(emptyPlan(fitted.walls))
   if (after.length < built.length || rooms.some((m) => !after.some((b) => pointInPoly(m.anchor, b.polygon)))) return res
-  // Подгонка могла свести внутренние грани соседних кусков наружной стены в
-  // одну — тогда и наружная грань одна. Размеры по подписям не трогаем:
-  // сводятся только куски, чьи внутренние грани уже совпали
-  return { ...res, walls: evenOuterWalls(fitted.walls, { innerTol: 1, shift: 0 }), rooms, report: { ...res.report, sizesFitted: fitted.fixes } }
+  // Подгонка могла свести внутренние грани соседних кусков стены в одну —
+  // тогда и вся стена одна. Размеры по подписям не трогаем: сводятся только
+  // куски, чьи грани у комнат уже совпали до сантиметра
+  const walls = evenWalls(fitted.walls, { faceTol: 1, innerTol: 1, shift: 0 })
+  const ids = new Set(walls.map((w) => w.id))
+  return { ...res, walls, openings: res.openings.filter((o) => ids.has(o.wallId)), rooms, report: { ...res.report, sizesFitted: fitted.fixes } }
 }
 
 /**

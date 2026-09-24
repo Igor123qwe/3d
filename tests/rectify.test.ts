@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { evenOuterWalls, rectifyWalls } from '../src/planner/rectify'
+import { evenWalls, rectifyWalls } from '../src/planner/rectify'
 import { buildRooms } from '../src/planner/rooms'
 import { applyH, perspectiveQuad, rectTarget } from '../src/planner/raster'
 import type { Plan, Pt, Wall } from '../src/planner/types'
@@ -82,7 +82,7 @@ describe('наружная стена — одна прямая', () => {
   ]
 
   it('кусок той же толщины, съехавший на 10 см, встаёт в линию; концы соседних стен — за ним', () => {
-    const out = evenOuterWalls(slid)
+    const out = evenWalls(slid)
     const at = (id: string) => out.find((x) => x.id === id)!
     expect(at('tr').a.y).toBeCloseTo(at('tl').a.y, 6)
     expect(at('tr').b.y).toBeCloseTo(at('tl').a.y, 6)
@@ -95,13 +95,38 @@ describe('наружная стена — одна прямая', () => {
   it('настоящий выступ меняет толщину, а не сдвигает стену, — он остаётся', () => {
     // над правой комнатой стена толще на 13 см внутрь (выступ 0,13): наружная грань та же
     const bump = slid.map((x) => (x.id === 'tr' ? { ...x, a: { x: 400, y: 6.5 }, b: { x: 800, y: 6.5 }, thickness: 53 } : x.id === 'r' ? { ...x, a: { x: 800, y: 6.5 } } : x))
-    const out = evenOuterWalls(bump)
+    const out = evenWalls(bump)
     expect(out.find((x) => x.id === 'tr')).toEqual(bump.find((x) => x.id === 'tr'))
   })
 
-  it('перегородки между комнатами не трогаются', () => {
-    const out = evenOuterWalls(slid)
+  it('одиночная перегородка не трогается', () => {
+    const out = evenWalls(slid)
     expect(out.find((x) => x.id === 'm')!.thickness).toBe(12)
     expect(out.find((x) => x.id === 'm')!.a.x).toBe(400)
+  })
+
+  it('перегородка из кусков 11 и 13 см — одна стена: грань коридора под ней одна, а не 67 + 205', () => {
+    // сверху две комнаты, снизу коридор во всю ширину; стена между ними — два куска
+    const walls = [
+      w('T', 0, 0, 800, 0),
+      w('B', 0, 600, 800, 600),
+      w('L', 0, 0, 0, 600),
+      w('R', 800, 0, 800, 600),
+      w('m', 400, 0, 400, 300, 12),
+      w('p1', 0, 300, 400, 300, 11),
+      w('p2', 400, 300, 800, 300, 13),
+    ]
+    const out = evenWalls(walls)
+    const p1 = out.find((x) => x.id === 'p1')!
+    const p2 = out.find((x) => x.id === 'p2')!
+    expect(p1.a.y).toBeCloseTo(p2.a.y, 6)
+    expect(p1.thickness).toBeCloseTo(p2.thickness, 6)
+    const rooms = buildRooms(asPlan(out)).rooms
+    expect(rooms).toHaveLength(3)
+    const corridor = rooms.find((r) => r.inner.every((q) => q.y > 290))!
+    expect(corridor.inner).toHaveLength(4)
+    // а куски, что расходятся гранями сильнее 3 см, — разные стены
+    const apart = evenWalls(walls.map((x) => (x.id === 'p2' ? { ...x, thickness: 21 } : x)))
+    expect(apart.find((x) => x.id === 'p2')!.thickness).toBe(21)
   })
 })

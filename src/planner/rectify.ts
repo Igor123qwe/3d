@@ -94,23 +94,27 @@ export function rectifyWalls(walls: Wall[], map: (p: Pt) => Pt, tolCm = 6): Wall
 const asPlan = (walls: Wall[]): Plan => ({ version: 1, name: '', walls, openings: [], furniture: [], rooms: [], dims: [], settings: { grid: 10 } })
 
 /**
- * Наружная стена — одна прямая. Кусок наружной стены над каждой комнатой
- * меряется по своему месту на картинке, и на фото стена ещё и чуть изогнута
- * объективом: над 5ж кусок той же толщины встаёт на 10 см ниже, чем над
- * санузлом, или выходит тоньше, и снаружи получается ступенька, которой на
- * плане нет. Соседние соосные куски наружной стены (с одной стороны комната,
- * с другой — ничего) становятся одной прямой стеной — грани по более длинным
- * кускам, — если
- * - внутренние грани почти совпали (не дальше innerTol), а наружные — не
- *   дальше maxStep: толщину намерило по-разному;
- * - или толщина та же (±6 см), а сдвиг оси не больше shift и 0,4 толщины:
- *   кусок стены съехал целиком.
+ * Стена — одна прямая. Кусок стены у каждой комнаты меряется по своему месту
+ * на картинке, и на фото стена ещё и чуть изогнута объективом: над 5ж кусок
+ * наружной стены той же толщины встаёт на 10 см ниже, чем над санузлом, а
+ * стена над коридором под вырезом 5ж выходит на 2 см тоньше, чем под
+ * санузлом. Получаются ступеньки, которых на плане нет: снаружи «лесенка», в
+ * коридоре грань 2,77 распадается на 67 и 205, и подпись её не находит.
+ * Соседние соосные куски сводятся в одну прямую стену — грани по более
+ * длинным кускам, — если
+ * - это перегородка (комнаты с обеих сторон) и обе грани расходятся не
+ *   больше faceTol;
+ * - это наружная стена (с одной стороны ничего), внутренние грани почти
+ *   совпали (не дальше innerTol), а наружные — не дальше maxStep: толщину
+ *   намерило по-разному;
+ * - или у наружной стены толщина та же (±6 см), а сдвиг оси не больше shift
+ *   и 0,4 толщины: кусок стены съехал целиком.
  * Настоящий уступ меняет одну внутреннюю грань (выступ 0,13 — толщину на
  * 13 см) или больше этого (ниша, закуток) и остаётся. Концы примыкающих стен
  * переезжают на новую ось; если что-то размыкается — стены не трогаются.
  */
-export function evenOuterWalls(walls: Wall[], opts: { innerTol?: number; maxStep?: number; shift?: number } = {}): Wall[] {
-  const { innerTol = 6, maxStep = 16, shift: maxShift = 16 } = opts
+export function evenWalls(walls: Wall[], opts: { faceTol?: number; innerTol?: number; maxStep?: number; shift?: number } = {}): Wall[] {
+  const { faceTol = 3, innerTol = 6, maxStep = 16, shift: maxShift = 16 } = opts
   if (walls.length < 4) return walls
   const before = buildRooms(asPlan(walls)).rooms
   if (!before.length) return walls
@@ -120,6 +124,9 @@ export function evenOuterWalls(walls: Wall[], opts: { innerTol?: number; maxStep
     h: boolean
     lo: number
     hi: number
+    /** где ничего нет: −1, +1 — со стороны меньшей или большей координаты; 0 — перегородка */
+    out: -1 | 0 | 1
+    /** грани: у наружной — наружная и к комнате, у перегородки — большая и меньшая */
     outer: number
     inner: number
   }
@@ -139,25 +146,34 @@ export function evenOuterWalls(walls: Wall[], opts: { innerTol?: number; maxStep
       })
     const minus = hasRoom(-1)
     const plus = hasRoom(1)
-    // комнаты с обеих сторон (перегородка) или ни с одной — не наружная стена
-    if (minus === plus) return
-    const out = minus ? 1 : -1
-    pieces.push({ i, h, lo, hi, outer: at + (out * w.thickness) / 2, inner: at - (out * w.thickness) / 2 })
+    // ни с одной стороны нет комнаты — не стена квартиры
+    if (!minus && !plus) return
+    const out = minus && plus ? 0 : minus ? 1 : -1
+    const s = out === 0 ? 1 : out
+    pieces.push({ i, h, lo, hi, out, outer: at + (s * w.thickness) / 2, inner: at - (s * w.thickness) / 2 })
   })
-  // цепочки: соседние по длине куски с одной стороной наружу и близкими гранями
+  // цепочки: соседние по длине куски одного рода (перегородка или наружная той же стороной) с близкими гранями
   const parent = pieces.map((_, k) => k)
   const find = (k: number): number => (parent[k] === k ? k : (parent[k] = find(parent[k])))
   for (let p = 0; p < pieces.length; p++)
     for (let q = p + 1; q < pieces.length; q++) {
       const A = pieces[p]
       const B = pieces[q]
-      if (A.h !== B.h || Math.sign(A.outer - A.inner) !== Math.sign(B.outer - B.inner)) continue
+      if (A.h !== B.h || A.out !== B.out) continue
       if (B.lo > A.hi + 1 || A.lo > B.hi + 1) continue
+      if (A.out === 0) {
+        if (Math.abs(A.inner - B.inner) <= faceTol && Math.abs(A.outer - B.outer) <= faceTol) parent[find(p)] = find(q)
+        continue
+      }
       const tA = Math.abs(A.outer - A.inner)
       const tB = Math.abs(B.outer - B.inner)
       const measured = Math.abs(A.inner - B.inner) <= innerTol && Math.abs(A.outer - B.outer) <= maxStep
       const slid = Math.abs(tA - tB) <= 6 && Math.abs((A.outer + A.inner) / 2 - (B.outer + B.inner) / 2) <= Math.min(maxShift, 0.4 * Math.max(tA, tB))
-      if (!measured && !slid) continue
+      // короткий кусок у угла вобрал толщину поперечной стены: грань к комнате
+      // съехала на 12 см, и низ ниши 0,68 вышел двумя ступеньками (37 + 33)
+      const short = (P: Piece, t: number) => P.hi - P.lo <= Math.max(40, 1.2 * t)
+      const corner = maxShift > 0 && (short(A, tA) || short(B, tB)) && Math.abs(A.inner - B.inner) <= maxStep
+      if (!measured && !slid && !corner) continue
       parent[find(p)] = find(q)
     }
   const chains = new Map<number, Piece[]>()
@@ -231,8 +247,11 @@ export function evenOuterWalls(walls: Wall[], opts: { innerTol?: number; maxStep
     if (!m) return { ...w, a, b }
     return m.h ? { ...w, a: { x: a.x, y: m.at }, b: { x: b.x, y: m.at }, thickness: m.t } : { ...w, a: { x: m.at, y: a.y }, b: { x: m.at, y: b.y }, thickness: m.t }
   })
+  // перемычка между сведёнными кусками сошлась в точку — её больше нет
+  const len = (w: Wall) => Math.hypot(w.b.x - w.a.x, w.b.y - w.a.y)
+  const kept = out.filter((w, j) => len(w) >= 1 || len(walls[j]) < 1)
   // проверка: комнат столько же, и каждая на месте
-  const after = buildRooms(asPlan(out)).rooms
+  const after = buildRooms(asPlan(kept)).rooms
   if (after.length !== before.length) return walls
-  return out
+  return kept
 }

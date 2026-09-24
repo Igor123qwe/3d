@@ -44,7 +44,7 @@ import { applyH, cleanRaster, distanceToInk, dominantAngle, floodRoom, grayToIma
 import type { Guide } from './snapping'
 import { aiStatus, askLayout, askRoomLabel, askSpot, cropForVision, lookupProductViaServer, recognizePlan, type AiStatus } from './ai'
 import { applyAiPlan, convertAiPlan, fitResultToLabels, type ConvertResult } from './planai'
-import { evenOuterWalls, rectifyWalls } from './rectify'
+import { evenWalls, rectifyWalls } from './rectify'
 import { pointOnSide } from './reconstruct'
 import { pointOnOutline } from './picture'
 import type { LabelDispute } from './segment'
@@ -1143,14 +1143,18 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
    * комната видела на своей высоте, становится одной. Проёмы держатся за стены
    */
   const straightenResult = (res: ConvertResult, st: { img: LoadedImage; original?: string; forward: number[] } | null): ConvertResult => {
-    if (!st) return { ...res, walls: evenOuterWalls(res.walls) }
+    if (!st) {
+      const walls = evenWalls(res.walls)
+      const ids = new Set(walls.map((w) => w.id))
+      return { ...res, walls, openings: res.openings.filter((o) => ids.has(o.wallId)) }
+    }
     const from = res.underlay
     const s = from.scale
     const cx = from.x + (from.px.w * s) / 2
     const cy = from.y + (from.px.h * s) / 2
     const to: Underlay = { ...from, src: st.img.src, original: st.original ?? from.original, px: { w: st.img.w, h: st.img.h }, x: cx - (st.img.w * s) / 2, y: cy - (st.img.h * s) / 2 }
     const map = (p: Pt) => toPlan(to, applyH(st.forward, toPixel(from, p)))
-    const walls = evenOuterWalls(rectifyWalls(res.walls, map))
+    const walls = evenWalls(rectifyWalls(res.walls, map))
     const ids = new Set(walls.map((w) => w.id))
     return {
       ...res,

@@ -97,6 +97,44 @@ describe('размеры по подписям', () => {
     expect(buildRooms(asPlan(res.walls)).rooms).toHaveLength(3)
   })
 
+  it('ступенька не на месте: подписи, что стоят точно у своих граней, сходятся, даже если длина разошлась на 15 %', () => {
+    const w = (id: string, ax: number, ay: number, bx: number, by: number, thickness = 10): Wall => ({ id, a: { x: ax, y: ay }, b: { x: bx, y: by }, thickness })
+    // комната 300 × 400 с нишей справа сверху: ниша по картинке 110 в высоту, стена под ней 290;
+    // на плане — 129 и 271 (низ ниши распознан на 19 см выше)
+    const walls = [
+      w('t', 0, 0, 370, 0),
+      w('l', 0, 0, 0, 400),
+      w('b', 0, 400, 300, 400),
+      w('r', 300, 110, 300, 400),
+      w('nb', 300, 110, 370, 110),
+      w('nr', 370, 0, 370, 110),
+    ]
+    const inner = [
+      { x: 5, y: 5 },
+      { x: 365, y: 5 },
+      { x: 365, y: 105 },
+      { x: 295, y: 105 },
+      { x: 295, y: 395 },
+      { x: 5, y: 395 },
+    ]
+    const res = fitToLabels(walls, [
+      {
+        name: '1',
+        axes: [],
+        inner,
+        walls: [
+          { side: 'right', at: 0.13, cm: 119 },
+          { side: 'right', at: 0.63, cm: 271 },
+        ],
+      },
+    ])
+    const at = (id: string) => res.walls.find((x) => x.id === id)!
+    const face = (id: string, s: number) => at(id).a.y + (s * at(id).thickness) / 2
+    // низ ниши опустился: ниша 119 в чистоте, стена под ней 271
+    expect(face('nb', -1) - face('t', 1)).toBeCloseTo(119, 0)
+    expect(face('b', -1) - face('nb', -1)).toBeCloseTo(271, 0)
+  })
+
   it('подпись, что расходится с картинкой сильнее 6 %, — ошибка чтения: стены не двигаются', () => {
     const res = fitToLabels(walls, [room('4ж', 0, 410, 310), room('2', 410, 762, 342)])
     expect(res.fixes).toEqual([])

@@ -190,7 +190,7 @@ const bbox = (pts: Pt[]) => ({
  * Счёт — насколько далеко от места подписи и насколько другая длина: меньше —
  * лучше
  */
-function edgeCandidates(inner: Pt[], label: WallLabel): { lo: number; hi: number; score: number; index: number }[] {
+function edgeCandidates(inner: Pt[], label: WallLabel, relaxed = false): { lo: number; hi: number; score: number; index: number }[] {
   const b = bbox(inner)
   const horizontal = label.side === 'top' || label.side === 'bottom'
   // обход контура по часовой (y вниз): верхняя грань идёт вправо, нижняя — влево
@@ -215,9 +215,13 @@ function edgeCandidates(inner: Pt[], label: WallLabel): { lo: number; hi: number
     const lo = horizontal ? Math.min(p.x, q.x) : Math.min(p.y, q.y)
     const hi = horizontal ? Math.max(p.x, q.x) : Math.max(p.y, q.y)
     const len = hi - lo
-    // грань неверной длины — чужая подпись или ошибка распознавания: не тянуть
-    if (Math.abs(len - label.cm) > Math.max(8, 0.1 * label.cm)) continue
     const mid = ((lo + hi) / 2 - (horizontal ? b.x1 : b.y1)) / Math.max(1, horizontal ? b.x2 - b.x1 : b.y2 - b.y1)
+    // Грань неверной длины — чужая подпись или ошибка распознавания: не
+    // тянуть. Но если подпись стоит точно у этой грани, а длина разошлась до
+    // 20 %, — это ступенька, распознанная не на месте (низ ниши 1,29 вышел
+    // на 20 см выше: ниша 109, стена под ней 269 вместо 242)
+    const tol = relaxed && Math.abs(mid - label.at) <= 0.08 ? Math.max(20, 0.2 * label.cm) : Math.max(8, 0.1 * label.cm)
+    if (Math.abs(len - label.cm) > tol) continue
     out.push({ lo, hi, index: i, score: Math.abs(mid - label.at) + Math.abs(len - label.cm) / Math.max(30, label.cm) })
   }
   return out
@@ -263,7 +267,10 @@ export function fitToLabels(walls: Wall[], rooms: LabelledRoom[]): { walls: Wall
     pairs.sort((p, q) => p.score - q.score)
     const usedEdge = new Set<number>()
     const usedLabel = new Set<number>()
-    for (const e of pairs) {
+    // вторым заходом — подписи, что стоят точно у своей грани, но разошлись с ней по длине
+    const loose = (r.walls ?? []).flatMap((label, k) => edgeCandidates(r.inner, label, true).map((e) => ({ ...e, k, label, score: e.score + 1 })))
+    loose.sort((p, q) => p.score - q.score)
+    for (const e of [...pairs, ...loose]) {
       if (usedEdge.has(e.index) || usedLabel.has(e.k)) continue
       usedEdge.add(e.index)
       usedLabel.add(e.k)
