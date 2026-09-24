@@ -341,14 +341,16 @@ describe('план, обрезанный краем фото', () => {
     const found = segmentRooms(d2, W, H, 8)
     const right = found.find((r) => r.x1 > 190 && r.x1 < 220)!
     expect(right).toBeDefined()
-    // рамка по медианам — по стене, а не по краю листа; площадь — не больше рамки
-    expect(right.x2).toBeLessThan(345)
-    expect(right.areaPx).toBeLessThanOrEqual((right.x2 - right.x1 + 1) * (right.y2 - right.y1 + 1))
+    // контур — по стенам, а не по краю листа: в дырку у угла он заходит лишь
+    // на толщину стены, площадь — почти как у обнесённой стенами части
+    expect(right.x2).toBeLessThan(360)
+    const walled = (334 - 207) * (240 - 47)
+    expect(Math.abs(right.areaPx - walled) / walled).toBeLessThan(0.05)
   })
 })
 
 describe('Г-образная комната рядом с коридором', () => {
-  it('рамка Г-образной комнаты накрывает начало коридора — угол помечается её вырезом, коридор целый', () => {
+  it('Г-образная комната обводится шестью углами, коридор в её углу — отдельная прямоугольная комната', () => {
     const W = 600
     const H = 500
     const { g, rect } = sheet(W, H)
@@ -358,9 +360,9 @@ describe('Г-образная комната рядом с коридором', 
     rect(40, 40, 340, 340, 255) // комната
     rect(240, 240, 560, 340, 255) // коридор (угол общий)
     rect(340, 40, 560, 232, 255) // кухня над коридором
-    // стены между коридором и комнатой: вертикальная 232..240 по x от y 240 до 340, горизонтальная 232..240 по y от x 240 до 340
-    rect(232, 240, 240, 340)
-    rect(240, 232, 340, 240)
+    // стены между коридором и комнатой: вертикальная 232..240 по x от y 232 до 340, горизонтальная 232..240 по y от x 232 до 340
+    rect(232, 232, 240, 340)
+    rect(232, 232, 340, 240)
     rect(340, 40, 348, 240) // стена комната|кухня
     const d2 = distanceToInk(despeckle(binarize(g, W, H)))
     const found = segmentRooms(d2, W, H, 14)
@@ -369,11 +371,16 @@ describe('Г-образная комната рядом с коридором', 
     const hall = found.find((r) => r.x2 > 540 && r.y1 > 200)!
     expect(room).toBeDefined()
     expect(hall).toBeDefined()
-    // угол принадлежит коридору: комната уступает его, коридор не уступает ничего
-    expect(room.yieldsTo).toEqual([found.indexOf(hall)])
-    expect(hall.yieldsTo).toBeUndefined()
-    // площадь комнаты — по заполнению, а не по рамке: без угла коридора
-    expect(room.areaPx).toBeLessThan((room.x2 - room.x1) * (room.y2 - room.y1) * 0.95)
+    // контур по пикселям: у комнаты вырез под коридор, коридор — прямоугольник
+    expect(room.poly).toHaveLength(6)
+    expect(hall.poly).toHaveLength(4)
+    // грани — по стенам, с точностью до пикселя
+    expect(room.x1).toBeCloseTo(40, -0.5)
+    expect(room.y2).toBeCloseTo(341, -0.5)
+    expect(hall.x1).toBeCloseTo(241, -0.5)
+    // площадь — по контуру: без угла коридора
+    const want = 301 * 301 - 109 * 109
+    expect(Math.abs(room.areaPx - want) / want).toBeLessThan(0.03)
   })
 })
 

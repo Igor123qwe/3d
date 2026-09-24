@@ -205,6 +205,35 @@ export function removeSpikes(poly: Pt[], eps = 0.5): Pt[] {
   return pts
 }
 
+/**
+ * Убрать вершины посреди прямой, в том числе возвраты назад по той же прямой.
+ * Такие появляются во внутреннем контуре, когда стена примыкает к соседней у
+ * самого угла комнаты — ближе, чем полтолщины той стены
+ */
+export function dropCollinear(poly: Pt[], eps = 1e-6): Pt[] {
+  let pts = poly.slice()
+  for (let changed = true; changed && pts.length > 3; ) {
+    changed = false
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[(i - 1 + pts.length) % pts.length]
+      const b = pts[i]
+      const c = pts[(i + 1) % pts.length]
+      const ux = b.x - a.x
+      const uy = b.y - a.y
+      const vx = c.x - b.x
+      const vy = c.y - b.y
+      const lu = Math.hypot(ux, uy)
+      const lv = Math.hypot(vx, vy)
+      if (lu < 1e-9 || lv < 1e-9 || Math.abs(ux * vy - uy * vx) <= eps * lu * lv) {
+        pts = pts.filter((_, k) => k !== i)
+        changed = true
+        break
+      }
+    }
+  }
+  return pts
+}
+
 /** внутренний параллельный контур: insets[i] — отступ ребра poly[i]→poly[i+1] */
 export function offsetPolygon(poly: Pt[], insets: number[]): Pt[] {
   const n = poly.length

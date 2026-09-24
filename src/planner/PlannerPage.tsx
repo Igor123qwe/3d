@@ -45,6 +45,7 @@ import type { Guide } from './snapping'
 import { aiStatus, askLayout, askRoomLabel, askSpot, cropForVision, lookupProductViaServer, recognizePlan, type AiStatus } from './ai'
 import { applyAiPlan, convertAiPlan } from './planai'
 import { pointOnSide } from './reconstruct'
+import { pointOnOutline } from './picture'
 import type { LabelDispute } from './segment'
 import type { AiBox, AiPlan } from './aicontract'
 import { checkAiPlan } from './aicontract'
@@ -806,6 +807,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         if (!r.d2) r.d2 = distanceToInk(r.clean.bin)
         return { w: u.px.w, h: u.px.h, scale: u.scale, ink: r.clean.bin.ink, walls: r.clean.walls.ink, d2: r.d2 }
       },
+      /** комнаты с картинки — те же, что берёт распознавание */
+      regions: async () => (plan.underlay ? regionsOf(plan.underlay) : []),
       segmentRooms,
       segmentRoomsAuto,
       /**
@@ -832,7 +835,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           report: result.report,
           regions: regions.length,
           walls: result.walls.map((w) => [Math.round(w.a.x), Math.round(w.a.y), Math.round(w.b.x), Math.round(w.b.y), w.thickness]),
-          regionBoxes: regions.map((g) => [Math.round(g.x1), Math.round(g.y1), Math.round(g.x2), Math.round(g.y2), g.yieldsTo ?? null]),
+          regionBoxes: regions.map((g) => [Math.round(g.x1), Math.round(g.y1), Math.round(g.x2), Math.round(g.y2), g.poly?.length ?? 4]),
           rooms: rooms.map((r) => ({
             name: r.meta.name,
             areaM2: r.area,
@@ -896,7 +899,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         const name = ans.room.name || `Помещение ${rooms.length + 1}`
         rooms.push({ name, kind: ans.room.kind, areaM2: ans.room.areaM2, widthCm: ans.room.widthCm, depthCm: ans.room.depthCm, x: at.x, y: at.y, box })
         for (const o of ans.room.openings ?? []) {
-          const p = pointOnSide({ x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2 }, o.side, o.at)
+          const p = r.poly ? pointOnOutline(r.poly, o.side, o.at) : pointOnSide({ x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2 }, o.side, o.at)
           openings.push({ kind: o.kind, room: name, side: o.side, at: o.at, x: p.x / u.px.w, y: p.y / u.px.h, widthCm: o.widthCm })
         }
       })
@@ -981,7 +984,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         setToast(regions.length ? 'На картинке нашлась только одна замкнутая область — попробуйте «Очистить» фото или «Комната по клику»' : 'Замкнутых комнат на картинке не нашлось: линии стен прерываются. Попробуйте «Очистить» или «Комната по клику»')
         return
       }
-      const result = convertAiPlan({ walls: [], openings: [], rooms: [], dimensions: [] }, u, { keepScale: true, regions })
+      const d2 = rasterRef.current?.d2
+      const result = convertAiPlan({ walls: [], openings: [], rooms: [], dimensions: [] }, u, { keepScale: true, regions, raster: d2 ? { d2, w: u.px.w, h: u.px.h } : null })
       if (!result.walls.length) {
         setToast('Комнаты нашлись, но стены из них не собрались — проверьте картинку')
         return

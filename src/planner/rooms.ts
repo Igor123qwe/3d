@@ -2,6 +2,7 @@ import type { Plan, Pt, Room, RoomMeta, Wall } from './types'
 import { uid } from './types'
 import {
   dist,
+  dropCollinear,
   eq,
   interiorPoint,
   lerp,
@@ -192,7 +193,7 @@ export function buildRooms(plan: Plan): { rooms: Room[]; metas: RoomMeta[] } {
   const metas = plan.rooms.slice()
   const rooms: Room[] = []
   faces.forEach((f) => {
-    const inner = offsetPolygon(f.polygon, f.thick.map((t) => t / 2))
+    const inner = dropCollinear(offsetPolygon(f.polygon, f.thick.map((t) => t / 2)))
     const areaM2 = Math.abs(polyArea(inner)) / 10000
     const anchor = interiorPoint(f.polygon)
     const idx = metas.findIndex((m) => !used.has(m.id) && pointInPoly(m.anchor, f.polygon))

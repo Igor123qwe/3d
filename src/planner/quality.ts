@@ -19,7 +19,7 @@ import type { AiPlan } from './aicontract'
 import type { Opening, Plan, Pt, RoomMeta, Underlay, Wall } from './types'
 import type { RoomRegion } from './raster'
 import type { AreaFit, DimSpan } from './reconstruct'
-import type { LabelDispute } from './segment'
+import { regionPoly, type LabelDispute } from './segment'
 import { buildRooms } from './rooms'
 import { pointInPoly } from './geometry'
 
@@ -112,24 +112,24 @@ export function wallsOnInk(walls: Wall[], u: Underlay, raster: RasterInfo): { on
 
 /**
  * Контур комнаты на чертеже против области на картинке: IoU на сетке пикселей.
- * Область — её рамка без углов, отданных соседям; контур — многоугольник по
- * осям стен, переведённый в пиксели картинки
+ * Область — её контур по пикселям (у Г-образной — шесть углов); контур
+ * комнаты — многоугольник чертежа, переведённый в пиксели картинки
  */
-export function shapeIou(polygon: Pt[], region: RoomRegion, regions: RoomRegion[], u: Underlay): number {
-  const yielded = (region.yieldsTo ?? []).map((i) => regions[i]).filter(Boolean)
+export function shapeIou(polygon: Pt[], region: RoomRegion, u: Underlay): number {
+  const shape = regionPoly(region)
   const poly = polygon.map((p) => ({ x: (p.x - u.x) / u.scale, y: (p.y - u.y) / u.scale }))
-  const xs = poly.map((p) => p.x)
-  const ys = poly.map((p) => p.y)
-  const x1 = Math.floor(Math.min(region.x1, ...xs))
-  const y1 = Math.floor(Math.min(region.y1, ...ys))
-  const x2 = Math.ceil(Math.max(region.x2, ...xs))
-  const y2 = Math.ceil(Math.max(region.y2, ...ys))
+  const xs = [...poly, ...shape].map((p) => p.x)
+  const ys = [...poly, ...shape].map((p) => p.y)
+  const x1 = Math.floor(Math.min(...xs))
+  const y1 = Math.floor(Math.min(...ys))
+  const x2 = Math.ceil(Math.max(...xs))
+  const y2 = Math.ceil(Math.max(...ys))
   const cell = Math.max(1, Math.round(Math.max(x2 - x1, y2 - y1) / 120))
   let inter = 0
   let union = 0
   for (let y = y1 + cell / 2; y <= y2; y += cell) {
     for (let x = x1 + cell / 2; x <= x2; x += cell) {
-      const inRegion = x >= region.x1 && x <= region.x2 && y >= region.y1 && y <= region.y2 && !yielded.some((s) => x >= s.x1 && x <= s.x2 && y >= s.y1 && y <= s.y2)
+      const inRegion = pointInPoly({ x, y }, shape)
       const inPoly = pointInPoly({ x, y }, poly)
       if (inRegion && inPoly) inter++
       if (inRegion || inPoly) union++
@@ -201,7 +201,7 @@ export function assessQuality(inp: QualityInput): QualityReport {
       const room = built.find((b) => pointInPoly(c, b.polygon))
       if (!room) continue
       // область с картинки — по внутренним граням стен, значит и контур комнаты берётся внутренний
-      shapes.push({ name: room.meta.name, iou: shapeIou(room.inner, region, regions, u) })
+      shapes.push({ name: room.meta.name, iou: shapeIou(room.inner, region, u) })
     }
     const bad = shapes.filter((s) => s.iou < 0.8)
     if (bad.length) issues.push(`форма расходится с картинкой: ${bad.map((s) => `${s.name} (${Math.round(s.iou * 100)} %)`).join(', ')}`)

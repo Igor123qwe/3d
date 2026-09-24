@@ -61,10 +61,19 @@ describe('подписи модели к областям', () => {
 })
 
 describe('Г-образные комнаты', () => {
-  it('область, уступившая угол, называет соседа по имени — и безымянного тоже', () => {
-    const regions = [{ ...region(40, 40, 440, 440), yieldsTo: [1] }, region(300, 300, 700, 440)]
-    const r = roomsFromRegions(regions, px, [label('Гостиная', 14.4, 100, 100)], 30)
-    expect(r.rooms[0].yieldsTo).toEqual(['Помещение 2'])
-    expect(r.rooms[1].yieldsTo).toBeUndefined()
+  it('подпись в вырезе Г-образной комнаты достаётся соседу, чья она на самом деле', () => {
+    // рамка гостиной накрывает начало коридора, но контур — нет
+    const poly = [
+      { x: 40, y: 40 },
+      { x: 440, y: 40 },
+      { x: 440, y: 300 },
+      { x: 300, y: 300 },
+      { x: 300, y: 440 },
+      { x: 40, y: 440 },
+    ]
+    const regions = [{ ...region(40, 40, 440, 440), poly }, region(300, 300, 700, 440)]
+    const r = roomsFromRegions(regions, px, [label('Коридор', 5.6, 400, 400)], 30)
+    expect(r.rooms[0].name).toBe('Помещение 1')
+    expect(r.rooms[1].name).toBe('Коридор')
   })
 })

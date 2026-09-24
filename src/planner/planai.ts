@@ -20,9 +20,10 @@ import { uid } from './types'
 import { MIN_WALL_LENGTH, WALL_THICKNESSES } from './ops'
 import { buildRooms } from './rooms'
 import { bboxOf, closestOnSeg, dist, pointInPoly } from './geometry'
-import { canRebuildFrom, pointOnSide, reconstructFromRooms, scaleSamplesFromRooms, type AreaFit } from './reconstruct'
+import { canRebuildFrom, DEFAULT_RECONSTRUCT, pointOnSide, reconstructFromRooms, scaleSamplesFromRooms, type AreaFit } from './reconstruct'
+import { pointOnOutline, wallsFromPicture } from './picture'
 import type { RoomRegion } from './raster'
-import { roomsFromRegions, type LabelDispute } from './segment'
+import { regionPoly, roomsFromRegions, type LabelDispute } from './segment'
 import { assessQuality, type QualityReport, type RasterInfo } from './quality'
 
 export interface ConvertOptions {
@@ -361,8 +362,20 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
   // заливка не нашла замкнутой области, — под подозрением. Без картинки не
   // выбрасывается ничего: спорное остаётся и помечается
   const canDrop = (r: AiRoom): boolean => !bySegments && !!o.ground && !groundedNames.has(r.name)
-  // комнаты сняты с картинки — стены встают по ней, подписи их не двигают
-  const rebuilt = rooms.some(canRebuildFrom) ? reconstructFromRooms(rooms, u, { ...wallThicknesses(ai), fixed: bySegments }, bySegments ? [] : dimSpans, canDrop) : null
+  // Комнаты сняты с картинки — стены встают по их контурам, подписи их не
+  // двигают. Иначе чертёж собирается по числам из рамок модели
+  const thick = { ...DEFAULT_RECONSTRUCT, ...wallThicknesses(ai) }
+  const raster = o.raster && o.raster.w === px.w && o.raster.h === px.h ? o.raster.d2 : null
+  const rebuilt = bySegments
+    ? wallsFromPicture(
+        regions.map((r, j) => ({ name: rooms[j].name, kind: rooms[j].kind, poly: regionPoly(r), wantM2: rooms[j].areaM2 })),
+        u,
+        raster,
+        { interiorCm: thick.interiorCm, exteriorCm: thick.exteriorCm },
+      )
+    : rooms.some(canRebuildFrom)
+      ? reconstructFromRooms(rooms, u, wallThicknesses(ai), dimSpans, canDrop)
+      : null
   const closedByNumbers = rebuilt ? rebuilt.rooms.filter((r) => r.haveM2 !== undefined).length : 0
   const byNumbers = !!rebuilt && closedByNumbers > 0 && closedByNumbers >= closedRooms(walls, ai, u)
   const method: ConvertMethod = byNumbers ? (bySegments ? 'по комнатам с картинки' : 'по размерам комнат') : 'по линиям стен'
@@ -403,7 +416,7 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
     const options: Pt[] = []
     if (byNumbers && rebuilt && op.room && op.side && op.at !== undefined) {
       const room = rebuilt.rooms.find((r) => r.name === op.room)
-      if (room) options.push(pointOnSide(room.rect, op.side, op.at))
+      if (room) options.push(room.outline ? pointOnOutline(room.outline, op.side, op.at) : pointOnSide(room.rect, op.side, op.at))
     }
     options.push(toPlanPt(u, { x: op.x * px.w, y: op.y * px.h }))
     let hit: { wall: Wall; t: number; d: number } | null = null

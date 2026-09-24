@@ -29,15 +29,9 @@ export interface ReconstructOptions {
   exteriorCm?: number
   /** ближе скольких сантиметров грани комнат считаются одной осью стены */
   snapCm?: number
-  /**
-   * Геометрия — строго по картинке: комнаты сняты с неё по внутренним граням
-   * стен, и стены встают туда, где они на фото. Подписи тогда только
-   * проверяют результат и не двигают ни одной стены
-   */
-  fixed?: boolean
 }
 
-export const DEFAULT_RECONSTRUCT: Required<ReconstructOptions> = { interiorCm: 10, exteriorCm: 40, snapCm: 25, fixed: false }
+export const DEFAULT_RECONSTRUCT: Required<ReconstructOptions> = { interiorCm: 10, exteriorCm: 40, snapCm: 25 }
 
 /** размеры двух комнат, делящих ось, различаются больше — значит, осей две (уступ стены) */
 const JOG_CM = 15
@@ -52,6 +46,8 @@ export interface PlacedRoom {
   anchor: Pt
   /** оси стен вокруг комнаты, см */
   rect: { x1: number; y1: number; x2: number; y2: number }
+  /** контур по осям стен, если комната не прямоугольник (снята с картинки), см */
+  outline?: Pt[]
   wantM2?: number
   /** площадь получившейся комнаты; нет — контур не замкнулся */
   haveM2?: number
@@ -214,7 +210,7 @@ function sizeRoom(r: AiRoom & { box: AiBox }, u: Underlay, all: (AiRoom & { box:
  * смотрят друг на друга через такую щель, — одна стена: сводим их к середине.
  * Грани с одной стороны (правая над правой) так не трогаем — там бывает уступ.
  */
-function closeFacingGaps(rects: Rect[], rawX: number[], rawY: number[], minGap: number, t: number, fixed = false): number[] {
+function closeFacingGaps(rects: Rect[], rawX: number[], rawY: number[], minGap: number, t: number): number[] {
   const overlap1 = (a1: number, a2: number, b1: number, b2: number) => Math.max(0, Math.min(a2, b2) - Math.max(a1, b1))
   // толщина стены между точными рамками с картинки — сама щель между гранями:
   // по ней стена и рисуется (шахта между санузлом и коридором бывает и в полметра)
@@ -226,29 +222,7 @@ function closeFacingGaps(rects: Rect[], rawX: number[], rawY: number[], minGap: 
   // доходит до 60–90 см, а коридор между комнатами уже 90 см — редкость.
   // Рамки могут и налезть друг на друга (шум картинки): комнаты не пересекаются,
   // так что небольшое наложение — тоже общая стена
-  // По картинке: пустая полоса между двумя комнатами, где нет третьей, — это
-  // стена (толстая — значит, с шахтой), а не щель. Сводим её в одну стену
-  // шириной с полосу, лишь бы не шире метра с небольшим
-  const maxGap = (a: number, b: number) => (fixed ? Math.max(minGap, 110) : Math.max(minGap, 0.22 * Math.min(a, b)))
-  // между гранями a и b лежит другая комната — тогда это не их общая стена
-  const between = (i: number, j: number, vertical: boolean): boolean =>
-    rects.some((c, m) => {
-      if (m === i || m === j) return false
-      if (vertical) {
-        const lo = rawX[i * 2 + 1]
-        const hi = rawX[j * 2]
-        const cx1 = rawX[m * 2]
-        const cx2 = rawX[m * 2 + 1]
-        const oy = overlap1(rawY[m * 2], rawY[m * 2 + 1], Math.max(rawY[i * 2], rawY[j * 2]), Math.min(rawY[i * 2 + 1], rawY[j * 2 + 1]))
-        return oy > 0 && cx1 < hi && cx2 > lo
-      }
-      const lo = rawY[i * 2 + 1]
-      const hi = rawY[j * 2]
-      const cy1 = rawY[m * 2]
-      const cy2 = rawY[m * 2 + 1]
-      const ox = overlap1(rawX[m * 2], rawX[m * 2 + 1], Math.max(rawX[i * 2], rawX[j * 2]), Math.min(rawX[i * 2 + 1], rawX[j * 2 + 1]))
-      return ox > 0 && cy1 < hi && cy2 > lo
-    })
+  const maxGap = (a: number, b: number) => Math.max(minGap, 0.22 * Math.min(a, b))
   // наложение растёт с шумом так же, как щель — с размером комнаты
   const minOverlap = (a: number, b: number) => -Math.max(minGap, 0.3 * Math.min(a, b))
   for (let i = 0; i < rects.length; i++) {
@@ -270,7 +244,7 @@ function closeFacingGaps(rects: Rect[], rawX: number[], rawY: number[], minGap: 
       const spanY = overlap1(a.cy - a.bh / 2, a.cy + a.bh / 2, b.cy - b.bh / 2, b.cy + b.bh / 2)
       if (gives && spanY <= gives.bh * 0.7) {
         // грань уходит в вырез — пропускаем только её
-      } else if (gapX > minOverlap(a.bw, b.bw) && gapX <= maxGap(a.bw, b.bw) && spanY > Math.min(a.bh, b.bh) * 0.3 && !(fixed && gapX > minGap && between(i, j, true))) {
+      } else if (gapX > minOverlap(a.bw, b.bw) && gapX <= maxGap(a.bw, b.bw) && spanY > Math.min(a.bh, b.bh) * 0.3) {
         const mid = (rawX[j * 2] + rawX[i * 2 + 1]) / 2
         // между внутренними гранями — щель плюс те t/2, что уже заложены в грани
         // между внутренними гранями — щель плюс те t/2 с каждой стороны, что уже заложены в грани
@@ -283,7 +257,7 @@ function closeFacingGaps(rects: Rect[], rawX: number[], rawY: number[], minGap: 
       const spanX = overlap1(a.cx - a.bw / 2, a.cx + a.bw / 2, b.cx - b.bw / 2, b.cx + b.bw / 2)
       if (gives && spanX <= gives.bw * 0.7) {
         // грань уходит в вырез — пропускаем только её
-      } else if (gapY > minOverlap(a.bh, b.bh) && gapY <= maxGap(a.bh, b.bh) && spanX > Math.min(a.bw, b.bw) * 0.3 && !(fixed && gapY > minGap && between(i, j, false))) {
+      } else if (gapY > minOverlap(a.bh, b.bh) && gapY <= maxGap(a.bh, b.bh) && spanX > Math.min(a.bw, b.bw) * 0.3) {
         const mid = (rawY[j * 2] + rawY[i * 2 + 1]) / 2
         if (exact && gapY > -t) edgeGap[i * 4 + 3] = edgeGap[j * 4 + 2] = gapY + t
         rawY[j * 2] = mid
@@ -583,9 +557,7 @@ export function reconstructFromRooms(rooms: AiRoom[], u: Underlay, options: Reco
   let best = reconstructCore(current, u, options, dims)
   const dropped: string[] = []
   const doubtful = new Set<string>()
-  // по картинке комнаты не выбрасываются и не перебираются: геометрия от подписей
-  // не зависит, а несходящиеся подписи и так названы спорными
-  for (let attempt = 0; attempt < (options.fixed ? 0 : 2); attempt++) {
+  for (let attempt = 0; attempt < 2; attempt++) {
     const acc = best.areaFit?.accuracy ?? 1
     if (acc >= 0.9 || current.length < 3 || (best.areaFit?.samples ?? 0) < 2) break
     let candidate: { res: ReconstructResult; room: AiRoom } | null = null
@@ -614,11 +586,7 @@ function reconstructCore(rooms: AiRoom[], u: Underlay, options: ReconstructOptio
   const o = { ...DEFAULT_RECONSTRUCT, ...options }
   const skipped: string[] = []
   const boxed = rooms.filter(canRebuildFrom)
-  const sized = boxed.map((r) => {
-    const z = sizeRoom(r, u, boxed)
-    // по картинке: размеры комнаты — её рамка на фото, подпись их не меняет
-    return o.fixed ? { ...z, w: z.bw, h: z.bh, wLabelled: false, hLabelled: false, fixedW: false, fixedH: false } : z
-  })
+  const sized = boxed.map((r) => sizeRoom(r, u, boxed))
   // комната уже полуметра — ниша или шкаф, а не комната: осей ей не хватит
   const rects = sized.filter((r) => {
     const ok = r.w >= 60 && r.h >= 60
@@ -637,19 +605,6 @@ function reconstructCore(rooms: AiRoom[], u: Underlay, options: ReconstructOptio
   const span = (r: Rect, axis: 'x' | 'y'): [number, number] => {
     const c = axis === 'x' ? r.cx : r.cy
     const b = axis === 'x' ? r.bw : r.bh
-    if (o.fixed) {
-      // Картинка — правда. Исключение одно: сторона упёрлась в край кадра, фото
-      // там обрезано, и что за краем, знает только подпись. Растягиваем комнату
-      // по подписи в эту сторону, и только если подпись больше картинки
-      const lab = axis === 'x' ? r.spec.widthCm : r.spec.depthCm
-      const lo = axis === 'x' ? 'left' : 'top'
-      const hi = axis === 'x' ? 'right' : 'bottom'
-      const cutLo = !!r.spec.cut?.includes(lo)
-      const cutHi = !!r.spec.cut?.includes(hi)
-      if (lab && lab > b * 1.1 && cutHi && !cutLo) return [c - b / 2 - t / 2, c - b / 2 + lab + t / 2]
-      if (lab && lab > b * 1.1 && cutLo && !cutHi) return [c + b / 2 - lab - t / 2, c + b / 2 + t / 2]
-      return [c - b / 2 - t / 2, c + b / 2 + t / 2]
-    }
     const v = axis === 'x' ? r.w : r.h
     const labelled = axis === 'x' ? r.wLabelled : r.hLabelled
     if (!r.spec.exact || !labelled || Math.abs(v - b) <= 0.15 * b) return [c - b / 2 - t / 2, c + b / 2 + t / 2]
@@ -665,7 +620,7 @@ function reconstructCore(rooms: AiRoom[], u: Underlay, options: ReconstructOptio
   }
   const rawX = rects.flatMap((r) => span(r, 'x'))
   const rawY = rects.flatMap((r) => span(r, 'y'))
-  const edgeGap = closeFacingGaps(rects, rawX, rawY, o.snapCm * 2.5, t, o.fixed)
+  const edgeGap = closeFacingGaps(rects, rawX, rawY, o.snapCm * 2.5, t)
   linkDeclaredNeighbors(rects, rawX, rawY)
 
   // 2. какие стороны наружные: рядом нет комнаты. Смотрим по граням после сведения
@@ -695,32 +650,7 @@ function reconstructCore(rooms: AiRoom[], u: Underlay, options: ReconstructOptio
     return covered < along / 2
   }
 
-  // Наружная стена по картинке: её ось — за гранью комнаты на половину толщины,
-  // а толщина измерена по фото. Без замера — типовая
-  const sideIdx: Record<AiSide, number> = { left: 0, right: 1, top: 2, bottom: 3 }
-  const extTh = new Array<number>(rects.length * 4).fill(o.exteriorCm)
-  if (o.fixed) {
-    rects.forEach((r, k) => {
-      for (const side of ['left', 'right', 'top', 'bottom'] as AiSide[]) {
-        if (!sideIsExterior(r, side)) continue
-        // Замер годится только для залитой стены: на планах БТИ стены нарисованы
-        // двойной тонкой линией, и замер до бумаги ловит одну линию в пару точек
-        const px = r.spec.wallPx?.[side]
-        const th = px && px >= 6 ? wallThickness(Math.min(80, Math.max(o.interiorCm, px * u.scale))) : o.exteriorCm
-        extTh[k * 4 + sideIdx[side]] = th
-        const shift = (th - t) / 2
-        if (side === 'left') rawX[k * 2] -= shift
-        if (side === 'right') rawX[k * 2 + 1] += shift
-        if (side === 'top') rawY[k * 2] -= shift
-        if (side === 'bottom') rawY[k * 2 + 1] += shift
-      }
-    })
-  }
-  // По картинке грани стоят точно — с разбросом в несколько точек: у каждой
-  // комнаты грань снята медианой по её собственным строкам, и окно или цифра
-  // у стены сдвигают её на пару пикселей. Такой разброс сводим в одну ось, а
-  // уступ заметно больше — оставляем уступом
-  const snap = o.fixed ? Math.max(8, 8 * u.scale) : o.snapCm
+  const snap = o.snapCm
   const cx = cluster(rawX, snap)
   const cy = cluster(rawY, snap)
 
@@ -772,8 +702,7 @@ function reconstructCore(rooms: AiRoom[], u: Underlay, options: ReconstructOptio
   // от подписанного и подгоняем снова. Две-три итерации сходятся.
   let X: number[] = cx.seed
   let Y: number[] = cy.seed
-  // по картинке оси уже на местах: подгонять нечего
-  for (let round = 0; round < (o.fixed ? 0 : 5); round++) {
+  for (let round = 0; round < 5; round++) {
     const specs = rects.map(specOf)
     X = optimizeAxes(cx.index, X, rawX, specs.map((c) => ({ d: c.dw, w: c.ww, exact: c.wExact })), o, extrasX)
     Y = optimizeAxes(cy.index, Y, rawY, specs.map((c) => ({ d: c.dh, w: c.wh, exact: c.hExact })), o, extrasY)
@@ -876,14 +805,7 @@ function reconstructCore(rooms: AiRoom[], u: Underlay, options: ReconstructOptio
       const inner = (before || after) && !(before && after) && placed.some((s) => !near.includes(s) && insideRoom(s, mid) && near.some((n) => s.spec.yieldsTo?.includes(n.spec.name)))
       // перегородка между точными рамками — толщиной в измеренную щель
       const measured = Math.max(0, ...edge.map((r) => edgeGap[rects.indexOf(r) * 4 + (vertical ? (r.xj === k ? 1 : 0) : r.yj === k ? 3 : 2)]))
-      // наружная — по замеру с картинки у прилегающей комнаты, иначе типовая
-      const outerTh = () => {
-        const vals = edge.map((r) => extTh[rects.indexOf(r) * 4 + (vertical ? (r.xj === k ? 1 : 0) : r.yj === k ? 3 : 2)])
-        return vals.length ? Math.max(...vals) : o.exteriorCm
-      }
-      // по картинке толщина — ровно измеренная щель, иначе грани комнат уйдут с фото
-      const shared = measured > o.interiorCm ? (o.fixed ? Math.round(measured) : wallThickness(measured)) : o.interiorCm
-      const th = before && after ? shared : inner ? o.interiorCm : before || after ? outerTh() : 0
+      const th = before && after ? (measured > o.interiorCm ? wallThickness(measured) : o.interiorCm) : inner ? o.interiorCm : before || after ? o.exteriorCm : 0
       if (!th) {
         flush()
         continue

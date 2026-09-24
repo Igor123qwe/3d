@@ -12,6 +12,8 @@
 import type { Pt } from './types'
 import type { LoadedImage } from './underlay'
 import { otsuThreshold } from './underlay'
+import { interiorPoint, pointInPoly } from './geometry'
+import { outlineRegions } from './picture'
 
 export interface Bin {
   /** 1 — чернила (линии), 0 — бумага */
@@ -710,10 +712,11 @@ export interface RoomRegion {
   id?: number
   /** сколько точек в самой области (без расширения до стен) — для порогов «слишком мелко» */
   points: number
-  /** комната Г-образная: области с этими номерами (в выдаче) заходят в её рамку углом, и там место их */
-  yieldsTo?: number[]
-  /** толщина стены за каждой стороной, измеренная по картинке, px; нет — не измерилась */
-  wallPx?: Partial<Record<'top' | 'right' | 'bottom' | 'left', number>>
+  /**
+   * контур по внутренним граням стен, пиксели: многоугольник с прямыми углами,
+   * обведённый по самой области. Г-образная комната — шесть углов, а не рамка
+   */
+  poly?: Pt[]
 }
 
 /**
@@ -847,10 +850,11 @@ function measureRegion(labels: Int32Array, id: number, w: number, h: number, box
 }
 
 /**
- * Г-образная область — это две комнаты без двери между ними (кухня и коридор)
- * или комната с нишей. Режем там, где ширина области резко меняется: по строке
- * или столбцу со ступенькой профиля, и только если куски заполняют свои рамки
- * лучше целого. Куски метятся новыми номерами в labels, чтобы их измерить.
+ * Область у края листа, к которой подтекло поле через дырку в стене или
+ * обрезанный угол: срезаем поле полосами там, где ширина области резко
+ * меняется, — по строке или столбцу со ступенькой профиля, и только если куски
+ * заполняют свои рамки лучше целого. Области внутри плана не режутся: их форму
+ * честно передаёт контур по пикселям. Куски метятся новыми номерами в labels.
  */
 function splitRegion(labels: Int32Array, id: number, w: number, h: number, box: PxRect, closePx: number, minArea: number, nextId: () => number, depth: number, cutIn: CutSides = {}): RoomRegion[] {
   const whole = measureRegion(labels, id, w, h, box, closePx, cutIn)
@@ -1005,7 +1009,12 @@ export function segmentRooms(d2: Float32Array, w: number, h: number, closePx: nu
     // Слишком большая область — это поле листа, возможно с подтёкшей в него
     // комнатой; её всё равно режем, а предел площади проверяем по кускам
     if (count < minArea) continue
-    for (const piece of splitRegion(labels, id, w, h, box, closePx, minArea, nextId, 0)) {
+    // Внутри плана область не режется: Г-образная прихожая — одна комната, и
+    // контур по пикселям это покажет. Режется только область у края листа —
+    // там к комнате могло подтечь поле через дырку в стене
+    const atEdge = box.x1 <= clip.x1 || box.y1 <= clip.y1 || box.x2 >= clip.x2 || box.y2 >= clip.y2
+    const pieces = atEdge ? splitRegion(labels, id, w, h, box, closePx, minArea, nextId, 0) : [measureRegion(labels, id, w, h, box, closePx)].filter((r): r is RoomRegion => !!r)
+    for (const piece of pieces) {
       if (piece.areaPx > maxArea) continue
       // Поле вокруг квартиры обнимает план и касается трёх-четырёх сторон листа —
       // это не комната. Комната, обрезанная краем фото, касается одной-двух
@@ -1027,65 +1036,31 @@ export function segmentRooms(d2: Float32Array, w: number, h: number, closePx: nu
       out.push(piece)
     }
   }
-  // Рамки двух областей перекрылись — одна из комнат Г-образная (коридор
-  // заходит в её угол), и медианная рамка накрыла чужое. Чьё это место, говорят
-  // сами точки: у кого их в перекрытии больше, тот и хозяин; у другой это
-  // место помечается вырезом — на чертеже там будет стена соседа, не её
   // комнаты квартиры примыкают друг к другу; область в стороне от всех — обрывок
   // поля, текст на полях или кусок соседнего плана
   const near = Math.max(2 * closePx + 6, Math.min(w, h) * 0.06)
-  const kept = (out.length < 2 ? out : out.filter((r) => out.some((s) => s !== r && adjacent(r, s, near)))).sort((a, b) => b.areaPx - a.areaPx)
-  resolveOverlaps(kept, labels, w)
-  for (const r of kept) r.wallPx = sideWallPx(d2, w, h, r)
-  return kept
-}
-
-/**
- * Толщина стены за каждой стороной комнаты — прямо по картинке: от грани
- * шагаем наружу через чернила до бумаги. Замер в нескольких местах вдоль
- * стороны, берётся медиана: проём или цифра у стены на одном замере не
- * сбивают. Если стена упирается в край кадра, замер не считается.
- */
-export function sideWallPx(d2: Float32Array, w: number, h: number, r: PxRect): Partial<Record<'top' | 'right' | 'bottom' | 'left', number>> {
-  const ink = (x: number, y: number) => d2[y * w + x] === 0
-  const limit = Math.max(20, Math.round(Math.min(w, h) * 0.08))
-  const out: Partial<Record<'top' | 'right' | 'bottom' | 'left', number>> = {}
-  const sides: ['top' | 'right' | 'bottom' | 'left', number, number][] = [
-    ['left', -1, 0],
-    ['right', 1, 0],
-    ['top', 0, -1],
-    ['bottom', 0, 1],
-  ]
-  for (const [side, dx, dy] of sides) {
-    const runs: number[] = []
-    for (let k = 1; k <= 9; k++) {
-      const t = 0.1 + (0.8 * k) / 10
-      let x = Math.round(dx ? (dx < 0 ? r.x1 : r.x2) : r.x1 + (r.x2 - r.x1) * t)
-      let y = Math.round(dy ? (dy < 0 ? r.y1 : r.y2) : r.y1 + (r.y2 - r.y1) * t)
-      // грань стоит на краю чернил с точностью в пару точек: сначала дойти до них
-      let step = 0
-      while (step < 6 && x >= 0 && y >= 0 && x < w && y < h && !ink(x, y)) {
-        x += dx
-        y += dy
-        step++
-      }
-      if (x < 0 || y < 0 || x >= w || y >= h || !ink(x, y)) continue
-      let run = 0
-      while (x >= 0 && y >= 0 && x < w && y < h && ink(x, y) && run <= limit) {
-        x += dx
-        y += dy
-        run++
-      }
-      // до края кадра или дальше разумного — это не стена, а поле или рамка
-      if (x < 0 || y < 0 || x >= w || y >= h || run > limit) continue
-      runs.push(run)
+  const kept = out.length < 2 ? out : out.filter((r) => out.some((s) => s !== r && adjacent(r, s, near)))
+  // Контур каждой комнаты — по пикселям: область дорастает до стен, обводится
+  // и выпрямляется. Рамка и площадь дальше — по контуру
+  const { outlines } = outlineRegions(labels, kept.map((r) => r.id ?? 0), d2, w, h, closePx)
+  kept.forEach((r, k) => {
+    const o = outlines[k]
+    if (!o) return
+    r.poly = o.poly
+    r.areaPx = o.areaPx
+    r.x1 = o.box.x1
+    r.y1 = o.box.y1
+    r.x2 = o.box.x2
+    r.y2 = o.box.y2
+    r.fill = o.areaPx / Math.max(1, (o.box.x2 - o.box.x1) * (o.box.y2 - o.box.y1))
+    // центр масс Г-образной комнаты может лечь в соседку — берём точку внутри контура
+    if (!pointInPoly({ x: r.cx, y: r.cy }, o.poly)) {
+      const p = interiorPoint(o.poly)
+      r.cx = p.x
+      r.cy = p.y
     }
-    if (runs.length >= 3) {
-      runs.sort((a, b) => a - b)
-      out[side] = runs[Math.floor(runs.length / 2)]
-    }
-  }
-  return out
+  })
+  return kept.sort((a, b) => b.areaPx - a.areaPx)
 }
 
 /**
@@ -1096,41 +1071,16 @@ export function sideWallPx(d2: Float32Array, w: number, h: number, r: PxRect): P
 function fieldStrip(r: RoomRegion, w: number, h: number): boolean {
   const boxW = r.x2 - r.x1 + 1
   const boxH = r.y2 - r.y1 + 1
-  const left = r.x1 <= 0
-  const right = r.x2 >= w - 1
-  const top = r.y1 <= 0
-  const bottom = r.y2 >= h - 1
+  // у скана по краю часто идёт рамка в пару пикселей: полоса за ней — тоже край листа
+  const tol = Math.max(3, Math.round(0.006 * Math.min(w, h)))
+  const left = r.x1 <= tol
+  const right = r.x2 >= w - 1 - tol
+  const top = r.y1 <= tol
+  const bottom = r.y2 >= h - 1 - tol
   if ((left && right) || (top && bottom)) return true
   if ((left || right) && boxH > 3 * boxW) return true
   if ((top || bottom) && boxW > 3 * boxH) return true
   return false
-}
-
-function resolveOverlaps(regions: RoomRegion[], labels: Int32Array, w: number): void {
-  const count = (r: RoomRegion, o: PxRect): number => {
-    if (r.id === undefined) return 0
-    let n = 0
-    for (let y = o.y1; y <= o.y2; y++) for (let x = o.x1; x <= o.x2; x++) if (labels[y * w + x] === r.id) n++
-    return n
-  }
-  for (let i = 0; i < regions.length; i++) {
-    for (let j = i + 1; j < regions.length; j++) {
-      const a = regions[i]
-      const b = regions[j]
-      const o: PxRect = { x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1), x2: Math.min(a.x2, b.x2), y2: Math.min(a.y2, b.y2) }
-      const ow = o.x2 - o.x1 + 1
-      const oh = o.y2 - o.y1 + 1
-      if (ow <= 0 || oh <= 0) continue
-      const smaller = Math.min((a.x2 - a.x1 + 1) * (a.y2 - a.y1 + 1), (b.x2 - b.x1 + 1) * (b.y2 - b.y1 + 1))
-      // касание рамок на толщину стены — не перекрытие
-      if (ow * oh < smaller * 0.03) continue
-      const na = count(a, o)
-      const nb = count(b, o)
-      if (na === nb) continue
-      const loser = na < nb ? a : b
-      ;(loser.yieldsTo ??= []).push(regions.indexOf(loser === a ? b : a))
-    }
-  }
 }
 
 /** две рамки примыкают: щель между обращёнными гранями не шире near, а по другой оси они перекрываются */

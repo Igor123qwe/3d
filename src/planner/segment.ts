@@ -1,14 +1,16 @@
 // Комнаты с картинки + подписи от модели.
 //
-// Геометрия берётся с растра: сегментация (raster.ts) даёт прямоугольники комнат
-// по внутренним граням стен — точные по построению, общая стена одна на двоих.
+// Геометрия берётся с растра: сегментация (raster.ts) даёт контуры комнат по
+// внутренним граням стен — многоугольники с прямыми углами, обведённые по
+// пикселям; стены из них собирает picture.ts.
 // Модель со зрением к ней только подписи: имя, площадь, размеры. Какая подпись
 // к какой области — по точке модели внутри области, а где точка промахнулась,
 // по площадям: отношение подписанной площади к площади области в пикселях у
 // верных пар одинаково (это квадрат масштаба), и такие пары находятся сами.
 import type { AiRoom, AiSide } from './aicontract'
 import type { RoomRegion } from './raster'
-import { robustMedian } from './planai'
+import type { Pt } from './types'
+import { pointInPoly } from './geometry'
 
 /** подпись, которая не сходится с картинкой: скорее всего, модель прочитала её неверно */
 export interface LabelDispute {
@@ -65,17 +67,17 @@ export function consensusScale(samples: ScaleSample[]): { s: number; inliers: Sc
   return { s: vals[Math.floor(vals.length / 2)], inliers: best.inliers }
 }
 
-const inside = (r: RoomRegion, x: number, y: number) => x >= r.x1 && x <= r.x2 && y >= r.y1 && y <= r.y2
+/** точка внутри области: по контуру, если он есть, иначе по рамке */
+const inside = (r: RoomRegion, x: number, y: number) => (r.poly ? pointInPoly({ x, y }, r.poly) : x >= r.x1 && x <= r.x2 && y >= r.y1 && y <= r.y2)
 
-/** стороны области, упёршиеся в край кадра: фото там обрезано */
-const cutSides = (r: RoomRegion, px: { w: number; h: number }): AiSide[] => {
-  const out: AiSide[] = []
-  if (r.x1 <= 2) out.push('left')
-  if (r.y1 <= 2) out.push('top')
-  if (r.x2 >= px.w - 3) out.push('right')
-  if (r.y2 >= px.h - 3) out.push('bottom')
-  return out
-}
+/** контур области, пиксели: обведённый по картинке или её рамка */
+export const regionPoly = (r: RoomRegion): Pt[] =>
+  r.poly ?? [
+    { x: r.x1, y: r.y1 },
+    { x: r.x2, y: r.y1 },
+    { x: r.x2, y: r.y2 },
+    { x: r.x1, y: r.y2 },
+  ]
 
 /**
  * Соседство областей: две комнаты соседи по стороне, если их рамки, растянутые
@@ -131,6 +133,9 @@ export function roomsFromRegions(regions: RoomRegion[], px: { w: number; h: numb
       const bw = r.x2 - r.x1
       const bh = r.y2 - r.y1
       if (a.areaM2 && r.areaPx > 0) out.push({ s: Math.sqrt((a.areaM2 * 1e4) / r.areaPx), room: a.name, field: 'area', label: a.areaM2, px: r.areaPx })
+      // размеры у стен сверяются только у прямоугольной комнаты: у Г-образной
+      // подпись стоит у одной из ступенек, и какой — по рамке не понять
+      if (r.poly && r.poly.length > 4) return
       if (a.widthCm && bw > 8) out.push({ s: a.widthCm / bw, room: a.name, field: 'width', label: a.widthCm, px: bw })
       if (a.depthCm && bh > 8) out.push({ s: a.depthCm / bh, room: a.name, field: 'depth', label: a.depthCm, px: bh })
     })
@@ -220,19 +225,11 @@ export function roomsFromRegions(regions: RoomRegion[], px: { w: number; h: numb
       box: { x1: r.x1 / px.w, y1: r.y1 / px.h, x2: r.x2 / px.w, y2: r.y2 / px.h },
       neighbors,
       outer: adj[j].outer,
-      exact: true,
-      ...(r.wallPx && Object.keys(r.wallPx).length ? { wallPx: r.wallPx } : {}),
-      ...(cutSides(r, px).length ? { cut: cutSides(r, px) } : {}),
     }
   })
   // имена безымянных должны совпадать с теми, что записаны в соседях
   regions.forEach((r, j) => {
     if (owner[j] < 0) rooms[j].name = `Помещение ${j + 1}`
-  })
-  // Г-образная комната уступает угол соседу, который в него заходит
-  regions.forEach((r, j) => {
-    const names = (r.yieldsTo ?? []).map((i) => rooms[i].name)
-    if (names.length) rooms[j].yieldsTo = names
   })
   return { rooms, matched: taken.size, unmatched: ai.filter((_, k) => !taken.has(k)).map((a) => a.name), cmPerPx: scale, scaleLabels, disputes }
 }

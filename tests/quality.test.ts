@@ -50,15 +50,12 @@ describe('форма комнаты против области', () => {
   it('прямоугольник по области — почти единица; прямоугольник вместо Г-образной комнаты — меньше', () => {
     const r = region(100, 60, 300, 240)
     const rect = [{ x: 100, y: 60 }, { x: 300, y: 60 }, { x: 300, y: 240 }, { x: 100, y: 240 }]
-    expect(shapeIou(rect, r, [r], u)).toBeGreaterThan(0.95)
-    // область уступает угол 200..300 × 150..240 соседу: настоящая форма — Г
-    const hall = region(200, 150, 400, 240)
-    const L = { ...r, yieldsTo: [1] }
-    const iouRect = shapeIou(rect, L, [L, hall], u)
+    expect(shapeIou(rect, r, u)).toBeGreaterThan(0.95)
+    // контур с картинки Г-образный: угол 200..300 × 150..240 — соседа
     const lShape = [{ x: 100, y: 60 }, { x: 300, y: 60 }, { x: 300, y: 150 }, { x: 200, y: 150 }, { x: 200, y: 240 }, { x: 100, y: 240 }]
-    const iouL = shapeIou(lShape, L, [L, hall], u)
-    expect(iouL).toBeGreaterThan(0.95)
-    expect(iouRect).toBeLessThan(0.8)
+    const L = region(100, 60, 300, 240, { poly: lShape })
+    expect(shapeIou(lShape, L, u)).toBeGreaterThan(0.95)
+    expect(shapeIou(rect, L, u)).toBeLessThan(0.8)
   })
 })
 
