@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applyH, binarize, boxBlur, cleanRaster, components, despeckle, distanceToInk, dominantAngle, flattenBackground, floodRoom, groundRoomBox, homography, keepWallStrokes, orderCorners, removeBlobs, segmentRooms, strokeWidth, hatchedStrips, keepLongRuns, textHeight, dropSpurs, withoutLooseText, type RoomRegion } from '../src/planner/raster'
+import { applyH, binarize, boxBlur, cleanRaster, components, despeckle, distanceToInk, dominantAngle, flattenBackground, floodRoom, groundRoomBox, homography, keepWallStrokes, orderCorners, removeBlobs, segmentRooms, strokeWidth, hatchedStrips, keepLongRuns, textHeight, dropSpurs, withoutLooseText, textMask, type RoomRegion } from '../src/planner/raster'
 
 /** серый лист w × h с рисовалкой прямоугольников */
 function sheet(w: number, h: number, bg = 255) {
@@ -515,6 +515,33 @@ describe('цифра, прилипшая к стене', () => {
     expect(walls.ink[30 * W + 50]).toBe(0)
     expect(walls.ink[11 * W + 25]).toBe(1)
     expect(walls.ink[40 * W + 11]).toBe(1)
+  })
+
+  it('подпись из знаков у стены узнаётся целиком, стенка закутка между стенами — нет', () => {
+    const W = 90
+    const H = 70
+    const ink = new Uint8Array(W * H)
+    const box = (x0: number, y0: number, x1: number, y1: number) => {
+      for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) ink[y * W + x] = 1
+    }
+    // стены и короткая стенка закутка между ними
+    box(10, 0, 13, 69)
+    box(60, 0, 63, 69)
+    box(14, 50, 59, 52)
+    // подпись из трёх знаков по 10 точек, последний прижат к правой стене
+    for (const x0 of [30, 40, 50]) {
+      box(x0, 20, x0 + 6, 20)
+      box(x0, 29, x0 + 6, 29)
+      box(x0, 20, x0, 29)
+      box(x0 + 6, 20, x0 + 6, 29)
+    }
+    box(57, 24, 59, 25)
+    const bin = { ink, w: W, h: H }
+    const mask = textMask(bin, bin, 10)
+    expect(mask[20 * W + 33]).toBe(1)
+    expect(mask[25 * W + 56]).toBe(1)
+    expect(mask[51 * W + 30]).toBe(0)
+    expect(mask[30 * W + 11]).toBe(0)
   })
 
   it('отдельно стоящая цифра не делит закуток, сторона квадратика между стенами остаётся', () => {

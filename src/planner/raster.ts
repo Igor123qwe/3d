@@ -300,7 +300,7 @@ export function textHeight(bin: Bin): number | null {
  * квадратика в стене и его штриховка перекинуты между двумя стенами —
  * держатся за стену с противоположных сторон своей рамки — и остаются.
  */
-export function withoutLooseText(bin: Bin, wallsIn: Bin, text: number | null): Bin {
+export function withoutLooseText(bin: Bin, wallsIn: Bin, text: number | null, textPixels?: Uint8Array): Bin {
   if (!text) return bin
   const { w, h } = bin
   // штрих цифры, упёртый в стену, вместе с её толщиной тянет на длину стены
@@ -342,6 +342,8 @@ export function withoutLooseText(bin: Bin, wallsIn: Bin, text: number | null): B
     const c = list[id - 1]
     if (c.x2 - c.x1 + 1 <= maxSide && c.y2 - c.y1 + 1 <= maxSide) ink[i] = 0
   }
+  // подписи, узнанные целиком, — тоже не преграда, даже зажатые между линиями
+  if (textPixels) for (let i = 0; i < ink.length; i++) if (textPixels[i]) ink[i] = 0
   return { ink, w, h }
 }
 
@@ -446,6 +448,65 @@ export function keepLongRuns(bin: Bin, minRun: number): Bin {
   return { ink: keep, w, h }
 }
 
+/**
+ * Подписи размеров — не стена. Цифры, прижатые к стене («1,29» в нише
+ * прихожей), сливаются с ней, и их штрихи набирают длину стены: ниша
+ * перегораживается. По длине, толщине и форме штриха цифру от короткой
+ * стенки не отличить, зато подпись узнаётся целиком: несколько знаков
+ * цифрового размера стоят рядом, или слитая строка в одну-две высоты знака.
+ * Неприкосновенны прямые стеновые линии frame (после снятия отростков:
+ * стенка закутка держится за стены обоими концами и остаётся); в остатке
+ * ищем знаки и сводим соседние в подписи. Возвращает маску точек подписей.
+ */
+export function textMask(bin: Bin, frame: Bin, text: number): Uint8Array {
+  const { w, h } = bin
+  const minRun = Math.round(1.15 * text) + 2
+  const strong = new Uint8Array(w * h)
+  for (let d = 0; d < 2; d++)
+    eachRun(frame.ink, w, h, d, (pts) => {
+      if (pts.length >= minRun) for (const i of pts) strong[i] = 1
+    })
+  const rest = new Uint8Array(w * h)
+  for (let i = 0; i < rest.length; i++) rest[i] = bin.ink[i] && !strong[i] ? 1 : 0
+  const { labels, list } = components({ ink: rest, w, h })
+  // знак: не тоньше трети строки и не больше двух (цифра стоит как угодно)
+  const glyphs: number[] = []
+  const inText = new Uint8Array(list.length + 1)
+  list.forEach((c, k) => {
+    const cw = c.x2 - c.x1 + 1
+    const ch = c.y2 - c.y1 + 1
+    const lo = Math.min(cw, ch)
+    const hi = Math.max(cw, ch)
+    if (c.size >= 6 && lo >= 0.3 * text && hi <= 1.8 * text) glyphs.push(k)
+    // знаки слились в строку («1,29» жирным шрифтом): в высоту — строка, в
+    // длину — до четырёх знаков, и не сплошь залита
+    else if (lo >= 0.6 * text && lo <= 1.8 * text && hi <= 4 * text) {
+      const fill = c.size / (cw * ch)
+      if (fill >= 0.25 && fill <= 0.75) inText[k + 1] = 1
+    }
+  })
+  // соседние знаки — одна подпись: зазор меньше половины строки
+  const parent = glyphs.map((_, i) => i)
+  const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])))
+  const gap = 0.5 * text
+  for (let i = 0; i < glyphs.length; i++) {
+    const a = list[glyphs[i]]
+    for (let j = i + 1; j < glyphs.length; j++) {
+      const b = list[glyphs[j]]
+      const dx = Math.max(0, Math.max(a.x1, b.x1) - Math.min(a.x2, b.x2))
+      const dy = Math.max(0, Math.max(a.y1, b.y1) - Math.min(a.y2, b.y2))
+      if (dx <= gap && dy <= gap) parent[find(i)] = find(j)
+    }
+  }
+  const count = new Map<number, number>()
+  for (let i = 0; i < glyphs.length; i++) count.set(find(i), (count.get(find(i)) ?? 0) + 1)
+  // одиночный знак — номер комнаты или обрывок; подпись — от двух знаков
+  for (let i = 0; i < glyphs.length; i++) if ((count.get(find(i)) ?? 0) >= 2) inText[glyphs[i] + 1] = 1
+  const mask = new Uint8Array(w * h)
+  for (let i = 0; i < mask.length; i++) if (labels[i] && inText[labels[i]]) mask[i] = 1
+  return mask
+}
+
 export interface CleanResult {
   /** очищенная картинка: белая бумага, чёрные линии */
   gray: Uint8Array
@@ -454,6 +515,8 @@ export interface CleanResult {
   marks: Bin
   /** только стеновые линии: без подписей, выносок и заливок */
   walls: Bin
+  /** точки подписей размеров (знаки рядом или слитая строка): не стена и не преграда закутку */
+  labels?: Uint8Array
 }
 
 /**
@@ -470,9 +533,23 @@ export function cleanRaster(gray: Uint8Array, w: number, h: number): CleanResult
   const text = textHeight(marks)
   const strokes = keepWallStrokes(bin)
   const walls = text ? dropSpurs(keepLongRuns(strokes, Math.round(1.15 * text) + 2), Math.round(1.15 * text) + 2) : strokes
+  // подписи у стен вынимаем из стеновых линий целиком
+  const labels = text ? textMask(bin, walls, text) : undefined
+  if (labels) for (let i = 0; i < labels.length; i++) if (labels[i]) walls.ink[i] = 0
+  // Стена примыкает к стенам. Короткая тонкая черта, что стоит особняком
+  // (размерная линия «1,29» в нише прихожей), — не стена
+  if (text) {
+    const { labels: comp, list } = components(walls)
+    const lone = list.map((c) => {
+      const cw = c.x2 - c.x1 + 1
+      const ch = c.y2 - c.y1 + 1
+      return Math.min(cw, ch) <= Math.max(3, 0.25 * text) && Math.max(cw, ch) <= 2.5 * text
+    })
+    for (let i = 0; i < comp.length; i++) if (comp[i] && lone[comp[i] - 1]) walls.ink[i] = 0
+  }
   const out = new Uint8Array(w * h)
   for (let i = 0; i < out.length; i++) out[i] = bin.ink[i] ? 0 : 255
-  return { gray: out, bin, marks, walls }
+  return { gray: out, bin, marks, walls, labels }
 }
 
 // ---------- выравнивание ----------

@@ -261,8 +261,12 @@ export function simplifyOrthogonal(poly: Pt[], minEdge: number): Pt[] {
  * и в дверном проёме, в нише окна или под батареей она заходит в толщу стены
  * язычком. Выступ наружу не глубже maxDepth срезается по линии грани; вырезы
  * внутрь (колонна, короб шахты) остаются — это стены, заходящие в комнату.
+ * С wallAt язычок срезается, только если он проходит сквозь стену: по обе
+ * стороны от его основания за гранью комнаты — стена. Отсек ниши между
+ * выносными линиями размеров («1,29» и «0,68» в нише прихожей) — не язычок:
+ * рядом с его основанием бумага и цифры.
  */
-export function cutBumps(poly: Pt[], maxDepth: number, tol: number): Pt[] {
+export function cutBumps(poly: Pt[], maxDepth: number, tol: number, wallAt?: (x: number, y: number) => boolean): Pt[] {
   let pts = tidy(poly)
   const area0 = polyArea(pts)
   for (let guard = 0; guard < 2 * poly.length + 8 && pts.length > 4; guard++) {
@@ -287,8 +291,9 @@ export function cutBumps(poly: Pt[], maxDepth: number, tol: number): Pt[] {
       if (Math.abs(lenP - lenN) > tol) continue
       const depth = Math.min(lenP, lenN)
       if (depth > maxDepth) continue
-      const next = pts.map((p) => ({ ...p }))
       const v = a[c] - dirP * depth
+      if (wallAt && !throughWall(a, b, horizontal, v, out, wallAt)) continue
+      const next = pts.map((p) => ({ ...p }))
       next[i][c] = v
       next[(i + 1) % n][c] = v
       const tidied = tidy(next)
@@ -351,6 +356,30 @@ export function fillDents(poly: Pt[], maxDepth: number, blocked: (x: number, y: 
   return pts
 }
 
+/**
+ * Основание язычка лежит на стене: за гранью комнаты по обе стороны от
+ * язычка (в двух–восьми точках от его боков) — чернила стены
+ */
+function throughWall(a: Pt, b: Pt, horizontal: boolean, v: number, out: number, wallAt: (x: number, y: number) => boolean): boolean {
+  const lo = Math.min(horizontal ? a.x : a.y, horizontal ? b.x : b.y)
+  const hi = Math.max(horizontal ? a.x : a.y, horizontal ? b.x : b.y)
+  const side = (from: number, to: number) => {
+    let n = 0
+    let hit = 0
+    for (let t = from; t <= to; t++) {
+      n++
+      let ink = false
+      for (let k = 1; k <= 3 && !ink; k++) {
+        const c = out > 0 ? v + k - 1 : v - k
+        ink = horizontal ? wallAt(t, c) : wallAt(c, t)
+      }
+      if (ink) hit++
+    }
+    return n > 0 && hit >= 0.5 * n
+  }
+  return side(lo - 8, lo - 2) && side(hi + 1, hi + 7)
+}
+
 /** контур области с картинки, пиксели; площадь и рамка — по нему */
 export interface Outline {
   poly: Pt[]
@@ -404,7 +433,8 @@ export function outlineRegions(labels: Int32Array, ids: number[], d2: Float32Arr
     const raw = traceOutline(owner, w, h, k + 1, first[k + 1])
     // в вырезе стена — чернила стеновых линий или чужая область
     const blocked = (x: number, y: number) => x < 0 || y < 0 || x >= w || y >= h || d2[y * w + x] === 0 || (owner[y * w + x] > 0 && owner[y * w + x] !== k + 1)
-    const bare = simplifyOrthogonal(cutBumps(simplifyOrthogonal(raw, minEdge), closePx, minEdge), minEdge)
+    const wallAt = (x: number, y: number) => x >= 0 && y >= 0 && x < w && y < h && d2[y * w + x] === 0
+    const bare = simplifyOrthogonal(cutBumps(simplifyOrthogonal(raw, minEdge), closePx, minEdge, wallAt), minEdge)
     const poly = simplifyOrthogonal(fillDents(bare, closePx, blocked), minEdge)
     if (poly.length < 4) return null
     const xs = poly.map((p) => p.x)

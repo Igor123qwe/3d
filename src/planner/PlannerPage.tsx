@@ -1061,7 +1061,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     // отсекает всё, что лежит за чертежом
     if (!r.wallD2) r.wallD2 = distanceToInk(r.clean.walls)
     // закутки ограничивает вся графика, кроме отдельно стоящих цифр
-    if (!r.pocketD2) r.pocketD2 = distanceToInk(withoutLooseText(r.clean.bin, r.clean.walls, textHeight(r.clean.marks)))
+    if (!r.pocketD2) r.pocketD2 = distanceToInk(withoutLooseText(r.clean.bin, r.clean.walls, textHeight(r.clean.marks), r.clean.labels))
     // дверной проём до 90 см закрывается радиусом в полпроёма; точный радиус подбирается сам
     const closePx = Math.min(80, Math.max(3, Math.round(45 / u.scale)))
     // заштрихованная полоса (вентшахта, кладка) — не комната: очистка стёрла
