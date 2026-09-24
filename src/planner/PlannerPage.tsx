@@ -35,12 +35,12 @@ import {
   openingInArea,
   WALL_THICKNESSES,
 } from './ops'
-import { dist, fmtArea, fmtLen, fmtNum, lerp, normDeg } from './geometry'
+import { dist, fmtArea, fmtLen, fmtNum, lerp, normDeg, pointInPoly } from './geometry'
 import { getTelegramWebApp } from '../telegram'
 import { guessType, modelRefFromAsset, modelRefFromUrl, phAssets, phCategories, phDimsCm, phInfo, phPage, type PhAsset } from './polyhaven'
 import { decodePlan, parseHash, planShareUrl } from './share'
 import { DEFAULT_TRACE, calibrate, detectWalls, grayscaleOf, joinCorners, loadUnderlayImage, makeUnderlay, mergeCollinear, nameFromFile, planFromImage, toPixel, toPlan, tracePlan, type LoadedImage, type TraceOptions } from './underlay'
-import { cleanRaster, distanceToInk, dominantAngle, floodRoom, grayToImage, groundRoomBox, rotateImage, segmentRooms, segmentRoomsAuto, warpToRect, type CleanResult, type RoomRegion } from './raster'
+import { cleanRaster, distanceToInk, dominantAngle, floodRoom, grayToImage, groundRoomBox, hatchedStrips, rotateImage, segmentRooms, segmentRoomsAuto, warpToRect, type CleanResult, type RoomRegion } from './raster'
 import type { Guide } from './snapping'
 import { aiStatus, askLayout, askRoomLabel, askSpot, cropForVision, lookupProductViaServer, recognizePlan, type AiStatus } from './ai'
 import { applyAiPlan, convertAiPlan } from './planai'
@@ -242,6 +242,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   /** линии, найденные на подложке, в пикселях картинки; в план переводятся по текущему положению подложки */
   const [imageLinesPx, setImageLinesPx] = useState<Guide[]>([])
   /** очищенный растр подложки: считается один раз на картинку и служит обводке, комнате по клику и магниту */
+  /** сколько заштрихованных полос не стало комнатами при последнем поиске — для отчёта */
+  const hatchedRef = useRef(0)
   const rasterRef = useRef<{ src: string; gray: Uint8Array; clean: CleanResult; d2: Float32Array | null; wallD2: Float32Array | null } | null>(null)
   const [tracing, setTracing] = useState(false)
   /** масштаб подложки задан руками — распознавание его не переопределяет */
@@ -857,13 +859,14 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
    * же виде, что и общий проход, или null, если подписей набралось слишком
    * мало — тогда работает прежний путь по всему снимку.
    */
-  const readRoomLabels = async (photo: string, regions: RoomRegion[], u: Underlay): Promise<{ plan: AiPlan; ai: { model: string; costRub: number; tried: string[] } } | null> => {
+  const readRoomLabels = async (photo: string, regions: RoomRegion[], u: Underlay): Promise<{ plan: AiPlan; ai: { model: string; costRub: number; tried: string[] }; notRooms: RoomRegion[] } | null> => {
     const take = regions.slice(0, 12)
     const rooms: AiPlan['rooms'] = []
     const openings: AiPlan['openings'] = []
     let model = ''
     let costRub = 0
     const tried: string[] = []
+    const notRooms: RoomRegion[] = []
     let done = 0
     // по три зараз: дешёвой модели это быстро, а лимит запросов не выбирается
     for (let i = 0; i < take.length; i += 3) {
@@ -872,11 +875,15 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       const answers = await Promise.all(
         batch.map(async (r, k) => {
           try {
-            const crop = await cropForVision(photo, r, Math.round(Math.max(u.px.w, u.px.h) * 0.02), 640)
-            // номер и пропорции подсказывают модели, что перед ней: вытянутый
-            // коридор и квадратная комната путаются, если смотреть на них вслепую
+            // соседние комнаты на фрагменте закрашены: у Г-образной комнаты
+            // в рамку попадает соседка, и модель читала её номер
+            const crop = await cropForVision(photo, r, Math.round(Math.max(u.px.w, u.px.h) * 0.02), 640, r.poly)
+            // пропорции подсказывают модели, что перед ней: вытянутый коридор и
+            // квадратная комната путаются, если смотреть на них вслепую. Номера
+            // в подсказке нет: модель переписывала его в имя комнаты
             const side = (r.x2 - r.x1) / Math.max(1, r.y2 - r.y1)
-            const hint = `Комната ${i + k + 1} из ${take.length}. На картинке она ${side >= 2 ? 'вытянута по горизонтали' : side <= 0.5 ? 'вытянута по вертикали' : 'близка к прямоугольнику'}.`
+            const shape = r.poly && r.poly.length > 4 ? 'непрямоугольная, с уступами' : side >= 2 ? 'вытянута по горизонтали' : side <= 0.5 ? 'вытянута по вертикали' : 'близка к прямоугольнику'
+            const hint = `На картинке она ${shape}.`
             return await askRoomLabel(crop, hint)
           } catch (e) {
             console.info('[ИИ] комната не прочиталась', (e as Error).message)
@@ -893,6 +900,13 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           return
         }
         done++
+        // модель видит штриховку, шахту или колонну — это не комната
+        if (ans.room.notRoom) {
+          notRooms.push(r)
+          model = ans.ai.model
+          costRub += ans.ai.costRub
+          return
+        }
         model = ans.ai.model
         costRub += ans.ai.costRub
         for (const t of ans.ai.tried ?? []) if (!tried.includes(t)) tried.push(t)
@@ -906,7 +920,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     }
     // подписей меньше половины — фрагменты не помогли, пусть модель посмотрит план целиком
     if (done < Math.ceil(take.length / 2)) return null
-    return { plan: { walls: [], openings, rooms, dimensions: [], note: `подписи прочитаны по ${done} фрагментам комнат` }, ai: { model, costRub, tried } }
+    return { plan: { walls: [], openings, rooms, dimensions: [], note: `подписи прочитаны по ${done} фрагментам комнат` }, ai: { model, costRub, tried }, notRooms }
   }
 
   /**
@@ -928,7 +942,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       names.map(async (name) => {
         const room = rooms.find((r) => r.name === name)
         if (!room?.box) return
-        const region = regions.find((g) => room.x * u.px.w >= g.x1 && room.x * u.px.w <= g.x2 && room.y * u.px.h >= g.y1 && room.y * u.px.h <= g.y2)
+        const at = { x: room.x * u.px.w, y: room.y * u.px.h }
+        const region = regions.find((g) => (g.poly ? pointInPoly(at, g.poly) : at.x >= g.x1 && at.x <= g.x2 && at.y >= g.y1 && at.y <= g.y2))
         if (!region) return
         const what = disputes
           .filter((d) => d.room === name)
@@ -939,7 +954,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           })
           .join('; ')
         try {
-          const crop = await cropForVision(photo, region, Math.round(Math.max(u.px.w, u.px.h) * 0.02), 800)
+          const crop = await cropForVision(photo, region, Math.round(Math.max(u.px.w, u.px.h) * 0.02), 800, region.poly)
           const ans = await askRoomLabel(crop, `Перечитай подписи этой комнаты очень внимательно, цифру за цифрой. Не сходится: ${what}. Если подпись и правда такая — оставь её.`, undefined, 1)
           model = ans.ai.model
           costRub += ans.ai.costRub
@@ -966,11 +981,19 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     if (!r.wallD2) r.wallD2 = distanceToInk(r.clean.walls)
     // дверной проём до 90 см закрывается радиусом в полпроёма; точный радиус подбирается сам
     const closePx = Math.min(80, Math.max(3, Math.round(45 / u.scale)))
-    const byWalls = segmentRoomsAuto(r.wallD2, u.px.w, u.px.h, closePx).regions
+    // заштрихованная полоса (вентшахта, кладка) — не комната: очистка стёрла
+    // штриховку, но по исходным меткам она видна
+    const rooms = (list: RoomRegion[]) => {
+      const bad = new Set(hatchedStrips(list, r.clean.marks))
+      return { list: list.filter((_, k) => !bad.has(k)), hatched: bad.size }
+    }
+    const byWalls = rooms(segmentRoomsAuto(r.wallD2, u.px.w, u.px.h, closePx).regions)
     // стеновые линии бывают прерывистыми: если по ним комнат нашлось меньше,
     // чем по всей графике, берём прежний путь
-    const byAll = segmentRoomsAuto(r.d2, u.px.w, u.px.h, closePx).regions
-    return byWalls.length >= byAll.length ? byWalls : byAll
+    const byAll = rooms(segmentRoomsAuto(r.d2, u.px.w, u.px.h, closePx).regions)
+    const pick = byWalls.list.length >= byAll.list.length ? byWalls : byAll
+    hatchedRef.current = pick.hatched
+    return pick.list
   }
 
   /** Комнаты с картинки без ИИ: сегментация даёт геометрию, имена — по номерам */
@@ -1267,7 +1290,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           }
         : undefined
       // комнаты с картинки: геометрия с растра, от модели — подписи
-      const regions = raster ? await regionsOf(u).catch(() => []) : []
+      let regions = raster ? await regionsOf(u).catch(() => []) : []
       const rasterInfo = raster ? { d2: raster.d2!, w: u.px.w, h: u.px.h } : null
       const convert = (p: AiPlan) => convertAiPlan(p, u, { keepScale: calibrated, ground, regions, raster: rasterInfo })
       // подписи модель читает по исходному фото: очистка стирает цифры вместе с засечками
@@ -1276,6 +1299,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       // одной, крупно. Мелкие цифры на общем снимке она путает («0.82» читает
       // как «3.84»), а на увеличенном фрагменте одной комнаты — нет
       const byRooms = regions.length >= 2 ? await readRoomLabels(photo, regions, u) : null
+      // что модель назвала не помещением (шахта, штриховка), из комнат уходит
+      const notRooms = byRooms?.notRooms.length ?? 0
+      if (byRooms && notRooms) regions = regions.filter((g) => !byRooms.notRooms.includes(g))
       let { plan: read, ai: cost } = byRooms ?? (await recognizePlan(photo))
       // масштаб не трогаем, если пользователь уже откалибровал подложку руками
       let result = convert(read)
@@ -1366,6 +1392,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         const unit = (f: string) => (f === 'area' ? ' м²' : ' см')
         lines.push(`Спорные подписи — не сходятся с картинкой, стены по ним не двигались: ${q.disputes.map((d) => `${d.room} ${field(d.field)} ${fmtNum(d.label)}${unit(d.field)}, по картинке ${fmtNum(d.picture)}${unit(d.field)}`).join('; ')}.`)
       }
+      const skipped = hatchedRef.current + notRooms
+      if (skipped) lines.push(`Не комнаты: ${skipped === 1 ? 'один участок' : `участков — ${skipped}`} со штриховкой (вентшахта, кладка, колонна) — стены вокруг встали как наружные. Если это всё-таки помещение, обведите его «Комнатой по клику».`)
       if (q.slivers.length) lines.push(`Щели между стенами: ${q.slivers.map((x) => `${x.name} ${fmtNum(x.areaM2)} м²`).join(', ')} — оси разошлись, поправьте инструментом «Уточнить участок».`)
       if (r.roomsDropped.length) lines.push(`Выброшено: ${r.roomsDropped.join(', ')} — на картинке под рамкой нет комнаты, а без неё площади соседей сошлись.`)
       if (r.roomsDoubtful.length) lines.push(`Сомнительно: ${r.roomsDoubtful.join(', ')} — без этого площади соседей сошлись бы лучше, но на картинке комната есть, поэтому оставлена. Уточните это место.`)

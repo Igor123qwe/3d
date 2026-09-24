@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { checkAiLayout, checkAiPlan, checkAiProduct, extractJson } from '../src/planner/aicontract'
+import { checkAiLayout, checkAiPlan, checkAiProduct, checkAiRoomLabel, extractJson } from '../src/planner/aicontract'
 
 const wall = { x1: 0.1, y1: 0.1, x2: 0.9, y2: 0.1, thickness_cm: 25 }
 
@@ -143,5 +143,14 @@ describe('размеры комнат в разных обличьях', () => {
       [330, 426],
       [180, 258],
     ])
+  })
+})
+
+describe('ответ по фрагменту комнаты', () => {
+  it('«не помещение» — полноценный ответ, даже без подписей', () => {
+    expect(checkAiRoomLabel({ not_room: true, note: 'вентшахта' })).toEqual({ notRoom: true, note: 'вентшахта' })
+  })
+  it('пустой ответ без пометки — не ответ', () => {
+    expect(() => checkAiRoomLabel({ note: 'ничего' })).toThrow()
   })
 })

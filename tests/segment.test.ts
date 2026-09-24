@@ -77,3 +77,14 @@ describe('Г-образные комнаты', () => {
     expect(r.rooms[1].name).toBe('Коридор')
   })
 })
+
+describe('одно имя на двух комнатах', () => {
+  it('имя остаётся там, где сходится площадь; у второй подпись снимается, спорной она не считается', () => {
+    const regions = [region(0, 0, 100, 100), region(200, 0, 400, 200), region(500, 0, 600, 100)]
+    // «6» прочитан и на своём санузле, и на фрагменте соседки, куда он попал
+    const r = roomsFromRegions(regions, px, [label('А', 1, 50, 50), label('6', 1, 550, 50), label('6', 1, 300, 100)], 30)
+    expect(r.rooms.map((x) => x.name)).toEqual(['А', 'Помещение 2', '6'])
+    expect(r.rooms[1].areaM2).toBeUndefined()
+    expect(r.disputes.filter((d) => d.room === '6')).toEqual([])
+  })
+})

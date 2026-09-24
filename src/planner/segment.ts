@@ -182,6 +182,28 @@ export function roomsFromRegions(regions: RoomRegion[], px: { w: number; h: numb
       }
     }
   }
+  // Одно имя на двух областях — на фрагменте модель прочитала чужую подпись
+  // (у Г-образной комнаты в рамку попадает соседка). Имя остаётся там, где
+  // сходится подписанная площадь, у остальных подпись снимается
+  const byName = new Map<string, number[]>()
+  regions.forEach((_, j) => {
+    if (owner[j] < 0) return
+    const n = ai[owner[j]].name
+    byName.set(n, [...(byName.get(n) ?? []), j])
+  })
+  for (const js of byName.values()) {
+    if (js.length < 2) continue
+    const err = (j: number) => {
+      const want = ai[owner[j]].areaM2
+      return want && scale !== null ? Math.abs(regions[j].areaPx * scale * scale - want * 1e4) / (want * 1e4) : Infinity
+    }
+    const keep = js.reduce((best, j) => (err(j) < err(best) ? j : best), js[0])
+    for (const j of js) {
+      if (j === keep) continue
+      taken.delete(owner[j])
+      owner[j] = -1
+    }
+  }
   // после дораспределения подписей по площадям масштаб пересчитывается по всем легшим
   if (scale !== null) {
     const again = consensusScale(samplesOf())

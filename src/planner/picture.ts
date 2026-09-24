@@ -25,10 +25,11 @@ import type { AreaFit, PlacedRoom, ReconstructResult } from './reconstruct'
  * встречаются посередине, и чужого никто не забирает. Остальные области
  * разметки (поле листа, отброшенные обрывки) растут вместе со всеми, только
  * ничьими: иначе комната через входную дверь или дырку в стене расползлась бы
- * по полю вдоль наружной стены.
+ * по полю вдоль наружной стены. Обрывки из ignore (карманы меньше комнаты)
+ * не растут и не мешают: их место достаётся соседней комнате.
  * Возвращает карту: номер области с единицы (порядок ids), 0 — ничья.
  */
-export function growRegions(labels: Int32Array, ids: number[], d2: Float32Array, w: number, h: number, steps: number): Int32Array {
+export function growRegions(labels: Int32Array, ids: number[], d2: Float32Array, w: number, h: number, steps: number, ignore?: Set<number>): Int32Array {
   const owner = new Int32Array(w * h)
   const index = new Map(ids.map((id, k) => [id, k + 1]))
   const NOBODY = ids.length + 1
@@ -36,7 +37,7 @@ export function growRegions(labels: Int32Array, ids: number[], d2: Float32Array,
   let head = 0
   let tail = 0
   for (let i = 0; i < labels.length; i++) {
-    if (!labels[i]) continue
+    if (!labels[i] || ignore?.has(labels[i])) continue
     owner[i] = index.get(labels[i]) ?? NOBODY
     queue[tail++] = i
   }
@@ -251,8 +252,8 @@ export interface Outline {
  * Контуры всех областей: дорастить до стен, обвести, выпрямить. minEdge —
  * мельче этого ступеньки считаются неровностью линий, а не выступом стены.
  */
-export function outlineRegions(labels: Int32Array, ids: number[], d2: Float32Array, w: number, h: number, closePx: number): { outlines: (Outline | null)[]; owner: Int32Array } {
-  const owner = growRegions(labels, ids, d2, w, h, closePx + 2)
+export function outlineRegions(labels: Int32Array, ids: number[], d2: Float32Array, w: number, h: number, closePx: number, ignore?: Set<number>): { outlines: (Outline | null)[]; owner: Int32Array } {
+  const owner = growRegions(labels, ids, d2, w, h, closePx + 2, ignore)
   // Кусок, отрезанный от поля листа, может нести с собой обрывки поля с той же
   // меткой: обводим самый большой связный кусок области, остальное — ничьё
   const first = new Int32Array(ids.length + 1).fill(-1)

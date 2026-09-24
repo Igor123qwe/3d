@@ -272,6 +272,8 @@ export interface CleanResult {
   /** очищенная картинка: белая бумага, чёрные линии */
   gray: Uint8Array
   bin: Bin
+  /** все метки до очистки, с мелочью: по ним видна штриховка (вентшахта, кладка), которую очистка стирает */
+  marks: Bin
   /** только стеновые линии: без подписей, выносок и заливок */
   walls: Bin
 }
@@ -283,11 +285,12 @@ export interface CleanResult {
  */
 export function cleanRaster(gray: Uint8Array, w: number, h: number): CleanResult {
   const flat = flattenBackground(gray, w, h)
-  const bin = despeckle(binarize(flat, w, h))
+  const marks = binarize(flat, w, h)
+  const bin = despeckle(marks)
   const walls = keepWallStrokes(bin)
   const out = new Uint8Array(w * h)
   for (let i = 0; i < out.length; i++) out[i] = bin.ink[i] ? 0 : 255
-  return { gray: out, bin, walls }
+  return { gray: out, bin, marks, walls }
 }
 
 // ---------- выравнивание ----------
@@ -975,6 +978,9 @@ export function segmentRooms(d2: Float32Array, w: number, h: number, closePx: nu
   const labels = new Int32Array(w * h)
   const queue = new Int32Array(w * h)
   const out: RoomRegion[] = []
+  // обрывки меньше комнаты (карман за выноской, петли букв): при дорастании
+  // комнат до стен они никому не мешают, в отличие от поля листа
+  const tiny = new Set<number>()
   let next = 1
   const nextId = () => next++
   for (let start = 0; start < d2.length; start++) {
@@ -1008,7 +1014,10 @@ export function segmentRooms(d2: Float32Array, w: number, h: number, closePx: nu
     }
     // Слишком большая область — это поле листа, возможно с подтёкшей в него
     // комнатой; её всё равно режем, а предел площади проверяем по кускам
-    if (count < minArea) continue
+    if (count < minArea) {
+      tiny.add(id)
+      continue
+    }
     // Внутри плана область не режется: Г-образная прихожая — одна комната, и
     // контур по пикселям это покажет. Режется только область у края листа —
     // там к комнате могло подтечь поле через дырку в стене
@@ -1042,7 +1051,7 @@ export function segmentRooms(d2: Float32Array, w: number, h: number, closePx: nu
   const kept = out.length < 2 ? out : out.filter((r) => out.some((s) => s !== r && adjacent(r, s, near)))
   // Контур каждой комнаты — по пикселям: область дорастает до стен, обводится
   // и выпрямляется. Рамка и площадь дальше — по контуру
-  const { outlines } = outlineRegions(labels, kept.map((r) => r.id ?? 0), d2, w, h, closePx)
+  const { outlines } = outlineRegions(labels, kept.map((r) => r.id ?? 0), d2, w, h, closePx, tiny)
   kept.forEach((r, k) => {
     const o = outlines[k]
     if (!o) return
@@ -1090,6 +1099,40 @@ function adjacent(a: RoomRegion, b: RoomRegion, near: number): boolean {
   const gapX = Math.max(b.x1 - a.x2, a.x1 - b.x2)
   const gapY = Math.max(b.y1 - a.y2, a.y1 - b.y2)
   return (gapX <= near && oy > 0) || (gapY <= near && ox > 0)
+}
+
+/**
+ * Заштрихованные полосы — не комнаты. Вентшахту, кладку, колонну на плане
+ * БТИ рисуют густой штриховкой из мелких квадратиков; очистка их стирает, и
+ * полоса выглядит пустой узкой комнатой. Выдаёт её плотность меток по
+ * исходной картинке: в комнате — подпись и пара цифр (1–3 % точек), в
+ * штриховке — каждая десятая точка. Одной плотности мало (на планах с мебелью
+ * комнаты тоже пёстрые), поэтому ещё и форма: полоса заметно уже остальных
+ * комнат или вытянута втрое.
+ */
+export function hatchedStrips(regions: RoomRegion[], marks: Bin): number[] {
+  const { ink, w } = marks
+  const shortSide = (r: RoomRegion) => Math.min(r.x2 - r.x1, r.y2 - r.y1)
+  const out: number[] = []
+  regions.forEach((r, k) => {
+    const poly = r.poly
+    if (!poly) return
+    let n = 0
+    let dark = 0
+    for (let y = Math.max(0, Math.floor(r.y1)); y < Math.min(marks.h, Math.ceil(r.y2)); y++) {
+      for (let x = Math.max(0, Math.floor(r.x1)); x < Math.min(w, Math.ceil(r.x2)); x++) {
+        if (!pointInPoly({ x: x + 0.5, y: y + 0.5 }, poly)) continue
+        n++
+        if (ink[y * w + x]) dark++
+      }
+    }
+    if (!n || dark / n < 0.06) return
+    const others = regions.filter((s) => s !== r).map(shortSide).sort((a, b) => a - b)
+    const typical = others.length ? others[Math.floor(others.length / 2)] : Infinity
+    const long = Math.max(r.x2 - r.x1, r.y2 - r.y1)
+    if (shortSide(r) < 0.5 * typical || long >= 2.5 * shortSide(r)) out.push(k)
+  })
+  return out
 }
 
 /**

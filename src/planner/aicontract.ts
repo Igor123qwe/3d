@@ -117,6 +117,8 @@ export interface AiRoomLabel {
   depthCm?: number
   /** проёмы, видимые в стенах этого фрагмента: сторона и место вдоль неё */
   openings?: { kind: AiOpeningKind; side: AiSide; at: number; widthCm: number }[]
+  /** на фрагменте не помещение, а штриховка стены, вентшахта или колонна */
+  notRoom?: boolean
   note?: string
 }
 
@@ -149,8 +151,9 @@ export function checkAiRoomLabel(data: unknown): AiRoomLabel {
   if (ops.length) out.openings = ops
   const note = typeof d.note === 'string' ? d.note.slice(0, 200) : ''
   if (note) out.note = note
+  if (d.not_room === true || d.notRoom === true) out.notRoom = true
   // совсем пустой ответ — это не ответ: пусть попробует следующая модель
-  if (!out.name && out.areaM2 === undefined && out.widthCm === undefined && out.depthCm === undefined && !out.openings) throw new Error('в ответе нет ни подписи, ни размеров')
+  if (!out.notRoom && !out.name && out.areaM2 === undefined && out.widthCm === undefined && out.depthCm === undefined && !out.openings) throw new Error('в ответе нет ни подписи, ни размеров')
   return out
 }
 

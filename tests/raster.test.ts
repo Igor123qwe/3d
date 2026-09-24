@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applyH, binarize, boxBlur, cleanRaster, components, despeckle, distanceToInk, dominantAngle, flattenBackground, floodRoom, groundRoomBox, homography, keepWallStrokes, orderCorners, removeBlobs, segmentRooms, strokeWidth } from '../src/planner/raster'
+import { applyH, binarize, boxBlur, cleanRaster, components, despeckle, distanceToInk, dominantAngle, flattenBackground, floodRoom, groundRoomBox, homography, keepWallStrokes, orderCorners, removeBlobs, segmentRooms, strokeWidth, hatchedStrips, type RoomRegion } from '../src/planner/raster'
 
 /** серый лист w × h с рисовалкой прямоугольников */
 function sheet(w: number, h: number, bg = 255) {
@@ -418,4 +418,43 @@ describe('очистка до одних стен', () => {
     expect(after).toBeLessThan(before * 0.5)
   })
 
+})
+
+describe('заштрихованная полоса — не комната', () => {
+  const W = 400
+  const H = 120
+  const room = (x1: number, y1: number, x2: number, y2: number): RoomRegion => ({
+    x1,
+    y1,
+    x2,
+    y2,
+    areaPx: (x2 - x1) * (y2 - y1),
+    points: (x2 - x1) * (y2 - y1),
+    fill: 1,
+    fillBox: 1,
+    edges: 0,
+    cx: (x1 + x2) / 2,
+    cy: (y1 + y2) / 2,
+    poly: [
+      { x: x1, y: y1 },
+      { x: x2, y: y1 },
+      { x: x2, y: y2 },
+      { x: x1, y: y2 },
+    ],
+  })
+  it('узкая полоса в мелких квадратиках (вентшахта) отсеивается; комната с подписью и пёстрая комната с мебелью — нет', () => {
+    const ink = new Uint8Array(W * H)
+    const dot = (x: number, y: number, s: number) => {
+      for (let yy = y; yy < y + s; yy++) for (let xx = x; xx < x + s; xx++) ink[yy * W + xx] = 1
+    }
+    // комната с подписью: пара цифр
+    dot(40, 50, 6)
+    dot(50, 50, 6)
+    // комната, где нарисована мебель: плотно, но она не полоса
+    for (let y = 10; y < 110; y += 8) for (let x = 120; x < 210; x += 8) dot(x, y, 3)
+    // полоса вентшахты: ряды квадратиков
+    for (let y = 5; y < 115; y += 6) for (let x = 322; x < 345; x += 6) dot(x, y, 3)
+    const regions = [room(10, 10, 110, 110), room(115, 10, 215, 110), room(220, 10, 315, 110), room(320, 5, 348, 115)]
+    expect(hatchedStrips(regions, { ink, w: W, h: H })).toEqual([3])
+  })
 })
