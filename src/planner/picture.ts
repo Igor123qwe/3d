@@ -27,12 +27,13 @@ import type { AreaFit, PlacedRoom, ReconstructResult } from './reconstruct'
  * ничьими: иначе комната через входную дверь или дырку в стене расползлась бы
  * по полю вдоль наружной стены. Обрывки из ignore (карманы меньше комнаты)
  * не растут и не мешают: их место достаётся соседней комнате.
- * Возвращает карту: номер области с единицы (порядок ids), 0 — ничья.
+ * Возвращает карту: номер области с единицы (порядок ids), −1 — прочие
+ * области разметки, 0 — ничьё (чернила и то, куда рост не дошёл).
  */
 export function growRegions(labels: Int32Array, ids: number[], d2: Float32Array, w: number, h: number, steps: number, ignore?: Set<number>): Int32Array {
   const owner = new Int32Array(w * h)
   const index = new Map(ids.map((id, k) => [id, k + 1]))
-  const NOBODY = ids.length + 1
+  const NOBODY = -1
   const queue = new Int32Array(w * h)
   let head = 0
   let tail = 0
@@ -64,8 +65,67 @@ export function growRegions(labels: Int32Array, ids: number[], d2: Float32Array,
       }
     }
   }
-  for (let i = 0; i < owner.length; i++) if (owner[i] === NOBODY) owner[i] = 0
   return owner
+}
+
+/**
+ * Закутки, куда рост не дотянулся. Область держится на радиус от стен, и в
+ * нишу уже двух радиусов (закуток у балкона 0,27 × 0,73) или в карман за
+ * рамкой окна её ядро не заходит. Свободный кусок бумаги, окружённый
+ * чернилами и одной комнатой, — часть этой комнаты, если он к ней выходит
+ * широкой стороной и невелик. Кусок, что касается двух комнат, поля или
+ * края листа, — проём или улица; выход в щель — полость в пустой стене или
+ * квадратик штриховки: их не трогаем.
+ */
+export function fillPockets(owner: Int32Array, d2: Float32Array, w: number, h: number, maxArea: number): void {
+  // Пиксель, что стал чьим при росте по стеновым линиям, а по всей графике —
+  // чернила (цифра), свободным не считается: закуток ограничивают все линии
+  const seen = new Uint8Array(w * h)
+  const queue = new Int32Array(w * h)
+  for (let start = 0; start < owner.length; start++) {
+    if (owner[start] !== 0 || d2[start] === 0 || seen[start]) continue
+    let head = 0
+    let tail = 0
+    queue[tail++] = start
+    seen[start] = 1
+    let only = 0
+    let mixed = false
+    let contact = 0
+    let x1 = w
+    let y1 = h
+    let x2 = 0
+    let y2 = 0
+    while (head < tail) {
+      const i = queue[head++]
+      const x = i % w
+      const y = (i - x) / w
+      if (x < x1) x1 = x
+      if (x > x2) x2 = x
+      if (y < y1) y1 = y
+      if (y > y2) y2 = y
+      if (x === 0 || y === 0 || x === w - 1 || y === h - 1) mixed = true
+      const look = (j: number) => {
+        const o = owner[j]
+        if (o === 0) {
+          if (d2[j] !== 0 && !seen[j]) (seen[j] = 1), (queue[tail++] = j)
+          return
+        }
+        if (o < 0 || (only && o !== only)) mixed = true
+        else (only = o), contact++
+      }
+      if (x > 0) look(i - 1)
+      if (x < w - 1) look(i + 1)
+      if (y > 0) look(i - w)
+      if (y < h - 1) look(i + w)
+    }
+    const span = Math.max(x2 - x1 + 1, y2 - y1 + 1)
+    if (!mixed && only && tail <= maxArea && contact >= Math.max(6, 0.4 * span)) for (let k = 0; k < tail; k++) owner[queue[k]] = only
+  }
+}
+
+/** прочие области разметки после роста — ничьи */
+function releaseNobody(owner: Int32Array): void {
+  for (let i = 0; i < owner.length; i++) if (owner[i] < 0) owner[i] = 0
 }
 
 /**
@@ -241,6 +301,56 @@ export function cutBumps(poly: Pt[], maxDepth: number, tol: number): Pt[] {
   return pts
 }
 
+/**
+ * Вырезы внутрь без стены — не стена. Подпись у стены в узком закутке
+ * («0,73» в нише у балкона) заслоняет от роста клочок бумаги, и контур
+ * огибает цифру зазубриной. Колонна или короб шахты нарисованы стеновыми
+ * линиями, дверь в соседнюю комнату — это чужая область; вырез, где нет ни
+ * того ни другого, закрывается по линии стены. У самой стены (устье выреза,
+ * две линии пикселей) неровная грань не в счёт.
+ */
+export function fillDents(poly: Pt[], maxDepth: number, blocked: (x: number, y: number) => boolean): Pt[] {
+  let pts = tidy(poly)
+  for (let guard = 0; guard < 2 * poly.length + 8 && pts.length > 4; guard++) {
+    const n = pts.length
+    let fill: Pt[] | null = null
+    for (let i = 0; i < n && !fill; i++) {
+      const p0 = pts[(i - 1 + n) % n]
+      const a = pts[i]
+      const b = pts[(i + 1) % n]
+      const n1 = pts[(i + 2) % n]
+      const horizontal = a.y === b.y
+      const c = horizontal ? 'y' : 'x'
+      const along = horizontal ? 'x' : 'y'
+      const dirP = Math.sign(a[c] - p0[c])
+      const dirN = Math.sign(n1[c] - b[c])
+      if (dirP !== -dirN) continue
+      const out = horizontal ? (b.x > a.x ? -1 : 1) : b.y > a.y ? 1 : -1
+      // вырез: боковая сторона уходит внутрь комнаты, дно выреза — сторона a–b
+      if (dirP !== -out) continue
+      const depth = Math.min(Math.abs(a[c] - p0[c]), Math.abs(n1[c] - b[c]))
+      if (depth > maxDepth || edgeLen(a, b) > 2 * maxDepth) continue
+      const v = a[c] + out * depth
+      const lo = Math.min(a[along], b[along])
+      const hi = Math.max(a[along], b[along])
+      // пиксели выреза: от дна до устья, без двух линий у устья
+      const c1 = out > 0 ? a[c] : v + 2
+      const c2 = out > 0 ? v - 2 : a[c]
+      let wall = false
+      for (let s = lo; s < hi && !wall; s++) for (let t = c1; t < c2 && !wall; t++) wall = horizontal ? blocked(s, t) : blocked(t, s)
+      if (wall) continue
+      const next = pts.map((p) => ({ ...p }))
+      next[i][c] = v
+      next[(i + 1) % n][c] = v
+      const tidied = tidy(next)
+      if (tidied.length >= 4 && polyArea(tidied) > 0) fill = tidied
+    }
+    if (!fill) break
+    pts = fill
+  }
+  return pts
+}
+
 /** контур области с картинки, пиксели; площадь и рамка — по нему */
 export interface Outline {
   poly: Pt[]
@@ -252,8 +362,12 @@ export interface Outline {
  * Контуры всех областей: дорастить до стен, обвести, выпрямить. minEdge —
  * мельче этого ступеньки считаются неровностью линий, а не выступом стены.
  */
-export function outlineRegions(labels: Int32Array, ids: number[], d2: Float32Array, w: number, h: number, closePx: number, ignore?: Set<number>): { outlines: (Outline | null)[]; owner: Int32Array } {
+export function outlineRegions(labels: Int32Array, ids: number[], d2: Float32Array, w: number, h: number, closePx: number, ignore?: Set<number>, inkD2?: Float32Array): { outlines: (Outline | null)[]; owner: Int32Array } {
   const owner = growRegions(labels, ids, d2, w, h, closePx + 2, ignore)
+  // закутки ищутся по всей графике: у квадратика штриховки в стене короткая
+  // сторона стёрта из стеновых линий вместе с цифрами, но на картинке она есть
+  fillPockets(owner, inkD2 ?? d2, w, h, 3 * closePx * closePx)
+  releaseNobody(owner)
   // Кусок, отрезанный от поля листа, может нести с собой обрывки поля с той же
   // меткой: обводим самый большой связный кусок области, остальное — ничьё
   const first = new Int32Array(ids.length + 1).fill(-1)
@@ -263,7 +377,7 @@ export function outlineRegions(labels: Int32Array, ids: number[], d2: Float32Arr
   const starts: number[] = []
   for (let i = 0; i < owner.length; i++) {
     const k = owner[i]
-    if (!k || comp[i] >= 0) continue
+    if (k <= 0 || comp[i] >= 0) continue
     const c = starts.length
     starts.push(i)
     let head = 0
@@ -281,14 +395,17 @@ export function outlineRegions(labels: Int32Array, ids: number[], d2: Float32Arr
     }
     if (tail > size[k]) (size[k] = tail), (first[k] = i)
   }
-  for (let i = 0; i < owner.length; i++) if (owner[i] && starts[comp[i]] !== first[owner[i]]) owner[i] = 0
-  // ступенька мельче пятой части радиуса (≈ 9 см) — неровность линии; выступ
+  for (let i = 0; i < owner.length; i++) if (owner[i] > 0 && starts[comp[i]] !== first[owner[i]]) owner[i] = 0
+  // ступенька мельче шестой части радиуса (≈ 7 см) — неровность линии; выступ
   // наружу не глубже радиуса — язычок в проёме или нише окна
-  const minEdge = Math.max(4, Math.round(0.2 * closePx))
+  const minEdge = Math.max(4, Math.round(0.15 * closePx))
   const outlines = ids.map((_, k) => {
     if (first[k + 1] < 0) return null
     const raw = traceOutline(owner, w, h, k + 1, first[k + 1])
-    const poly = simplifyOrthogonal(cutBumps(simplifyOrthogonal(raw, minEdge), closePx, minEdge), minEdge)
+    // в вырезе стена — чернила стеновых линий или чужая область
+    const blocked = (x: number, y: number) => x < 0 || y < 0 || x >= w || y >= h || d2[y * w + x] === 0 || (owner[y * w + x] > 0 && owner[y * w + x] !== k + 1)
+    const bare = simplifyOrthogonal(cutBumps(simplifyOrthogonal(raw, minEdge), closePx, minEdge), minEdge)
+    const poly = simplifyOrthogonal(fillDents(bare, closePx, blocked), minEdge)
     if (poly.length < 4) return null
     const xs = poly.map((p) => p.x)
     const ys = poly.map((p) => p.y)

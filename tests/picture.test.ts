@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Plan, Pt, Underlay, Wall } from '../src/planner/types'
-import { cutBumps, detectOpenings, growRegions, pointOnOutline, simplifyOrthogonal, traceOutline, wallsFromPicture } from '../src/planner/picture'
+import { cutBumps, detectOpenings, fillDents, growRegions, pointOnOutline, simplifyOrthogonal, traceOutline, wallsFromPicture } from '../src/planner/picture'
 import { buildRooms } from '../src/planner/rooms'
 import { polyArea } from '../src/planner/geometry'
 
@@ -120,6 +120,25 @@ describe('прямые углы без мелочи', () => {
       { x: 0, y: 80 },
     ]
     expect(cutBumps(step, 10, 3)).toHaveLength(6)
+  })
+
+  it('вырез без стены (цифра у стены) закрывается, колонна и чужая комната остаются', () => {
+    const dent: Pt[] = [
+      { x: 0, y: 0 },
+      { x: 100, y: 0 },
+      { x: 100, y: 30 },
+      { x: 88, y: 30 },
+      { x: 88, y: 40 },
+      { x: 100, y: 40 },
+      { x: 100, y: 80 },
+      { x: 0, y: 80 },
+    ]
+    // в вырезе одна цифра, а стена — только за устьем, x ≥ 100
+    expect(fillDents(dent, 20, (x) => x >= 100)).toEqual(rect(0, 0, 100, 80))
+    // короб колонны нарисован линией: вырез остаётся
+    expect(fillDents(dent, 20, (x) => x >= 100 || x === 88)).toHaveLength(8)
+    // глубже радиуса — не зазубрина
+    expect(fillDents(dent, 10, (x) => x >= 100)).toHaveLength(8)
   })
 })
 

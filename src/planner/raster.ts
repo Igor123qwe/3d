@@ -269,7 +269,7 @@ export function keepWallStrokes(binIn: Bin, opts: { minPx?: number; maxFrac?: nu
 }
 
 /**
- * Высота цифр на плане, px: медиана по отдельно стоящим знакам — компактным
+ * Высота мелких цифр на плане, px: по отдельно стоящим знакам — компактным
  * фигурам из штрихов, что выше, чем шире. null — надписей на картинке почти
  * нет. Нужна, чтобы отличить цифру, прилипшую к стене, от куска самой стены.
  */
@@ -287,7 +287,58 @@ export function textHeight(bin: Bin): number | null {
   }
   if (hs.length < 10) return null
   hs.sort((a, b) => a - b)
-  return hs[Math.floor(hs.length / 2)]
+  // цифры двух размеров: мелкие у стен (размеры) и крупные в середине комнаты
+  // (номер и площадь); к стене липнут мелкие — по ним и мерим
+  return hs[Math.floor(hs.length * 0.3)]
+}
+
+/**
+ * Чернила без отдельно стоящих подписей — для поиска закутков. Цифра размера
+ * в узкой нише («0,73» в закутке у балкона) делит её на щели, и ниша не
+ * достаётся комнате. Подпись — мелкий кусок, что стены разве что касается
+ * одним боком: в узкой нише цифра почти всегда прилипает к стене. Сторона
+ * квадратика в стене и его штриховка перекинуты между двумя стенами —
+ * держатся за стену с противоположных сторон своей рамки — и остаются.
+ */
+export function withoutLooseText(bin: Bin, walls: Bin, text: number | null): Bin {
+  if (!text) return bin
+  const { w, h } = bin
+  const soft = new Uint8Array(w * h)
+  for (let i = 0; i < soft.length; i++) soft[i] = bin.ink[i] && !walls.ink[i] ? 1 : 0
+  const { labels, list } = components({ ink: soft, w, h })
+  // бока рамки куска, которыми он касается стены: 1 — левый, 2 — правый, 4 — верхний, 8 — нижний
+  const sides = new Uint8Array(list.length + 1)
+  for (let i = 0; i < soft.length; i++) {
+    const id = labels[i]
+    if (!id) continue
+    const c = list[id - 1]
+    const x = i % w
+    const y = (i - x) / w
+    if (x !== c.x1 && x !== c.x2 && y !== c.y1 && y !== c.y2) continue
+    let touch = false
+    for (let dy = -1; dy <= 1 && !touch; dy++)
+      for (let dx = -1; dx <= 1 && !touch; dx++) {
+        const nx = x + dx
+        const ny = y + dy
+        touch = nx >= 0 && ny >= 0 && nx < w && ny < h && !!walls.ink[ny * w + nx]
+      }
+    if (!touch) continue
+    // в тонком куске (засечка, единица) левый бок — он же правый: такие бока не в счёт
+    if (c.x2 - c.x1 >= 2) sides[id] |= (x === c.x1 ? 1 : 0) | (x === c.x2 ? 2 : 0)
+    if (c.y2 - c.y1 >= 2) sides[id] |= (y === c.y1 ? 4 : 0) | (y === c.y2 ? 8 : 0)
+  }
+  // буква или цифра, повёрнутая как угодно: обе стороны рамки — не больше полутора строк
+  const maxSide = 1.6 * text
+  const ink = bin.ink.slice()
+  for (let i = 0; i < ink.length; i++) {
+    const id = labels[i]
+    if (!id) continue
+    const s = sides[id]
+    if ((s & 3) === 3 || (s & 12) === 12) continue
+    const c = list[id - 1]
+    if (c.x2 - c.x1 + 1 <= maxSide && c.y2 - c.y1 + 1 <= maxSide) ink[i] = 0
+  }
+  return { ink, w, h }
 }
 
 /**
@@ -345,10 +396,10 @@ export function cleanRaster(gray: Uint8Array, w: number, h: number): CleanResult
   const marks = binarize(flat, w, h)
   const bin = despeckle(marks)
   // цифры размеров, прилипшие к стене, из стеновых линий убираются: штрих
-  // стены длиннее строки текста в полтора раза, у цифры — не длиннее её высоты
+  // стены длиннее строки мелкого текста, у цифры — не длиннее её высоты
   const text = textHeight(marks)
   const strokes = keepWallStrokes(bin)
-  const walls = text ? keepLongRuns(strokes, Math.round(1.3 * text) + 2) : strokes
+  const walls = text ? keepLongRuns(strokes, Math.round(1.15 * text) + 2) : strokes
   const out = new Uint8Array(w * h)
   for (let i = 0; i < out.length; i++) out[i] = bin.ink[i] ? 0 : 255
   return { gray: out, bin, marks, walls }
@@ -1025,7 +1076,7 @@ function walledSides(d2: Float32Array, w: number, h: number, r: RoomRegion): num
   return sides
 }
 
-export function segmentRooms(d2: Float32Array, w: number, h: number, closePx: number, opts: { minAreaPx?: number; maxAreaFrac?: number; clip?: PxRect | null } = {}): RoomRegion[] {
+export function segmentRooms(d2: Float32Array, w: number, h: number, closePx: number, opts: { minAreaPx?: number; maxAreaFrac?: number; clip?: PxRect | null; inkD2?: Float32Array } = {}): RoomRegion[] {
   const r2 = closePx * closePx
   const minArea = opts.minAreaPx ?? Math.max(400, (w * h) / 400)
   const maxArea = (opts.maxAreaFrac ?? 0.5) * w * h
@@ -1112,7 +1163,7 @@ export function segmentRooms(d2: Float32Array, w: number, h: number, closePx: nu
   const kept = out.length < 2 ? out : out.filter((r) => out.some((s) => s !== r && adjacent(r, s, near)))
   // Контур каждой комнаты — по пикселям: область дорастает до стен, обводится
   // и выпрямляется. Рамка и площадь дальше — по контуру
-  const { outlines } = outlineRegions(labels, kept.map((r) => r.id ?? 0), d2, w, h, closePx, tiny)
+  const { outlines } = outlineRegions(labels, kept.map((r) => r.id ?? 0), d2, w, h, closePx, tiny, opts.inkD2)
   kept.forEach((r, k) => {
     const o = outlines[k]
     if (!o) return
@@ -1130,7 +1181,10 @@ export function segmentRooms(d2: Float32Array, w: number, h: number, closePx: nu
       r.cy = p.y
     }
   })
-  return kept.sort((a, b) => b.areaPx - a.areaPx)
+  // Поле листа, огибающее план подковой, после срезания полос тоже бывает
+  // «областью»: рамка у неё — почти весь лист, а занимает она из неё седьмую
+  // часть. Комната, даже Г-образная, заполняет свою рамку больше чем наполовину
+  return kept.filter((r) => !r.poly || r.fill >= 0.35).sort((a, b) => b.areaPx - a.areaPx)
 }
 
 /**
@@ -1204,10 +1258,10 @@ export function hatchedStrips(regions: RoomRegion[], marks: Bin): number[] {
  * при одном. Берём радиус, чей набор ближе всего к согласованному; при
  * равенстве — с меньшим числом кусков разрезов, потом больший радиус.
  */
-export function segmentRoomsAuto(d2: Float32Array, w: number, h: number, basePx: number, clip?: PxRect | null): { regions: RoomRegion[]; closePx: number } {
+export function segmentRoomsAuto(d2: Float32Array, w: number, h: number, basePx: number, clip?: PxRect | null, inkD2?: Float32Array): { regions: RoomRegion[]; closePx: number } {
   const tries = [0.5, 0.65, 0.8, 1, 1.25].map((k) => {
     const closePx = Math.max(3, Math.round(basePx * k))
-    return { closePx, regions: segmentRooms(d2, w, h, closePx, { clip }) }
+    return { closePx, regions: segmentRooms(d2, w, h, closePx, { clip, inkD2 }) }
   })
   // кластеры похожих рамок (IoU ≥ 0,6) по всем радиусам; поддержка — в скольких радиусах кластер встретился
   const clusters: { box: RoomRegion; support: number }[] = []

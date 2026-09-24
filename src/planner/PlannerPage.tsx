@@ -40,7 +40,7 @@ import { getTelegramWebApp } from '../telegram'
 import { guessType, modelRefFromAsset, modelRefFromUrl, phAssets, phCategories, phDimsCm, phInfo, phPage, type PhAsset } from './polyhaven'
 import { decodePlan, parseHash, planShareUrl } from './share'
 import { DEFAULT_TRACE, calibrate, detectWalls, grayscaleOf, joinCorners, loadUnderlayImage, makeUnderlay, mergeCollinear, nameFromFile, planFromImage, toPixel, toPlan, tracePlan, type LoadedImage, type TraceOptions } from './underlay'
-import { cleanRaster, distanceToInk, dominantAngle, floodRoom, grayToImage, groundRoomBox, hatchedStrips, rotateImage, segmentRooms, segmentRoomsAuto, warpToRect, type CleanResult, type RoomRegion } from './raster'
+import { cleanRaster, distanceToInk, dominantAngle, floodRoom, grayToImage, groundRoomBox, hatchedStrips, rotateImage, segmentRooms, segmentRoomsAuto, textHeight, warpToRect, withoutLooseText, type CleanResult, type RoomRegion } from './raster'
 import type { Guide } from './snapping'
 import { aiStatus, askLayout, askRoomLabel, askSpot, cropForVision, lookupProductViaServer, recognizePlan, type AiStatus } from './ai'
 import { applyAiPlan, convertAiPlan } from './planai'
@@ -244,7 +244,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   /** очищенный растр подложки: считается один раз на картинку и служит обводке, комнате по клику и магниту */
   /** сколько заштрихованных полос не стало комнатами при последнем поиске — для отчёта */
   const hatchedRef = useRef(0)
-  const rasterRef = useRef<{ src: string; gray: Uint8Array; clean: CleanResult; d2: Float32Array | null; wallD2: Float32Array | null } | null>(null)
+  const rasterRef = useRef<{ src: string; gray: Uint8Array; clean: CleanResult; d2: Float32Array | null; wallD2: Float32Array | null; pocketD2: Float32Array | null } | null>(null)
   const [tracing, setTracing] = useState(false)
   /** масштаб подложки задан руками — распознавание его не переопределяет */
   const [calibrated, setCalibrated] = useState(false)
@@ -752,7 +752,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     if (cur && cur.src === u.src) return cur
     const gray = await grayscaleOf(u)
     const clean = cleanRaster(gray, u.px.w, u.px.h)
-    const next = { src: u.src, gray, clean, d2: null, wallD2: null }
+    const next = { src: u.src, gray, clean, d2: null, wallD2: null, pocketD2: null }
     rasterRef.current = next
     return next
   }
@@ -807,7 +807,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         if (!u) return null
         const r = await ensureRaster(u)
         if (!r.d2) r.d2 = distanceToInk(r.clean.bin)
-        return { w: u.px.w, h: u.px.h, scale: u.scale, ink: r.clean.bin.ink, walls: r.clean.walls.ink, d2: r.d2 }
+        return { w: u.px.w, h: u.px.h, scale: u.scale, ink: r.clean.bin.ink, walls: r.clean.walls.ink, marks: r.clean.marks.ink, d2: r.d2 }
       },
       /** комнаты с картинки — те же, что берёт распознавание */
       regions: async () => (plan.underlay ? regionsOf(plan.underlay) : []),
@@ -990,6 +990,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     // приложения на скриншоте иначе дают «комнаты» на полях. Рамка плана
     // отсекает всё, что лежит за чертежом
     if (!r.wallD2) r.wallD2 = distanceToInk(r.clean.walls)
+    // закутки ограничивает вся графика, кроме отдельно стоящих цифр
+    if (!r.pocketD2) r.pocketD2 = distanceToInk(withoutLooseText(r.clean.bin, r.clean.walls, textHeight(r.clean.marks)))
     // дверной проём до 90 см закрывается радиусом в полпроёма; точный радиус подбирается сам
     const closePx = Math.min(80, Math.max(3, Math.round(45 / u.scale)))
     // заштрихованная полоса (вентшахта, кладка) — не комната: очистка стёрла
@@ -998,7 +1000,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       const bad = new Set(hatchedStrips(list, r.clean.marks))
       return { list: list.filter((_, k) => !bad.has(k)), hatched: bad.size }
     }
-    const byWalls = rooms(segmentRoomsAuto(r.wallD2, u.px.w, u.px.h, closePx).regions)
+    const byWalls = rooms(segmentRoomsAuto(r.wallD2, u.px.w, u.px.h, closePx, null, r.pocketD2).regions)
     // стеновые линии бывают прерывистыми: если по ним комнат нашлось меньше,
     // чем по всей графике, берём прежний путь
     const byAll = rooms(segmentRoomsAuto(r.d2, u.px.w, u.px.h, closePx).regions)
