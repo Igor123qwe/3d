@@ -714,7 +714,18 @@ export function detectOpenings(polys: Pt[][], d2: Float32Array, w: number, h: nu
       }
       let m = k
       while (m < full.length && full[m]) m++
-      ticks.push({ from: k, to: m, peak: Math.max(...across.slice(k, m)) })
+      // ширина черты — по её ядру у пика: на размытой картинке к черте
+      // липнет ореол, и она выходит толще стены
+      const peak = Math.max(...across.slice(k, m))
+      const core = usual + 0.7 * (peak - usual)
+      let from = k
+      while (across[from] < core) from++
+      let to = m
+      while (across[to - 1] < core) to--
+      // черта с провалом в пиксель — одна черта
+      const prev = ticks[ticks.length - 1]
+      if (prev && from - prev.to <= 2) (prev.to = to), (prev.peak = Math.max(prev.peak, peak))
+      else ticks.push({ from, to, peak })
       k = m
     }
     const thin = Math.max(5, 0.6 * gap)
@@ -729,7 +740,11 @@ export function detectOpenings(polys: Pt[][], d2: Float32Array, w: number, h: nu
       // над ними выделяются резко: шум на плотной стене так не выглядит
       const inside = across.slice(t0.to, t1.from)
       if (!inside.length || inside.some((n) => n === 0)) continue
-      if (Math.min(t0.peak, t1.peak) - median(inside) < 0.3 * gap) continue
+      // На размытой картинке стена толще, и до полной черты места меньше:
+      // хватит и половины свободного места, но не меньше пятой части стены
+      const mid = median(inside)
+      const rise = Math.min(t0.peak, t1.peak) - mid
+      if (rise < Math.min(0.3 * gap, 0.5 * (gap - mid)) || rise < 0.2 * gap) continue
       push(a + t0.from, a + t1.to)
     }
   }

@@ -43,7 +43,7 @@ import { DEFAULT_TRACE, calibrate, detectWalls, grayscaleOf, joinCorners, loadUn
 import { cleanRaster, distanceToInk, dominantAngle, floodRoom, grayToImage, groundRoomBox, hatchedStrips, rotateImage, segmentRooms, segmentRoomsAuto, textHeight, warpToRect, withoutLooseText, type CleanResult, type RoomRegion } from './raster'
 import type { Guide } from './snapping'
 import { aiStatus, askLayout, askRoomLabel, askSpot, cropForVision, lookupProductViaServer, recognizePlan, type AiStatus } from './ai'
-import { applyAiPlan, convertAiPlan } from './planai'
+import { applyAiPlan, convertAiPlan, type ConvertResult } from './planai'
 import { pointOnSide } from './reconstruct'
 import { pointOnOutline } from './picture'
 import type { LabelDispute } from './segment'
@@ -76,6 +76,33 @@ const LS_PLAN = 'boop.planner.plan.v1'
 const LS_UI = 'boop.planner.ui.v1'
 
 const DEFAULT_LAYERS: Layers = { grid: true, underlay: true, rooms: true, furniture: true, electric: true, dims: true, ergo: false, labels: true }
+
+/** растр подложки для распознавания и его производные, считаются по требованию */
+interface Raster {
+  src: string
+  /** ширина растра, px: у рабочей копии меньше, чем у подложки */
+  w: number
+  gray: Uint8Array
+  clean: CleanResult
+  d2: Float32Array | null
+  wallD2: Float32Array | null
+  pocketD2: Float32Array | null
+}
+
+/** высота мелких цифр, на которой выверен разбор, и выше какой картинку уменьшаем */
+const WORK_TEXT_PX = 13
+const MAX_TEXT_PX = 16
+
+/** результат распознавания по рабочей копии — обратно на подложку: масштаб в её пикселях */
+function fromWork(res: ConvertResult, u: Underlay): ConvertResult {
+  const k = res.underlay.px.w / u.px.w
+  if (k === 1) return res
+  return {
+    ...res,
+    underlay: { ...res.underlay, px: u.px, scale: res.underlay.scale * k },
+    report: { ...res.report, scale: { ...res.report.scale, cmPerPx: res.report.scale.cmPerPx * k } },
+  }
+}
 
 interface UiPrefs {
   layers: Layers
@@ -244,7 +271,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   /** очищенный растр подложки: считается один раз на картинку и служит обводке, комнате по клику и магниту */
   /** сколько заштрихованных полос не стало комнатами при последнем поиске — для отчёта */
   const hatchedRef = useRef(0)
-  const rasterRef = useRef<{ src: string; gray: Uint8Array; clean: CleanResult; d2: Float32Array | null; wallD2: Float32Array | null; pocketD2: Float32Array | null } | null>(null)
+  const rasterRef = useRef<Raster | null>(null)
+  const workRef = useRef<Raster | null>(null)
   const [tracing, setTracing] = useState(false)
   /** масштаб подложки задан руками — распознавание его не переопределяет */
   const [calibrated, setCalibrated] = useState(false)
@@ -747,14 +775,37 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   }
 
   /** Очищенный растр текущей подложки; пересчитывается только при смене картинки */
-  const ensureRaster = async (u: Underlay) => {
+  const ensureRaster = async (u: Underlay): Promise<Raster> => {
     const cur = rasterRef.current
     if (cur && cur.src === u.src) return cur
     const gray = await grayscaleOf(u)
     const clean = cleanRaster(gray, u.px.w, u.px.h)
-    const next = { src: u.src, gray, clean, d2: null, wallD2: null, pocketD2: null }
+    const next: Raster = { src: u.src, w: u.px.w, gray, clean, d2: null, wallD2: null, pocketD2: null }
     rasterRef.current = next
     return next
+  }
+
+  /**
+   * Растр для распознавания комнат. Пороги разбора выверены на картинках, где
+   * мелкие цифры — 8–16 точек в высоту. На крупном фото (цифры по 25 точек)
+   * штрих цифры у стены сходит за кусок стены и перегораживает закутки, а
+   * результат зависит от того, каким файлом прислали план. Такую картинку
+   * разбираем уменьшенной; wu — та же подложка в пикселях рабочей копии:
+   * положение и сантиметры те же, поэтому стены и проёмы из неё встают на место.
+   */
+  const ensureWork = async (u: Underlay): Promise<{ r: Raster; wu: Underlay }> => {
+    const full = await ensureRaster(u)
+    const text = textHeight(full.clean.marks)
+    if (!text || text <= MAX_TEXT_PX) return { r: full, wu: u }
+    const w = Math.max(1, Math.round((u.px.w * WORK_TEXT_PX) / text))
+    const h = Math.max(1, Math.round((u.px.h * w) / u.px.w))
+    const wu: Underlay = { ...u, px: { w, h }, scale: (u.scale * u.px.w) / w }
+    const cur = workRef.current
+    if (cur && cur.src === u.src && cur.w === w) return { r: cur, wu }
+    const gray = await grayscaleOf(wu)
+    const next: Raster = { src: u.src, w, gray, clean: cleanRaster(gray, w, h), d2: null, wallD2: null, pocketD2: null }
+    workRef.current = next
+    return { r: next, wu }
   }
 
   // линии на картинке для магнита: считаем при смене подложки, в фоне
@@ -809,8 +860,21 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         if (!r.d2) r.d2 = distanceToInk(r.clean.bin)
         return { w: u.px.w, h: u.px.h, scale: u.scale, ink: r.clean.bin.ink, walls: r.clean.walls.ink, marks: r.clean.marks.ink, d2: r.d2 }
       },
-      /** комнаты с картинки — те же, что берёт распознавание */
-      regions: async () => (plan.underlay ? regionsOf(plan.underlay) : []),
+      /** рабочая копия растра, по которой ищутся комнаты и проёмы */
+      work: async () => {
+        const u = plan.underlay
+        if (!u) return null
+        const { r, wu } = await ensureWork(u)
+        return { w: wu.px.w, h: wu.px.h, scale: wu.scale, ink: r.clean.bin.ink, walls: r.clean.walls.ink, marks: r.clean.marks.ink }
+      },
+      /** комнаты с картинки — те же, что берёт распознавание, в пикселях подложки */
+      regions: async () => {
+        const u = plan.underlay
+        if (!u) return []
+        const { regions, wu } = await regionsOf(u)
+        const k = u.px.w / wu.px.w
+        return regions.map((g) => ({ ...g, x1: g.x1 * k, y1: g.y1 * k, x2: g.x2 * k, y2: g.y2 * k, cx: g.cx * k, cy: g.cy * k, areaPx: g.areaPx * k * k, poly: g.poly?.map((p) => ({ x: p.x * k, y: p.y * k })) }))
+      },
       segmentRooms,
       segmentRoomsAuto,
       /**
@@ -819,20 +883,23 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
        * вручную эталона, а геометрию и оценку качества считает тот же код, что
        * и кнопка «Распознать с ИИ».
        */
-      runWithLabels: async (labels: unknown) => {
+      runWithLabels: async (labels: unknown, opts: { apply?: boolean } = {}) => {
         const u = plan.underlay
         if (!u) return null
         const ai = checkAiPlan(labels)
-        const raster = await ensureRaster(u)
-        if (!raster.d2) raster.d2 = distanceToInk(raster.clean.bin)
-        const regions = await regionsOf(u)
+        const { regions, wu, r: raster } = await regionsOf(u)
         const ground = (box: AiBox, closeCm: number) => {
-          const closePx = Math.min(80, Math.max(3, Math.round(closeCm / u.scale)))
-          const g = groundRoomBox(raster.d2!, u.px.w, u.px.h, box, closePx)
+          const closePx = Math.min(80, Math.max(3, Math.round(closeCm / wu.scale)))
+          const g = groundRoomBox(raster.d2!, wu.px.w, wu.px.h, box, closePx)
           return g ? { x1: g.x1, y1: g.y1, x2: g.x2, y2: g.y2 } : null
         }
-        const result = convertAiPlan(ai, u, { ground, regions, raster: { d2: raster.d2!, w: u.px.w, h: u.px.h } })
+        const result = fromWork(convertAiPlan(ai, wu, { ground, regions, raster: { d2: raster.d2!, w: wu.px.w, h: wu.px.h } }), u)
         const { rooms } = buildRooms({ ...plan, walls: result.walls, openings: result.openings, rooms: result.rooms, furniture: [], dims: [] })
+        // для снимков: чертёж как после «Распознать с ИИ»
+        if (opts.apply) {
+          history.apply((prev) => applyAiPlan(prev, result).plan)
+          setTimeout(() => canvasRef.current?.fit(), 50)
+        }
         return {
           report: result.report,
           regions: regions.length,
@@ -887,7 +954,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             // соседние комнаты на фрагменте закрашены: у Г-образной комнаты
             // в рамку попадает соседка, и модель читала её номер
             const others = regions.filter((g) => g !== r && g.poly).map((g) => g.poly!)
-            const crop = await cropForVision(photo, r, Math.round(Math.max(u.px.w, u.px.h) * 0.05), 640, others)
+            const crop = await cropForVision(photo, r, Math.round(Math.max(u.px.w, u.px.h) * 0.05), 640, others, u.px.w)
             // пропорции подсказывают модели, что перед ней: вытянутый коридор и
             // квадратная комната путаются, если смотреть на них вслепую. Номера
             // в подсказке нет: модель переписывала его в имя комнаты
@@ -965,7 +1032,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           .join('; ')
         try {
           const others = regions.filter((g) => g !== region && g.poly).map((g) => g.poly!)
-          const crop = await cropForVision(photo, region, Math.round(Math.max(u.px.w, u.px.h) * 0.05), 800, others)
+          const crop = await cropForVision(photo, region, Math.round(Math.max(u.px.w, u.px.h) * 0.05), 800, others, u.px.w)
           const ans = await askRoomLabel(crop, `Перечитай подписи этой комнаты очень внимательно, цифру за цифрой. Не сходится: ${what}. Если подпись и правда такая — оставь её.`, undefined, 1)
           model = ans.ai.model
           costRub += ans.ai.costRub
@@ -982,9 +1049,12 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     return changed ? { plan: { ...read, rooms }, ai: { model, costRub, tried } } : null
   }
 
-  /** Все комнаты с картинки: области заливки по очищенному растру */
-  const regionsOf = async (u: Underlay): Promise<RoomRegion[]> => {
-    const r = await ensureRaster(u)
+  /**
+   * Все комнаты с картинки: области заливки по очищенному растру. Области — в
+   * пикселях рабочей копии wu (у крупной картинки она меньше подложки)
+   */
+  const regionsOf = async (u0: Underlay): Promise<{ regions: RoomRegion[]; wu: Underlay; r: Raster }> => {
+    const { r, wu: u } = await ensureWork(u0)
     if (!r.d2) r.d2 = distanceToInk(r.clean.bin)
     // Комнаты ищем по одним стеновым линиям: подписи, выноски и панели
     // приложения на скриншоте иначе дают «комнаты» на полях. Рамка плана
@@ -1006,7 +1076,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     const byAll = rooms(segmentRoomsAuto(r.d2, u.px.w, u.px.h, closePx).regions)
     const pick = byWalls.list.length >= byAll.list.length ? byWalls : byAll
     hatchedRef.current = pick.hatched
-    return pick.list
+    return { regions: pick.list, wu: u, r }
   }
 
   /** Комнаты с картинки без ИИ: сегментация даёт геометрию, имена — по номерам */
@@ -1015,13 +1085,12 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     if (!u || tracing) return
     setTracing(true)
     try {
-      const regions = await regionsOf(u)
+      const { regions, wu, r } = await regionsOf(u)
       if (regions.length < 2) {
         setToast(regions.length ? 'На картинке нашлась только одна замкнутая область — попробуйте «Очистить» фото или «Комната по клику»' : 'Замкнутых комнат на картинке не нашлось: линии стен прерываются. Попробуйте «Очистить» или «Комната по клику»')
         return
       }
-      const d2 = rasterRef.current?.d2
-      const result = convertAiPlan({ walls: [], openings: [], rooms: [], dimensions: [] }, u, { keepScale: true, regions, raster: d2 ? { d2, w: u.px.w, h: u.px.h } : null })
+      const result = fromWork(convertAiPlan({ walls: [], openings: [], rooms: [], dimensions: [] }, wu, { keepScale: true, regions, raster: r.d2 ? { d2: r.d2, w: wu.px.w, h: wu.px.h } : null }), u)
       if (!result.walls.length) {
         setToast('Комнаты нашлись, но стены из них не собрались — проверьте картинку')
         return
@@ -1292,26 +1361,28 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     if (!u || aiBusy) return
     setAiBusy('Читаю план…')
     try {
+      // комнаты с картинки: геометрия с растра, от модели — подписи. Крупную
+      // картинку разбираем уменьшенной копией wu, результат — обратно на подложку
+      const work = await regionsOf(u).catch(() => null)
+      const wu = work?.wu ?? u
+      const d2 = work?.r.d2 ?? null
+      let regions = work?.regions ?? []
       // очищенный растр — чтобы привязать рамки комнат от модели к настоящим стенам
-      const raster = await ensureRaster(u).catch(() => null)
-      if (raster && !raster.d2) raster.d2 = distanceToInk(raster.clean.bin)
-      const ground = raster
+      const ground = d2
         ? (box: AiBox, closeCm: number) => {
-            const closePx = Math.min(80, Math.max(3, Math.round(closeCm / u.scale)))
-            const g = groundRoomBox(raster.d2!, u.px.w, u.px.h, box, closePx)
+            const closePx = Math.min(80, Math.max(3, Math.round(closeCm / wu.scale)))
+            const g = groundRoomBox(d2, wu.px.w, wu.px.h, box, closePx)
             return g ? { x1: g.x1, y1: g.y1, x2: g.x2, y2: g.y2 } : null
           }
         : undefined
-      // комнаты с картинки: геометрия с растра, от модели — подписи
-      let regions = raster ? await regionsOf(u).catch(() => []) : []
-      const rasterInfo = raster ? { d2: raster.d2!, w: u.px.w, h: u.px.h } : null
-      const convert = (p: AiPlan) => convertAiPlan(p, u, { keepScale: calibrated, ground, regions, raster: rasterInfo })
+      const rasterInfo = d2 ? { d2, w: wu.px.w, h: wu.px.h } : null
+      const convert = (p: AiPlan) => fromWork(convertAiPlan(p, wu, { keepScale: calibrated, ground, regions, raster: rasterInfo }), u)
       // подписи модель читает по исходному фото: очистка стирает цифры вместе с засечками
       const photo = u.original ?? u.src
       // Комнаты уже найдены по картинке — значит модели можно показывать их по
       // одной, крупно. Мелкие цифры на общем снимке она путает («0.82» читает
       // как «3.84»), а на увеличенном фрагменте одной комнаты — нет
-      const byRooms = regions.length >= 2 ? await readRoomLabels(photo, regions, u) : null
+      const byRooms = regions.length >= 2 ? await readRoomLabels(photo, regions, wu) : null
       // что модель назвала не помещением (шахта, штриховка), из комнат уходит
       const notRooms = byRooms?.notRooms.length ?? 0
       if (byRooms && notRooms) regions = regions.filter((g) => !byRooms.notRooms.includes(g))
@@ -1324,7 +1395,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       // сошлось. Стены от этого не двигаются: геометрия уже взята с фото, а
       // верная подпись нужна для масштаба и для названий в отчёте
       if (byRooms && result.report.quality.disputes.length) {
-        const again = await rereadDisputed(photo, regions, u, read, result.report.quality.disputes)
+        const again = await rereadDisputed(photo, regions, wu, read, result.report.quality.disputes)
         if (again) {
           const next = convert(again.plan)
           noteCost('подписи', again.ai)

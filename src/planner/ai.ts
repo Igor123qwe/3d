@@ -136,8 +136,13 @@ export interface SpotResult {
  * деталь куда надёжнее, когда та занимает весь кадр, а не сотню пикселей.
  * hide — контуры соседних комнат: их внутренность закрашивается белым.
  */
-export async function cropForVision(src: string, box: { x1: number; y1: number; x2: number; y2: number }, padPx = 24, minSide = 512, hide: Pt[][] = []): Promise<string> {
+export async function cropForVision(src: string, boxIn: { x1: number; y1: number; x2: number; y2: number }, padIn = 24, minSide = 512, hideIn: Pt[][] = [], refW?: number): Promise<string> {
   const img = await loadImage(src)
+  // рамка задана в пикселях растра шириной refW (рабочая копия бывает меньше фото)
+  const s = refW ? img.width / refW : 1
+  const box = { x1: boxIn.x1 * s, y1: boxIn.y1 * s, x2: boxIn.x2 * s, y2: boxIn.y2 * s }
+  const padPx = padIn * s
+  const hide = hideIn.map((poly) => poly.map((p) => ({ x: p.x * s, y: p.y * s })))
   const x1 = Math.max(0, Math.floor(box.x1 - padPx))
   const y1 = Math.max(0, Math.floor(box.y1 - padPx))
   const x2 = Math.min(img.width, Math.ceil(box.x2 + padPx))

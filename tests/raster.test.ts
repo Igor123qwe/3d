@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applyH, binarize, boxBlur, cleanRaster, components, despeckle, distanceToInk, dominantAngle, flattenBackground, floodRoom, groundRoomBox, homography, keepWallStrokes, orderCorners, removeBlobs, segmentRooms, strokeWidth, hatchedStrips, keepLongRuns, textHeight, type RoomRegion } from '../src/planner/raster'
+import { applyH, binarize, boxBlur, cleanRaster, components, despeckle, distanceToInk, dominantAngle, flattenBackground, floodRoom, groundRoomBox, homography, keepWallStrokes, orderCorners, removeBlobs, segmentRooms, strokeWidth, hatchedStrips, keepLongRuns, textHeight, dropSpurs, withoutLooseText, type RoomRegion } from '../src/planner/raster'
 
 /** серый лист w × h с рисовалкой прямоугольников */
 function sheet(w: number, h: number, bg = 255) {
@@ -484,5 +484,48 @@ describe('цифра, прилипшая к стене', () => {
     expect(walls.ink[11 * W + 100]).toBe(1)
     expect(walls.ink[20 * W + 60]).toBe(0)
     expect(walls.ink[65 * W + 10]).toBe(0)
+  })
+
+  it('штрих цифры, упёртый в стену, — не стена; перемычка между двумя стенами — стена', () => {
+    const W = 80
+    const H = 60
+    const ink = new Uint8Array(W * H)
+    const box = (x0: number, y0: number, x1: number, y1: number) => {
+      for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) ink[y * W + x] = 1
+    }
+    // две вертикальные стены толщиной 4 и между ними короткая перемычка
+    box(10, 0, 13, 59)
+    box(40, 0, 43, 59)
+    box(14, 10, 39, 12)
+    // штрих цифры длиной 14 упёрся в правую стену: вместе с ней — 18 точек
+    box(44, 30, 57, 31)
+    const minRun = 17
+    const long = keepLongRuns({ ink, w: W, h: H }, minRun)
+    // по одной длине штрих сходит за стену
+    expect(long.ink[30 * W + 50]).toBe(1)
+    const walls = dropSpurs(long, minRun)
+    expect(walls.ink[30 * W + 50]).toBe(0)
+    expect(walls.ink[11 * W + 25]).toBe(1)
+    expect(walls.ink[40 * W + 11]).toBe(1)
+  })
+
+  it('отдельно стоящая цифра не делит закуток, сторона квадратика между стенами остаётся', () => {
+    const W = 80
+    const H = 60
+    const ink = new Uint8Array(W * H)
+    const wallInk = new Uint8Array(W * H)
+    const box = (x0: number, y0: number, x1: number, y1: number, wall: boolean) => {
+      for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) (ink[y * W + x] = 1), wall && (wallInk[y * W + x] = 1)
+    }
+    box(10, 0, 13, 59, true)
+    box(40, 0, 43, 59, true)
+    // цифра прилипла к правой стене одним боком
+    box(30, 20, 39, 28, false)
+    // сторона квадратика: перекинута от стены до стены
+    box(14, 45, 39, 46, false)
+    const out = withoutLooseText({ ink, w: W, h: H }, { ink: wallInk, w: W, h: H }, 10)
+    expect(out.ink[24 * W + 35]).toBe(0)
+    expect(out.ink[45 * W + 25]).toBe(1)
+    expect(out.ink[30 * W + 11]).toBe(1)
   })
 })

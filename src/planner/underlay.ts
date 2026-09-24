@@ -527,6 +527,8 @@ export async function grayscaleOf(u: Underlay): Promise<Uint8Array> {
   canvas.height = u.px.h
   const ctx = canvas.getContext('2d', { willReadFrequently: true })
   if (!ctx) throw new Error('Браузер не дал холст для распознавания')
+  // рабочая копия бывает меньше картинки: уменьшаем сглаженно, без ряби
+  ctx.imageSmoothingQuality = 'high'
   ctx.drawImage(img, 0, 0, u.px.w, u.px.h)
   const data = ctx.getImageData(0, 0, u.px.w, u.px.h).data
   const gray = new Uint8Array(u.px.w * u.px.h)

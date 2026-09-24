@@ -300,9 +300,12 @@ export function textHeight(bin: Bin): number | null {
  * квадратика в стене и его штриховка перекинуты между двумя стенами —
  * держатся за стену с противоположных сторон своей рамки — и остаются.
  */
-export function withoutLooseText(bin: Bin, walls: Bin, text: number | null): Bin {
+export function withoutLooseText(bin: Bin, wallsIn: Bin, text: number | null): Bin {
   if (!text) return bin
   const { w, h } = bin
+  // штрих цифры, упёртый в стену, вместе с её толщиной тянет на длину стены
+  // (на крупной картинке — почти всегда): такие отростки — часть подписи
+  const walls = dropSpurs(wallsIn, Math.round(1.15 * text) + 2)
   const soft = new Uint8Array(w * h)
   for (let i = 0; i < soft.length; i++) soft[i] = bin.ink[i] && !walls.ink[i] ? 1 : 0
   const { labels, list } = components({ ink: soft, w, h })
@@ -315,17 +318,18 @@ export function withoutLooseText(bin: Bin, walls: Bin, text: number | null): Bin
     const x = i % w
     const y = (i - x) / w
     if (x !== c.x1 && x !== c.x2 && y !== c.y1 && y !== c.y2) continue
-    let touch = false
-    for (let dy = -1; dy <= 1 && !touch; dy++)
-      for (let dx = -1; dx <= 1 && !touch; dx++) {
-        const nx = x + dx
-        const ny = y + dy
-        touch = nx >= 0 && ny >= 0 && nx < w && ny < h && !!walls.ink[ny * w + nx]
-      }
-    if (!touch) continue
+    // стена рядом — и с какой стороны (прямо за боком, через пиксель-два): у
+    // цифры, упёртой в стену справа, угловая точка касается её наискось, но
+    // это правый бок, а не верх и низ
+    const wallAt = (dx: number, dy: number) => {
+      const nx = x + dx
+      const ny = y + dy
+      return nx >= 0 && ny >= 0 && nx < w && ny < h && !!walls.ink[ny * w + nx]
+    }
+    const toward = (dx: number, dy: number) => wallAt(dx, dy) || wallAt(2 * dx, 2 * dy)
     // в тонком куске (засечка, единица) левый бок — он же правый: такие бока не в счёт
-    if (c.x2 - c.x1 >= 2) sides[id] |= (x === c.x1 ? 1 : 0) | (x === c.x2 ? 2 : 0)
-    if (c.y2 - c.y1 >= 2) sides[id] |= (y === c.y1 ? 4 : 0) | (y === c.y2 ? 8 : 0)
+    if (c.x2 - c.x1 >= 2) sides[id] |= (x === c.x1 && toward(-1, 0) ? 1 : 0) | (x === c.x2 && toward(1, 0) ? 2 : 0)
+    if (c.y2 - c.y1 >= 2) sides[id] |= (y === c.y1 && toward(0, -1) ? 4 : 0) | (y === c.y2 && toward(0, 1) ? 8 : 0)
   }
   // буква или цифра, повёрнутая как угодно: обе стороны рамки — не больше полутора строк
   const maxSide = 1.6 * text
@@ -339,6 +343,73 @@ export function withoutLooseText(bin: Bin, walls: Bin, text: number | null): Bin
     if (c.x2 - c.x1 + 1 <= maxSide && c.y2 - c.y1 + 1 <= maxSide) ink[i] = 0
   }
   return { ink, w, h }
+}
+
+/** направления прогонов: вправо, вниз и две диагонали; поперёк каждого — соседнее по паре */
+const RUN_DIRS: [number, number][] = [
+  [1, 0],
+  [0, 1],
+  [1, 1],
+  [-1, 1],
+]
+const RUN_ACROSS = [1, 0, 3, 2]
+
+/** обойти все прямые прогоны чернил в направлении dir: колбэк получает точки прогона */
+function eachRun(ink: Uint8Array, w: number, h: number, dir: number, visit: (pts: number[]) => void): void {
+  const [dx, dy] = RUN_DIRS[dir]
+  const starts: [number, number][] = []
+  if (dir === 0) for (let y = 0; y < h; y++) starts.push([0, y])
+  else if (dir === 1) for (let x = 0; x < w; x++) starts.push([x, 0])
+  else if (dir === 2) {
+    for (let x = 0; x < w; x++) starts.push([x, 0])
+    for (let y = 1; y < h; y++) starts.push([0, y])
+  } else {
+    for (let x = 0; x < w; x++) starts.push([x, 0])
+    for (let y = 1; y < h; y++) starts.push([w - 1, y])
+  }
+  let run: number[] = []
+  for (const [x0, y0] of starts) {
+    for (let x = x0, y = y0; x >= 0 && y >= 0 && x < w && y < h; x += dx, y += dy) {
+      const i = y * w + x
+      if (ink[i]) run.push(i)
+      else if (run.length) (visit(run), (run = []))
+    }
+    if (run.length) (visit(run), (run = []))
+  }
+}
+
+/**
+ * Стеновые линии без отростков. Прогон длиной в стену может набраться из
+ * короткого штриха и толщины стены, в которую он упёрся: так черта цифры
+ * у стены сходит за стену. Свою длину прогона считаем без концов, лежащих в
+ * поперечной стене. Короче minRun остаётся только перемычка, что держится за
+ * стены обоими концами (стенка закутка, сторона квадратика); отросток,
+ * упёртый в стену одним концом, уходит. Опора — стена поперёк прогона.
+ */
+export function dropSpurs(bin: Bin, minRun: number): Bin {
+  const { ink, w, h } = bin
+  const len = RUN_DIRS.map((_, d) => {
+    const m = new Uint16Array(w * h)
+    eachRun(ink, w, h, d, (pts) => {
+      for (const i of pts) m[i] = Math.min(65535, pts.length)
+    })
+    return m
+  })
+  const keep = new Uint8Array(ink.length)
+  for (let d = 0; d < RUN_DIRS.length; d++) {
+    const across = len[RUN_ACROSS[d]]
+    const inWall = (i: number) => across[i] >= minRun
+    eachRun(ink, w, h, d, (pts) => {
+      if (pts.length < minRun) return
+      let lead = 0
+      while (lead < pts.length && inWall(pts[lead])) lead++
+      let trail = 0
+      while (trail < pts.length - lead && inWall(pts[pts.length - 1 - trail])) trail++
+      const own = pts.length - lead - trail
+      if (own >= minRun || (lead > 0 && trail > 0) || own === 0) for (const i of pts) keep[i] = 1
+    })
+  }
+  return { ink: keep, w, h }
 }
 
 /**
@@ -399,7 +470,7 @@ export function cleanRaster(gray: Uint8Array, w: number, h: number): CleanResult
   // стены длиннее строки мелкого текста, у цифры — не длиннее её высоты
   const text = textHeight(marks)
   const strokes = keepWallStrokes(bin)
-  const walls = text ? keepLongRuns(strokes, Math.round(1.15 * text) + 2) : strokes
+  const walls = text ? dropSpurs(keepLongRuns(strokes, Math.round(1.15 * text) + 2), Math.round(1.15 * text) + 2) : strokes
   const out = new Uint8Array(w * h)
   for (let i = 0; i < out.length; i++) out[i] = bin.ink[i] ? 0 : 255
   return { gray: out, bin, marks, walls }
