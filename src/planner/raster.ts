@@ -537,9 +537,18 @@ export function cleanRaster(gray: Uint8Array, w: number, h: number): CleanResult
   const labels = text ? textMask(bin, walls, text) : undefined
   if (labels) for (let i = 0; i < labels.length; i++) if (labels[i]) walls.ink[i] = 0
   // Стена примыкает к стенам. Короткая тонкая черта, что стоит особняком
-  // (размерная линия «1,29» в нише прихожей), — не стена
+  // (размерная линия «1,29» в нише прихожей), — не стена. Край кадра в этом
+  // не помощник: у плана, обрезанного по наружной стене, в крайнем столбце —
+  // полоска её чернил или тёмный край фото во всю высоту, и выносная черта,
+  // упёртая в неё, переставала быть одиночной и перегораживала нишу у входа
+  // (103 × 38 лесенкой вместо 1,29 × 0,68). Поэтому особняком черта
+  // считается без рамки в точку по краю, а сама рамка остаётся: она
+  // замыкает нишу у края кадра
   if (text) {
-    const { labels: comp, list } = components(walls)
+    const inner = walls.ink.slice()
+    for (let x = 0; x < w; x++) inner[x] = inner[(h - 1) * w + x] = 0
+    for (let y = 0; y < h; y++) inner[y * w] = inner[y * w + w - 1] = 0
+    const { labels: comp, list } = components({ ink: inner, w, h })
     const lone = list.map((c) => {
       const cw = c.x2 - c.x1 + 1
       const ch = c.y2 - c.y1 + 1
