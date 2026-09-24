@@ -351,9 +351,24 @@ export function fillDents(poly: Pt[], maxDepth: number, blocked: (x: number, y: 
         const hi = Math.max(a[along], b[along])
         const c1 = out > 0 ? a[c] : v + 2
         const c2 = out > 0 ? v - 2 : a[c]
-        let wall = false
-        for (let s = lo; s < hi && !wall; s++) for (let t = c1; t < c2 && !wall; t++) wall = horizontal ? blocked(s, t) : blocked(t, s)
-        if (wall) continue
+        // Стена в углу — прямая линия во всю площадку или во весь подступенок
+        // (уступ 0,26 × 0,38). Цифры «0,68», слипшиеся со стеной ниши, — пятна:
+        // ни одной сплошной линии не дают, и угол заполняется
+        const rows = new Array<number>(Math.max(0, c2 - c1)).fill(0)
+        const cols = new Array<number>(Math.max(0, hi - lo)).fill(0)
+        let inked = 0
+        for (let s = lo; s < hi; s++)
+          for (let t = c1; t < c2; t++)
+            if (horizontal ? blocked(s, t) : blocked(t, s)) {
+              rows[t - c1]++
+              cols[s - lo]++
+              inked++
+            }
+        // подступенок — у того конца площадки, где контур поворачивает внутрь
+        const riserAt = (dirN === out ? b[along] : a[along]) - lo
+        const lineAlong = rows.some((k) => k >= 0.8 * (hi - lo))
+        const lineAcross = cols.some((k, j) => Math.abs(j - riserAt) <= 2 && c2 - c1 > 0 && k >= 0.8 * (c2 - c1))
+        if (lineAlong || lineAcross || inked > 0.5 * (hi - lo) * Math.max(1, c2 - c1)) continue
         const next = pts.map((p) => ({ ...p }))
         next[i][c] = v
         next[(i + 1) % n][c] = v
