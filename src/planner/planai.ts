@@ -21,7 +21,7 @@ import { MIN_WALL_LENGTH, WALL_THICKNESSES } from './ops'
 import { buildRooms } from './rooms'
 import { bboxOf, closestOnSeg, dist, lerp, norm, pointInPoly, sub } from './geometry'
 import { canRebuildFrom, DEFAULT_RECONSTRUCT, pointOnSide, reconstructFromRooms, scaleSamplesFromRooms, type AreaFit } from './reconstruct'
-import { pointOnOutline, wallsFromPicture } from './picture'
+import { detectOpenings, pointOnOutline, wallsFromPicture } from './picture'
 import type { RoomRegion } from './raster'
 import { regionPoly, roomsFromRegions, type LabelDispute } from './segment'
 import { assessQuality, type QualityReport, type RasterInfo } from './quality'
@@ -75,6 +75,8 @@ export interface ConvertReport {
   openings: number
   /** проёмы, которым не нашлось стены */
   openingsDropped: number
+  /** проёмы, найденные по самой картинке (остальные — от модели) */
+  openingsFromPicture: number
   rooms: number
   /** сверка площадей с подписанными, когда чертёж построен по числам */
   areaFit: AreaFit | null
@@ -405,12 +407,57 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
     }
   }
 
-  // 5. проёмы садятся на ближайшую стену; по числам — на нужную стену нужной комнаты
+  // 5. проёмы. Сначала — найденные по самой картинке (дверь — разрыв или
+  //    участок между поперечными чертами в стене между комнатами, окно —
+  //    линии стекла в наружной стене): они точнее модели и по месту, и по
+  //    ширине. От модели — только то, чего картинка не показала
   const openings: Opening[] = []
   let dropped = 0
-  // одну дверь между двумя комнатами называют обе, каждая со своей стороны
-  let merged = 0
+  const place = (kind: Opening['kind'], hit: { wall: Wall; t: number; d: number } | null, widthCm: number): 'placed' | 'twin' | 'dropped' => {
+    // проём дальше полуметра от любой стены — это ошибка распознавания
+    if (!hit || hit.d > 50) return 'dropped'
+    const L = dist(hit.wall.a, hit.wall.b)
+    const width = Math.min(widthCm, Math.max(30, L - 2))
+    const half = width / 2 / L
+    const t = Math.min(1 - half, Math.max(half, hit.t))
+    if (L < width + 2) return 'dropped'
+    // тот же проём, названный соседней комнатой или уже найденный по картинке
+    const here = lerp(hit.wall.a, hit.wall.b, t)
+    const along = norm(sub(hit.wall.b, hit.wall.a))
+    const twin = openings.some((o) => {
+      const w2 = walls.find((x) => x.id === o.wallId)
+      if (!w2 || (o.kind === 'window') !== (kind === 'window')) return false
+      const d2 = norm(sub(w2.b, w2.a))
+      if (Math.abs(along.x * d2.y - along.y * d2.x) > 0.1) return false
+      return dist(here, lerp(w2.a, w2.b, o.t)) < (o.width + width) / 2
+    })
+    if (twin) return 'twin'
+    openings.push({ id: uid('o'), kind, wallId: hit.wall.id, t, width, hinge: 'a', side: 1 })
+    return 'placed'
+  }
+  const pictureOpenings = bySegments && raster ? detectOpenings(regions.map(regionPoly), raster, px.w, px.h, u.scale) : []
+  const pictureDoors = new Set<string>()
+  const pictureWindows = new Set<string>()
+  let fromPicture = 0
+  for (const d of pictureOpenings) {
+    const mid = d.vertical ? { x: d.axis, y: (d.from + d.to) / 2 } : { x: (d.from + d.to) / 2, y: d.axis }
+    // только стены того же направления: у угла ближайшей может оказаться поперечная
+    const parallel = walls.filter((w) => (d.vertical ? Math.abs(w.a.x - w.b.x) < 1 : Math.abs(w.a.y - w.b.y) < 1))
+    if (place(d.kind, nearestWall(parallel, toPlanPt(u, mid)), (d.to - d.from) * u.scale) !== 'placed') continue
+    fromPicture++
+    for (const k of d.rooms) {
+      if (d.kind === 'window') pictureWindows.add(`${rooms[k].name}|${d.side}`)
+      else pictureDoors.add(rooms[k].name)
+    }
+  }
+  // прихожая и коридор — единственные, где дверь в наружной стене (входная)
+  // обычна; у жилой комнаты «дверь» в наружной стене модель чаще выдумывает
+  const hallway = (name: string) => /прих|корид|холл|тамбур/i.test(`${name} ${rooms.find((r) => r.name === name)?.kind ?? ''}`)
+  let fromModel = 0
   for (const op of ai.openings) {
+    // Картинка уже показала двери этой комнаты или окна в этой её стене —
+    // модели верим только во входной двери прихожей: её картинка не ищет
+    if (op.room && (op.kind === 'window' ? pictureWindows.has(`${op.room}|${op.side}`) : pictureDoors.has(op.room) && !hallway(op.room))) continue
     // Два кандидата: точка на стороне комнаты (точнее, когда чертёж собран по
     // числам) и точка с картинки. У Г-образной комнаты сторона может проходить
     // через вырез, где стены нет, — тогда выручает точка модели. Берём того
@@ -450,34 +497,9 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
         if (best) hit = best
       }
     }
-    // проём дальше полуметра от любой стены — это ошибка распознавания
-    if (!hit || hit.d > 50) {
-      dropped++
-      continue
-    }
-    const L = dist(hit.wall.a, hit.wall.b)
-    const width = Math.min(op.widthCm, Math.max(30, L - 2))
-    const half = width / 2 / L
-    const t = Math.min(1 - half, Math.max(half, hit.t))
-    if (L < width + 2) {
-      dropped++
-      continue
-    }
-    // та же дверь, названная соседней комнатой, уже стоит на этой стене
-    const here = lerp(hit.wall.a, hit.wall.b, t)
-    const along = norm(sub(hit.wall.b, hit.wall.a))
-    const twin = openings.some((o) => {
-      const w2 = walls.find((x) => x.id === o.wallId)
-      if (!w2 || (o.kind === 'window') !== (op.kind === 'window')) return false
-      const d2 = norm(sub(w2.b, w2.a))
-      if (Math.abs(along.x * d2.y - along.y * d2.x) > 0.1) return false
-      return dist(here, lerp(w2.a, w2.b, o.t)) < (o.width + width) / 2
-    })
-    if (twin) {
-      merged++
-      continue
-    }
-    openings.push({ id: uid('o'), kind: op.kind, wallId: hit.wall.id, t, width, hinge: 'a', side: 1 })
+    const res = place(op.kind, hit, op.widthCm)
+    if (res === 'dropped') dropped++
+    else if (res === 'placed') fromModel++
   }
 
   // 6а. названия комнат
@@ -521,7 +543,7 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
     lost,
     doubtful: byNumbers && rebuilt ? rebuilt.doubtful : [],
     disputes,
-    openingsMerged: merged,
+    openingsExpected: fromPicture + fromModel + dropped,
   })
 
   return {
@@ -535,6 +557,7 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
       walls: walls.length,
       openings: openings.length,
       openingsDropped: dropped,
+      openingsFromPicture: fromPicture,
       rooms: metas.length,
       areaFit: byNumbers && rebuilt ? rebuilt.areaFit : null,
       roomsSkipped: byNumbers && rebuilt ? [...rebuilt.skipped, ...rebuilt.rooms.filter((r) => r.haveM2 === undefined).map((r) => r.name)] : [],

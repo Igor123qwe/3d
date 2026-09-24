@@ -423,19 +423,12 @@ function inkRun(d2: Float32Array, w: number, h: number, f: Face, s: number, e: n
 }
 
 /**
- * Стены по граням комнат. Координаты граней — в пикселях картинки, на выходе
- * чертёж в сантиметрах поверх подложки u.
+ * Грани всех комнат и их куски по соседям: где грань смотрит на грань другой
+ * комнаты через полосу не шире maxGap (стену), там у куска есть сосед.
  */
-export function wallsFromPicture(rooms: PictureRoom[], u: Underlay, d2: Float32Array | null, o: PictureOptions): ReconstructResult {
-  const s = u.scale
-  const W = u.px.w
-  const H = u.px.h
-  const maxGap = (o.maxGapCm ?? 110) / s
-  const joinPx = Math.max(4, 60 / s)
-  const faces = rooms.map((r, k) => facesOf(r.poly, k))
+function pairFaces(polys: Pt[][], maxGap: number, joinPx: number): { faces: Face[][]; all: Face[]; pieces: Piece[][] } {
+  const faces = polys.map((poly, k) => facesOf(poly, k))
   const all = faces.flat()
-  const defaultExt = o.exteriorCm / s
-  const defaultInt = o.interiorCm / s
   // шахта или неопознанное помещение между гранями: тогда это не одна стена
   const between = (f: Face, g: Face, lo: number, hi: number): boolean => {
     const mid = (f.at + g.at) / 2
@@ -443,12 +436,12 @@ export function wallsFromPicture(rooms: PictureRoom[], u: Underlay, d2: Float32A
     for (let k = 1; k <= 3; k++) {
       const t = lo + ((hi - lo) * k) / 4
       const p = f.vertical ? { x: mid, y: t } : { x: t, y: mid }
-      if (rooms.some((r, i) => i !== f.room && i !== g.room && pointInPoly(p, r.poly))) return true
+      if (polys.some((poly, i) => i !== f.room && i !== g.room && pointInPoly(p, poly))) return true
     }
     return false
   }
 
-  // 1. каждая грань — на куски по соседям
+  // каждая грань — на куски по соседям
   const pieces: Piece[][] = all.map((f) => {
     const cands = all.filter((g) => g.room !== f.room && g.vertical === f.vertical && g.out === -f.out && (g.at - f.at) * f.out >= -0.5 && (g.at - f.at) * f.out <= maxGap && Math.min(f.hi, g.hi) - Math.max(f.lo, g.lo) > 0)
     const cuts = new Set<number>([f.lo, f.hi])
@@ -488,6 +481,238 @@ export function wallsFromPicture(rooms: PictureRoom[], u: Underlay, d2: Float32A
     }
     return merged
   })
+
+  return { faces, all, pieces }
+}
+
+/** проём, найденный по картинке, пиксели */
+export interface PictureOpening {
+  kind: 'door' | 'window'
+  /** комнаты, которые он соединяет (у окна — одна) */
+  rooms: number[]
+  /** стена вертикальная: проём идёт вдоль y */
+  vertical: boolean
+  /** середина стены поперёк, px */
+  axis: number
+  /** от и до вдоль стены, px */
+  from: number
+  to: number
+  /** у окна — в какой стене комнаты оно */
+  side?: AiSide
+}
+
+/**
+ * Двери и окна по картинке. Модель со зрением их на плане БТИ находит через раз,
+ * а нарисованы они однозначно — в стене между двумя комнатами:
+ * - разрыв: поперёк стены нет ни одной точки чернил;
+ * - на плане БТИ чаще — участок стены, закрытый с концов тонкими поперечными
+ *   чёрточками: стена там нарисована пустым прямоугольником шириной в дверь.
+ *   Чёрточки у Т-стыков стоят парой на толщину стены, у двери — на её ширину.
+ * Ширина двери — от 55 до 130 см.
+ *
+ * Окна — в наружной стене. Стена на плане БТИ — две линии с пустотой между
+ * ними; на окне внутри идут ещё линии стекла, сплошные во всю его длину, а с
+ * концов окно закрыто поперечными чертами через всю толщину стены. Штриховка
+ * квадратиками даёт линии в пару сантиметров, вентканал внутри стены не
+ * касается её граней — ни то, ни другое окном не считается. У сплошной стены
+ * окно — участок, где заливка прервана и остались одни линии.
+ */
+export function detectOpenings(polys: Pt[][], d2: Float32Array, w: number, h: number, cmPerPx: number): PictureOpening[] {
+  const maxGap = 110 / cmPerPx
+  const joinPx = Math.max(4, 60 / cmPerPx)
+  const minDoor = 55 / cmPerPx
+  const maxDoor = 130 / cmPerPx
+  const { all, pieces } = pairFaces(polys, maxGap, joinPx)
+  const ink = (x: number, y: number) => x >= 0 && y >= 0 && x < w && y < h && d2[y * w + x] === 0
+  const out: PictureOpening[] = []
+  // Общая стена двух комнат — все её куски разом: дверь, нарисованная
+  // бледнее стены, даёт на грани комнаты уступ и режет стену на два куска
+  interface Span {
+    rooms: [number, number]
+    vertical: boolean
+    lo: number
+    hi: number
+    a: number
+    b: number
+  }
+  const spans: Span[] = []
+  all.forEach((f, fi) => {
+    for (const p of pieces[fi]) {
+      if (p.partner < 0) continue
+      const g = all[p.partner]
+      // каждую стену — один раз, от комнаты с меньшим номером
+      if (g.room < f.room) continue
+      const lo = Math.round(Math.min(f.at, g.at))
+      const hi = Math.round(Math.max(f.at, g.at))
+      if (hi - lo < 2) continue
+      const a = Math.ceil(Math.max(p.s, g.lo))
+      const b = Math.floor(Math.min(p.e, g.hi))
+      if (b <= a) continue
+      const same = spans.find((x) => x.rooms[0] === f.room && x.rooms[1] === g.room && x.vertical === f.vertical && Math.min(x.hi, hi) - Math.max(x.lo, lo) > -3 && Math.max(x.a, a) - Math.min(x.b, b) <= maxDoor)
+      if (same) {
+        same.lo = Math.min(same.lo, lo)
+        same.hi = Math.max(same.hi, hi)
+        same.a = Math.min(same.a, a)
+        same.b = Math.max(same.b, b)
+      } else spans.push({ rooms: [f.room, g.room], vertical: f.vertical, lo, hi, a, b })
+    }
+  })
+  for (const { rooms: pair, vertical, lo, hi, a, b } of spans) {
+    const gap = hi - lo
+    if (b - a < minDoor) continue
+    const across: number[] = []
+    for (let t = a; t < b; t++) {
+      let n = 0
+      for (let c = lo; c < hi; c++) if (vertical ? ink(c, t) : ink(t, c)) n++
+      across.push(n)
+    }
+    const push = (from: number, to: number) => out.push({ kind: 'door', rooms: [pair[0], pair[1]], vertical, axis: (lo + hi) / 2, from, to })
+    // 1. разрыв: поперёк стены пусто
+    for (let k = 0; k < across.length; ) {
+      if (across[k] !== 0) {
+        k++
+        continue
+      }
+      let m = k
+      while (m < across.length && across[m] === 0) m++
+      if (m - k >= minDoor && m - k <= maxDoor) push(a + k, a + m)
+      k = m
+    }
+    // 2. пустой прямоугольник между поперечными чертами: только у стены,
+    //    нарисованной двумя линиями (у сплошной поперёк залито везде).
+    //    Черта — заметно больше чернил поперёк стены, чем обычно у этой
+    //    стены: хотя бы на полпути к сплошному. До самих граней она не
+    //    доходит — грань стоит на пиксель-два от линии, а на снятом с экрана
+    //    фото черты ещё и бледнее
+    const median = (xs: number[]) => [...xs].sort((x, y) => x - y)[Math.floor(xs.length / 2)]
+    const usual = median(across)
+    const full = across.map((n) => n >= usual + 0.4 * (gap - usual) && n > usual)
+    const solid = across.filter((n) => n >= gap - 1).length / Math.max(1, across.length)
+    if (solid > 0.5) continue
+    const ticks: { from: number; to: number; peak: number }[] = []
+    for (let k = 0; k < full.length; ) {
+      if (!full[k]) {
+        k++
+        continue
+      }
+      let m = k
+      while (m < full.length && full[m]) m++
+      ticks.push({ from: k, to: m, peak: Math.max(...across.slice(k, m)) })
+      k = m
+    }
+    const thin = Math.max(5, 0.6 * gap)
+    for (let k = 0; k + 1 < ticks.length; k++) {
+      const t0 = ticks[k]
+      const t1 = ticks[k + 1]
+      // черта тонкая; толстая поперечина — это стена, упёршаяся в эту
+      if (t0.to - t0.from > thin || t1.to - t1.from > thin) continue
+      const span = t1.to - t0.from
+      if (span < minDoor || span > maxDoor) continue
+      // внутри двери — две линии стены, не разрыв (он найден выше), и черты
+      // над ними выделяются резко: шум на плотной стене так не выглядит
+      const inside = across.slice(t0.to, t1.from)
+      if (!inside.length || inside.some((n) => n === 0)) continue
+      if (Math.min(t0.peak, t1.peak) - median(inside) < 0.3 * gap) continue
+      push(a + t0.from, a + t1.to)
+    }
+  }
+  // окна: куски граней без соседа — наружные стены
+  const minWin = 50 / cmPerPx
+  const maxWin = 300 / cmPerPx
+  const D = Math.round(Math.min(90 / cmPerPx, 90))
+  all.forEach((f, fi) => {
+    for (const p of pieces[fi]) {
+      if (p.partner >= 0) continue
+      const a = Math.ceil(p.s)
+      const b = Math.floor(p.e)
+      if (b - a < minWin) continue
+      // первый пиксель снаружи грани и шаг наружу
+      const base = f.out > 0 ? f.at : f.at - 1
+      const at = (t: number, d: number) => (f.vertical ? ink(base + f.out * d, t) : ink(t, base + f.out * d))
+      const bits: Uint8Array[] = []
+      const occ = new Float32Array(D)
+      for (let t = a; t < b; t++) {
+        const row = new Uint8Array(D)
+        for (let d = 0; d < D; d++) if (at(t, d)) (row[d] = 1), occ[d]++
+        bits.push(row)
+      }
+      for (let d = 0; d < D; d++) occ[d] /= bits.length
+      // внутренняя линия стены — у самой грани; наружная — первая за ней
+      // линия во всю длину стены (стекло занимает её часть, штриховка рвётся;
+      // дальше бывает рамка листа — это уже не стена)
+      let i0 = 0
+      while (i0 < 4 && occ[i0] < 0.5) i0++
+      if (i0 >= 4) continue
+      let i1 = i0
+      while (i1 + 1 < D && occ[i1 + 1] >= 0.5) i1++
+      let o0 = i1 + 4
+      while (o0 < D && occ[o0] < 0.8) o0++
+      if (o0 >= D) continue
+      let o1 = o0
+      while (o1 + 1 < D && occ[o1 + 1] >= 0.5) o1++
+      const inner = o0 - i1 - 1
+      if (inner < 3) continue
+      const full = bits.map((row) => {
+        let n = 0
+        for (let d = i0; d <= o1; d++) n += row[d]
+        return n >= o1 - i0 + 1 - 2
+      })
+      const cand = bits.map((row) => {
+        let n = 0
+        for (let d = i1 + 1; d < o0; d++) n += row[d]
+        return n > 0 && n < 0.8 * inner
+      })
+      for (let k = 0; k < cand.length; ) {
+        if (!cand[k]) {
+          k++
+          continue
+        }
+        let m = k
+        // пропуски в пару пикселей внутри окна — шум линии
+        while (m < cand.length && (cand[m] || (m + 2 < cand.length && (cand[m + 1] || cand[m + 2])))) m++
+        const len = m - k
+        const closedAt = (i: number) => {
+          for (let j = Math.max(0, i - 3); j <= Math.min(full.length - 1, i + 3); j++) if (full[j]) return true
+          return false
+        }
+        if (len >= minWin && len <= maxWin && closedAt(k) && closedAt(m - 1)) {
+          // линия стекла идёт во всю длину окна
+          let glass = false
+          for (let d = i1 + 1; d < o0 && !glass; d++) {
+            let n = 0
+            for (let t = k; t < m; t++) n += bits[t][d]
+            glass = n >= 0.85 * len
+          }
+          const side: AiSide = f.vertical ? (f.out > 0 ? 'right' : 'left') : f.out > 0 ? 'bottom' : 'top'
+          if (glass) out.push({ kind: 'window', rooms: [f.room], vertical: f.vertical, axis: base + f.out * ((i0 + o1) / 2), from: a + k, to: a + m, side })
+        }
+        k = m
+      }
+    }
+  })
+  // окно, разрезанное выносной линией размера или импостом, — одно окно
+  const merged: PictureOpening[] = []
+  for (const o of out) {
+    const prev = merged.find((q) => q.kind === 'window' && o.kind === 'window' && q.rooms[0] === o.rooms[0] && q.vertical === o.vertical && Math.abs(q.axis - o.axis) < 3 && o.from - q.to <= 6 && o.to > q.to)
+    if (prev) prev.to = o.to
+    else merged.push({ ...o })
+  }
+  return merged
+}
+
+/**
+ * Стены по граням комнат. Координаты граней — в пикселях картинки, на выходе
+ * чертёж в сантиметрах поверх подложки u.
+ */
+export function wallsFromPicture(rooms: PictureRoom[], u: Underlay, d2: Float32Array | null, o: PictureOptions): ReconstructResult {
+  const s = u.scale
+  const W = u.px.w
+  const H = u.px.h
+  const maxGap = (o.maxGapCm ?? 110) / s
+  const joinPx = Math.max(4, 60 / s)
+  const defaultExt = o.exteriorCm / s
+  const defaultInt = o.interiorCm / s
+  const { faces, all, pieces } = pairFaces(rooms.map((r) => r.poly), maxGap, joinPx)
 
   // 2. ось и толщина каждого куска
   all.forEach((f, fi) => {

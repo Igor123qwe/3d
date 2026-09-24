@@ -82,44 +82,7 @@
         "y": 0.71
       }
     ],
-    "openings": [
-      {
-        "kind": "door",
-        "room": "5ж",
-        "side": "right",
-        "at": 0.85,
-        "x": 0.46,
-        "y": 0.42,
-        "width_cm": 80
-      },
-      {
-        "kind": "door",
-        "room": "4ж",
-        "side": "top",
-        "at": 0.5,
-        "x": 0.28,
-        "y": 0.5,
-        "width_cm": 80
-      },
-      {
-        "kind": "window",
-        "room": "5ж",
-        "side": "left",
-        "at": 0.5,
-        "x": 0.06,
-        "y": 0.3,
-        "width_cm": 150
-      },
-      {
-        "kind": "window",
-        "room": "4ж",
-        "side": "left",
-        "at": 0.5,
-        "x": 0.06,
-        "y": 0.7,
-        "width_cm": 150
-      }
-    ],
+    "openings": [],
     "dimensions": [],
     "walls": []
   },
@@ -130,7 +93,6 @@
       "max": 1.5
     },
     "wallsOnInk": 0.7,
-    "openings": 4,
     "shapeIou": {
       "min": 0.75,
       "skip": []
@@ -177,8 +139,62 @@
         "widthCm": 330,
         "sizeTolCm": 35,
         "shape": "rect",
-        "shapeFill": 0.93,
+        "shapeFill": 0.9,
         "note": "правая стена с уступами (0,64 / 0,13 / 0,27): рамку комната заполняет не целиком; 3,30 — ширина по нижней части"
+      }
+    ],
+    "openingList": [
+      {
+        "kind": "door",
+        "rooms": [
+          "5ж",
+          "1"
+        ]
+      },
+      {
+        "kind": "door",
+        "rooms": [
+          "4ж",
+          "1"
+        ]
+      },
+      {
+        "kind": "door",
+        "rooms": [
+          "2",
+          "1"
+        ]
+      },
+      {
+        "kind": "door",
+        "rooms": [
+          "6",
+          "1"
+        ]
+      },
+      {
+        "kind": "window",
+        "rooms": [
+          "5ж"
+        ]
+      },
+      {
+        "kind": "window",
+        "rooms": [
+          "4ж"
+        ]
+      },
+      {
+        "kind": "window",
+        "rooms": [
+          "4ж"
+        ]
+      },
+      {
+        "kind": "window",
+        "rooms": [
+          "2"
+        ]
       }
     ]
   }

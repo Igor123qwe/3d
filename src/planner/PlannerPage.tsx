@@ -837,6 +837,15 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           report: result.report,
           regions: regions.length,
           walls: result.walls.map((w) => [Math.round(w.a.x), Math.round(w.a.y), Math.round(w.b.x), Math.round(w.b.y), w.thickness]),
+          // проёмы с комнатами по обе стороны стены: по ним набор сверяет двери и окна с эталоном
+          openings: result.openings.map((o) => {
+            const w = result.walls.find((x) => x.id === o.wallId)!
+            const p = { x: w.a.x + (w.b.x - w.a.x) * o.t, y: w.a.y + (w.b.y - w.a.y) * o.t }
+            const L = Math.hypot(w.b.x - w.a.x, w.b.y - w.a.y) || 1
+            const n = { x: -(w.b.y - w.a.y) / L, y: (w.b.x - w.a.x) / L }
+            const side = (k: number) => rooms.find((r) => pointInPoly({ x: p.x + n.x * k * (w.thickness / 2 + 20), y: p.y + n.y * k * (w.thickness / 2 + 20) }, r.polygon))?.meta.name
+            return { kind: o.kind, widthCm: Math.round(o.width), rooms: [side(1), side(-1)].filter((x): x is string => !!x).sort() }
+          }),
           regionBoxes: regions.map((g) => [Math.round(g.x1), Math.round(g.y1), Math.round(g.x2), Math.round(g.y2), g.poly?.length ?? 4]),
           rooms: rooms.map((r) => ({
             name: r.meta.name,
@@ -1385,7 +1394,10 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       }
       const measured = q.dims.filter((d) => d.gotCm !== null)
       if (measured.length) lines.push(`Размеры: ${measured.slice(0, 6).map((d) => `${d.cm} → ${Math.round(d.gotCm!)} (${d.gotCm! - d.cm >= 0 ? '+' : ''}${Math.round(d.gotCm! - d.cm)} см)`).join(', ')}${measured.length > 6 ? '…' : ''}.`)
-      if (q.openings.expected) lines.push(`Проёмы: ${q.openings.placed} из ${q.openings.expected} встали на стены.`)
+      if (q.openings.expected) {
+        const pic = r.openingsFromPicture
+        lines.push(`Проёмы: ${q.openings.placed} из ${q.openings.expected} встали на стены${pic ? ` — ${pic} найдено по самой картинке, ${q.openings.placed - pic} назвала модель` : ''}.`)
+      }
       if (q.areas) {
         lines.push(`Площади: сходятся на ${Math.round(q.areas.accuracy * 100)} %${q.areas.off.length ? ` — ${q.areas.off.slice(0, 4).map((off) => `${off.name}: на плане ${fmtNum(off.wantM2)}, получилось ${fmtNum(off.haveM2)} м²`).join('; ')}` : ''}.`)
       }

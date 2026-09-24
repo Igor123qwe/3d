@@ -116,10 +116,24 @@ function score(ref, out) {
   const iouBad = (q.shapes ?? []).filter((s) => !skip.has(s.name) && s.iou < iouMin)
   const worstIou = (q.shapes ?? []).filter((s) => !skip.has(s.name)).reduce((m, s) => Math.min(m, s.iou), 1)
 
+  // Проёмы по списку эталона: дверь — между какими комнатами, окно — в какой.
+  // Так видно не только сколько встало, но и куда
+  const cls = (k) => (k === 'window' ? 'window' : 'door')
+  const got = (out.openings ?? []).map((o) => ({ kind: cls(o.kind), key: [...o.rooms].sort().join('|') }))
+  const want = (exp.openingList ?? []).map((o) => ({ kind: cls(o.kind), key: [...o.rooms].sort().join('|') }))
+  const used = new Set()
+  const openingMissing = []
+  for (const w of want) {
+    const i = got.findIndex((g, k) => !used.has(k) && g.kind === w.kind && g.key === w.key)
+    if (i >= 0) used.add(i)
+    else openingMissing.push(`${w.kind === 'window' ? 'окно' : 'дверь'} ${w.key.replace('|', '–')}`)
+  }
+  const openingExtra = exp.openingList ? got.filter((_, k) => !used.has(k)).map((g) => `${g.kind === 'window' ? 'окно' : 'дверь'} ${g.key.replace('|', '–') || 'вне комнат'}`) : []
+
   const onInk = q.walls?.onInk ?? null
   const scaleOk = !exp.scaleCmPerPx || (out.report.scale.cmPerPx >= exp.scaleCmPerPx.min && out.report.scale.cmPerPx <= exp.scaleCmPerPx.max)
-  const openingsPlaced = q.openings.placed
-  const openingsWant = exp.openings ?? q.openings.expected
+  const openingsPlaced = exp.openingList ? want.length - openingMissing.length : q.openings.placed
+  const openingsWant = exp.openingList ? want.length : (exp.openings ?? q.openings.expected)
 
   const fixes =
     unflagged.length +
@@ -130,6 +144,7 @@ function score(ref, out) {
     areaOff.filter((a) => a.bad).length +
     sizeOff.filter((s) => s.bad).length +
     Math.max(0, openingsWant - openingsPlaced) +
+    openingExtra.length +
     (scaleOk ? 0 : 1) +
     (exp.regions !== undefined && out.regions !== exp.regions ? 1 : 0)
 
@@ -150,7 +165,9 @@ function score(ref, out) {
     sizeBad: sizeOff.filter((s) => s.bad),
     shapeOff,
     unflagged,
-    openings: `${openingsPlaced}/${openingsWant}`,
+    openings: `${openingsPlaced}/${openingsWant}${openingExtra.length ? ` +${openingExtra.length}` : ''}`,
+    openingMissing,
+    openingExtra,
     fixes,
   }
 }
@@ -200,7 +217,7 @@ async function main() {
       rows.push({ name: plan.name, ...r })
     }
     if (asJson) {
-      console.log(JSON.stringify(rows.map(({ raw, ...r }) => (process.argv.includes('--rooms') ? { ...r, rooms: raw.rooms, walls: raw.walls, regionBoxes: raw.regionBoxes } : r)), null, 2))
+      console.log(JSON.stringify(rows.map(({ raw, ...r }) => (process.argv.includes('--rooms') ? { ...r, rooms: raw.rooms, walls: raw.walls, regionBoxes: raw.regionBoxes, openingsRaw: raw.openings } : r)), null, 2))
     } else {
       printTable(rows)
       console.log('')
@@ -213,6 +230,8 @@ async function main() {
           ...r.areaBad.map((a) => `площадь ${a.name}: ${a.deltaM2} м² мимо`),
           ...r.sizeBad.map((s) => `${s.name}: ${s.deltaCm} см мимо`),
           ...r.unflagged.map((n) => `${n} закрыта на снимке, но отчёт не пометил её подпись спорной`),
+          ...r.openingMissing.map((o) => `нет: ${o}`),
+          ...r.openingExtra.map((o) => `лишняя ${o}`),
         ]
         console.log(`${r.name}: ${notes.length ? notes.join('; ') : 'всё в допуске'} (${(r.ms / 1000).toFixed(1)} с)`)
       }

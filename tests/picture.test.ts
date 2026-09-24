@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Plan, Pt, Underlay, Wall } from '../src/planner/types'
-import { cutBumps, growRegions, pointOnOutline, simplifyOrthogonal, traceOutline, wallsFromPicture } from '../src/planner/picture'
+import { cutBumps, detectOpenings, growRegions, pointOnOutline, simplifyOrthogonal, traceOutline, wallsFromPicture } from '../src/planner/picture'
 import { buildRooms } from '../src/planner/rooms'
 import { polyArea } from '../src/planner/geometry'
 
@@ -214,5 +214,68 @@ describe('точка на стороне Г-образной комнаты', ()
     expect(pointOnOutline(L, 'right', 0.3)).toEqual({ x: 100, y: 30 })
     expect(pointOnOutline(L, 'bottom', 0.9)).toEqual({ x: 90, y: 60 })
     expect(pointOnOutline(L, 'left', 0.5)).toEqual({ x: 0, y: 50 })
+  })
+})
+
+describe('двери и окна по картинке', () => {
+  // лист 300 × 200 px, 1 px = 2 см; две комнаты слева и справа от стены x 148..160,
+  // стена нарисована двумя линиями по 2 px с пустотой между ними
+  const W = 300
+  const H = 200
+  const sheet = () => {
+    const ink = new Uint8Array(W * H)
+    const put = (x1: number, y1: number, x2: number, y2: number) => {
+      for (let y = y1; y <= y2; y++) for (let x = x1; x <= x2; x++) ink[y * W + x] = 1
+    }
+    return { ink, put }
+  }
+  const d2Of = (ink: Uint8Array) => Float32Array.from(ink, (v) => (v ? 0 : 100))
+  const rect = (x1: number, y1: number, x2: number, y2: number): Pt[] => [
+    { x: x1, y: y1 },
+    { x: x2, y: y1 },
+    { x: x2, y: y2 },
+    { x: x1, y: y2 },
+  ]
+  const rooms = [rect(40, 20, 148, 180), rect(160, 20, 260, 180)]
+
+  it('дверь — участок стены между поперечными чертами; стена без черт — без двери', () => {
+    const { ink, put } = sheet()
+    put(148, 20, 149, 180)
+    put(158, 20, 159, 180)
+    // черты поперёк стены на y 80 и 125: дверь 45 px = 90 см
+    put(148, 80, 159, 80)
+    put(148, 125, 159, 125)
+    const found = detectOpenings(rooms, d2Of(ink), W, H, 2)
+    expect(found).toHaveLength(1)
+    expect(found[0]).toMatchObject({ kind: 'door', rooms: [0, 1], vertical: true })
+    expect(Math.abs(found[0].from - 80) + Math.abs(found[0].to - 126)).toBeLessThan(4)
+  })
+
+  it('дверь — разрыв в стене', () => {
+    const { ink, put } = sheet()
+    put(148, 20, 159, 90)
+    put(148, 135, 159, 180)
+    const found = detectOpenings(rooms, d2Of(ink), W, H, 2)
+    expect(found.map((o) => [o.kind, o.from, o.to])).toEqual([['door', 91, 135]])
+  })
+
+  it('окно — линии стекла в наружной стене, закрытые чертами; штриховка квадратиками — не окно', () => {
+    const { ink, put } = sheet()
+    // наружная стена слева от левой комнаты: линии x 38..39 и 18..19, пустота между
+    put(38, 20, 39, 180)
+    put(18, 20, 19, 180)
+    // окно y 60..130: две линии стекла и черты через всю толщину
+    put(25, 60, 26, 130)
+    put(31, 60, 32, 130)
+    put(18, 60, 39, 60)
+    put(18, 130, 39, 130)
+    // правая наружная стена в штриховке: квадратики 4 × 4 через 8 px
+    put(260, 20, 261, 180)
+    put(282, 20, 283, 180)
+    for (let y = 22; y < 178; y += 8) put(268, y, 272, y + 4)
+    const found = detectOpenings(rooms, d2Of(ink), W, H, 2).filter((o) => o.kind === 'window')
+    expect(found).toHaveLength(1)
+    expect(found[0].rooms).toEqual([0])
+    expect(Math.abs(found[0].from - 60) + Math.abs(found[0].to - 131)).toBeLessThan(4)
   })
 })
