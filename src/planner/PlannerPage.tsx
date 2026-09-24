@@ -877,7 +877,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           try {
             // соседние комнаты на фрагменте закрашены: у Г-образной комнаты
             // в рамку попадает соседка, и модель читала её номер
-            const crop = await cropForVision(photo, r, Math.round(Math.max(u.px.w, u.px.h) * 0.02), 640, r.poly)
+            const others = regions.filter((g) => g !== r && g.poly).map((g) => g.poly!)
+            const crop = await cropForVision(photo, r, Math.round(Math.max(u.px.w, u.px.h) * 0.05), 640, others)
             // пропорции подсказывают модели, что перед ней: вытянутый коридор и
             // квадратная комната путаются, если смотреть на них вслепую. Номера
             // в подсказке нет: модель переписывала его в имя комнаты
@@ -954,7 +955,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           })
           .join('; ')
         try {
-          const crop = await cropForVision(photo, region, Math.round(Math.max(u.px.w, u.px.h) * 0.02), 800, region.poly)
+          const others = regions.filter((g) => g !== region && g.poly).map((g) => g.poly!)
+          const crop = await cropForVision(photo, region, Math.round(Math.max(u.px.w, u.px.h) * 0.05), 800, others)
           const ans = await askRoomLabel(crop, `Перечитай подписи этой комнаты очень внимательно, цифру за цифрой. Не сходится: ${what}. Если подпись и правда такая — оставь её.`, undefined, 1)
           model = ans.ai.model
           costRub += ans.ai.costRub

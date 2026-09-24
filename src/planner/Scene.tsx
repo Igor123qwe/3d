@@ -325,6 +325,28 @@ export const Scene: React.FC<SceneProps> = ({ plan, rooms, check, layers, unit, 
       {/* размеры */}
       {layers.dims && (
         <g>
+          {/* Размеры комнат в чистоте — по внутренним граням стен, внутри
+              комнаты, как на плане БТИ: их и сверяют с планом. Длина по оси
+              стены у перегородки на полстены длиннее и только путает */}
+          {rooms.flatMap((r) =>
+            r.inner.map((a, i) => {
+              const b = r.inner[(i + 1) % r.inner.length]
+              const L = dist(a, b)
+              if (L < 30) return null
+              const n = perp(norm(sub(b, a)))
+              const m = mid(a, b)
+              const s = pointInPoly(add(m, mul(n, 4)), r.inner) ? 1 : -1
+              const p = add(m, mul(n, s * (9 / zoom)))
+              let ang = angleDeg(a, b)
+              if (ang > 90 || ang <= -90) ang += 180
+              return (
+                <text key={`rl-${r.meta.id}-${i}`} transform={`translate(${p.x} ${p.y}) rotate(${ang})`} fontSize={9.5 / zoom} textAnchor="middle" dominantBaseline="middle" fill="#6b7280" stroke="#fff" strokeWidth={2.5 / zoom} paintOrder="stroke">
+                  {fmtLen(L, unit)}
+                </text>
+              )
+            }),
+          )}
+          {/* стены вне комнат — по оси */}
           {plan.walls.map((w) => {
             const L = dist(w.a, w.b)
             if (L < 50) return null
@@ -332,8 +354,8 @@ export const Scene: React.FC<SceneProps> = ({ plan, rooms, check, layers, unit, 
             const n = perp(dir)
             const m = mid(w.a, w.b)
             const inside = (s: number) => rooms.some((r) => pointInPoly(add(m, mul(n, s * (w.thickness / 2 + 15))), r.polygon))
-            const s = !inside(1) ? 1 : !inside(-1) ? -1 : 1
-            const p = add(m, mul(n, s * (w.thickness / 2 + 12 / zoom)))
+            if (inside(1) || inside(-1)) return null
+            const p = add(m, mul(n, w.thickness / 2 + 12 / zoom))
             let ang = angleDeg(w.a, w.b)
             if (ang > 90 || ang <= -90) ang += 180
             return (

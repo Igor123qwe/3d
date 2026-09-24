@@ -134,9 +134,9 @@ export interface SpotResult {
 /**
  * Вырезать кусок картинки вокруг участка и увеличить его: модель читает мелкую
  * деталь куда надёжнее, когда та занимает весь кадр, а не сотню пикселей.
- * keep — контур комнаты: всё дальше padPx от него закрашивается белым.
+ * hide — контуры соседних комнат: их внутренность закрашивается белым.
  */
-export async function cropForVision(src: string, box: { x1: number; y1: number; x2: number; y2: number }, padPx = 24, minSide = 512, keep?: Pt[]): Promise<string> {
+export async function cropForVision(src: string, box: { x1: number; y1: number; x2: number; y2: number }, padPx = 24, minSide = 512, hide: Pt[][] = []): Promise<string> {
   const img = await loadImage(src)
   const x1 = Math.max(0, Math.floor(box.x1 - padPx))
   const y1 = Math.max(0, Math.floor(box.y1 - padPx))
@@ -150,31 +150,19 @@ export async function cropForVision(src: string, box: { x1: number; y1: number; 
   canvas.height = Math.round(h * k)
   const ctx = canvas.getContext('2d')
   if (!ctx) return src
-  ctx.drawImage(img, x1, y1, w, h, 0, 0, canvas.width, canvas.height)
-  const mask = keep && keep.length >= 3 ? document.createElement('canvas') : null
-  const mctx = mask?.getContext('2d')
-  if (mask && mctx && keep) {
-    // Всё дальше padPx от контура — чужое: у Г-образной комнаты в рамку
-    // попадает соседка со своей подписью, и модель читает её номер. Маска —
-    // контур с каймой шириной padPx — рисуется отдельно и накладывается разом
-    mask.width = canvas.width
-    mask.height = canvas.height
-    mctx.beginPath()
-    keep.forEach((p, n) => (n ? mctx.lineTo((p.x - x1) * k, (p.y - y1) * k) : mctx.moveTo((p.x - x1) * k, (p.y - y1) * k)))
-    mctx.closePath()
-    mctx.fillStyle = '#000'
-    mctx.strokeStyle = '#000'
-    mctx.fill()
-    mctx.lineWidth = 2 * padPx * k
-    mctx.lineJoin = 'miter'
-    mctx.stroke()
-    ctx.globalCompositeOperation = 'destination-in'
-    ctx.drawImage(mask, 0, 0)
-  }
-  ctx.globalCompositeOperation = 'destination-over'
   ctx.fillStyle = '#ffffff'
   ctx.fillRect(0, 0, canvas.width, canvas.height)
-  ctx.globalCompositeOperation = 'source-over'
+  ctx.drawImage(img, x1, y1, w, h, 0, 0, canvas.width, canvas.height)
+  // Соседние комнаты закрашиваются по их внутренним граням: стены, двери и
+  // окна остаются видны, а чужая подпись — нет. У Г-образной комнаты в рамку
+  // попадает соседка, и модель читала её номер
+  for (const poly of hide) {
+    if (poly.length < 3) continue
+    ctx.beginPath()
+    poly.forEach((p, n) => (n ? ctx.lineTo((p.x - x1) * k, (p.y - y1) * k) : ctx.moveTo((p.x - x1) * k, (p.y - y1) * k)))
+    ctx.closePath()
+    ctx.fill()
+  }
   return canvas.toDataURL('image/png')
 }
 

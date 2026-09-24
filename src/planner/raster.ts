@@ -268,6 +268,63 @@ export function keepWallStrokes(binIn: Bin, opts: { minPx?: number; maxFrac?: nu
   return { ink, w: bin.w, h: bin.h }
 }
 
+/**
+ * Высота цифр на плане, px: медиана по отдельно стоящим знакам — компактным
+ * фигурам из штрихов, что выше, чем шире. null — надписей на картинке почти
+ * нет. Нужна, чтобы отличить цифру, прилипшую к стене, от куска самой стены.
+ */
+export function textHeight(bin: Bin): number | null {
+  const { list } = components(bin)
+  const maxH = 0.05 * Math.min(bin.w, bin.h)
+  const hs: number[] = []
+  for (const c of list) {
+    const ch = c.y2 - c.y1 + 1
+    const cw = c.x2 - c.x1 + 1
+    if (ch < 5 || ch > maxH || cw > 0.85 * ch) continue
+    const fill = c.size / (ch * cw)
+    if (c.size < 6 || fill < 0.15 || fill > 0.8) continue
+    hs.push(ch)
+  }
+  if (hs.length < 10) return null
+  hs.sort((a, b) => a - b)
+  return hs[Math.floor(hs.length / 2)]
+}
+
+/**
+ * Оставить только длинные штрихи: точку, через которую проходит отрезок
+ * чернил не короче minRun по горизонтали, вертикали или диагонали. Стена —
+ * длинная линия; цифра размера, прилипшая к стене, — короткие штрихи, и
+ * иначе она выедает из комнаты полосу высотой в строку текста.
+ */
+export function keepLongRuns(bin: Bin, minRun: number): Bin {
+  const { ink, w, h } = bin
+  const keep = new Uint8Array(ink.length)
+  const scan = (x0: number, y0: number, dx: number, dy: number) => {
+    let x = x0
+    let y = y0
+    let from = -1
+    let len = 0
+    const flush = () => {
+      if (len >= minRun) for (let k = 0; k < len; k++) keep[(y0 + (from + k) * dy) * w + (x0 + (from + k) * dx)] = 1
+      len = 0
+    }
+    for (let t = 0; x >= 0 && y >= 0 && x < w && y < h; t++, x += dx, y += dy) {
+      if (ink[y * w + x]) {
+        if (!len) from = t
+        len++
+      } else flush()
+    }
+    flush()
+  }
+  for (let y = 0; y < h; y++) scan(0, y, 1, 0)
+  for (let x = 0; x < w; x++) scan(x, 0, 0, 1)
+  // диагонали: скошенная стена не должна пропасть вместе с цифрами
+  for (let x = 0; x < w; x++) (scan(x, 0, 1, 1), scan(x, 0, -1, 1))
+  for (let y = 1; y < h; y++) (scan(0, y, 1, 1), scan(w - 1, y, -1, 1))
+  for (let i = 0; i < ink.length; i++) keep[i] = keep[i] & ink[i]
+  return { ink: keep, w, h }
+}
+
 export interface CleanResult {
   /** очищенная картинка: белая бумага, чёрные линии */
   gray: Uint8Array
@@ -287,7 +344,11 @@ export function cleanRaster(gray: Uint8Array, w: number, h: number): CleanResult
   const flat = flattenBackground(gray, w, h)
   const marks = binarize(flat, w, h)
   const bin = despeckle(marks)
-  const walls = keepWallStrokes(bin)
+  // цифры размеров, прилипшие к стене, из стеновых линий убираются: штрих
+  // стены длиннее строки текста в полтора раза, у цифры — не длиннее её высоты
+  const text = textHeight(marks)
+  const strokes = keepWallStrokes(bin)
+  const walls = text ? keepLongRuns(strokes, Math.round(1.3 * text) + 2) : strokes
   const out = new Uint8Array(w * h)
   for (let i = 0; i < out.length; i++) out[i] = bin.ink[i] ? 0 : 255
   return { gray: out, bin, marks, walls }

@@ -64,6 +64,8 @@ export interface QualityInput {
   lost: Map<string, string>
   doubtful: string[]
   disputes?: LabelDispute[]
+  /** проёмы, названные дважды (дверь между комнатами — с обеих сторон) и поставленные один раз */
+  openingsMerged?: number
 }
 
 const emptyPlan = (walls: Wall[]): Plan => ({ version: 1, name: '', walls, openings: [], furniture: [], rooms: [], dims: [], settings: { grid: 10 } })
@@ -213,7 +215,7 @@ export function assessQuality(inp: QualityInput): QualityReport {
   if (offDims.length) issues.push(`размеры расходятся: ${offDims.map((d) => `${d.cm} → ${Math.round(d.gotCm!)} см`).join(', ')}`)
 
   // 5. проёмы
-  const openingsQ = { expected: ai.openings.length, placed: openings.length }
+  const openingsQ = { expected: ai.openings.length - (inp.openingsMerged ?? 0), placed: openings.length }
   if (openingsQ.placed < openingsQ.expected) issues.push(`проёмов встало ${openingsQ.placed} из ${openingsQ.expected}`)
 
   // 6. площади — дополнительно

@@ -395,6 +395,26 @@ describe('комнаты с картинки', () => {
     expect(r.report.areaFit?.accuracy ?? 0).toBeGreaterThan(0.97)
   })
 
+  it('дверь между комнатами, названная обеими, встаёт один раз и считается одной', () => {
+    const ai: AiPlan = {
+      walls: [],
+      dimensions: [],
+      rooms: [
+        { name: 'A', areaM2: 20, x: 0.3, y: 0.5 },
+        { name: 'B', areaM2: 15, x: 0.66, y: 0.5 },
+      ],
+      openings: [
+        { kind: 'door', room: 'A', side: 'right', at: 0.5, x: 0.5, y: 0.5, widthCm: 80 },
+        { kind: 'door', room: 'B', side: 'left', at: 0.5, x: 0.51, y: 0.5, widthCm: 80 },
+        { kind: 'window', room: 'A', side: 'left', at: 0.5, x: 0.1, y: 0.5, widthCm: 150 },
+      ],
+    }
+    const r = convertAiPlan(ai, underlay(1), { regions })
+    expect(r.openings.filter((o) => o.kind === 'door')).toHaveLength(1)
+    expect(r.openings.filter((o) => o.kind === 'window')).toHaveLength(1)
+    expect(r.report.quality.openings).toEqual({ expected: 2, placed: 2 })
+  })
+
   it('подписи не легли — области не в счёт, работает прежний путь по рамкам модели', () => {
     const ai: AiPlan = {
       walls: [],

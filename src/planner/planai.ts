@@ -19,7 +19,7 @@ import type { Opening, Plan, Pt, RoomMeta, Underlay, Wall } from './types'
 import { uid } from './types'
 import { MIN_WALL_LENGTH, WALL_THICKNESSES } from './ops'
 import { buildRooms } from './rooms'
-import { bboxOf, closestOnSeg, dist, pointInPoly } from './geometry'
+import { bboxOf, closestOnSeg, dist, lerp, norm, pointInPoly, sub } from './geometry'
 import { canRebuildFrom, DEFAULT_RECONSTRUCT, pointOnSide, reconstructFromRooms, scaleSamplesFromRooms, type AreaFit } from './reconstruct'
 import { pointOnOutline, wallsFromPicture } from './picture'
 import type { RoomRegion } from './raster'
@@ -408,6 +408,8 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
   // 5. проёмы садятся на ближайшую стену; по числам — на нужную стену нужной комнаты
   const openings: Opening[] = []
   let dropped = 0
+  // одну дверь между двумя комнатами называют обе, каждая со своей стороны
+  let merged = 0
   for (const op of ai.openings) {
     // Два кандидата: точка на стороне комнаты (точнее, когда чертёж собран по
     // числам) и точка с картинки. У Г-образной комнаты сторона может проходить
@@ -461,6 +463,20 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
       dropped++
       continue
     }
+    // та же дверь, названная соседней комнатой, уже стоит на этой стене
+    const here = lerp(hit.wall.a, hit.wall.b, t)
+    const along = norm(sub(hit.wall.b, hit.wall.a))
+    const twin = openings.some((o) => {
+      const w2 = walls.find((x) => x.id === o.wallId)
+      if (!w2 || (o.kind === 'window') !== (op.kind === 'window')) return false
+      const d2 = norm(sub(w2.b, w2.a))
+      if (Math.abs(along.x * d2.y - along.y * d2.x) > 0.1) return false
+      return dist(here, lerp(w2.a, w2.b, o.t)) < (o.width + width) / 2
+    })
+    if (twin) {
+      merged++
+      continue
+    }
     openings.push({ id: uid('o'), kind: op.kind, wallId: hit.wall.id, t, width, hinge: 'a', side: 1 })
   }
 
@@ -505,6 +521,7 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
     lost,
     doubtful: byNumbers && rebuilt ? rebuilt.doubtful : [],
     disputes,
+    openingsMerged: merged,
   })
 
   return {

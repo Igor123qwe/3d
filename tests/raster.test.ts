@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applyH, binarize, boxBlur, cleanRaster, components, despeckle, distanceToInk, dominantAngle, flattenBackground, floodRoom, groundRoomBox, homography, keepWallStrokes, orderCorners, removeBlobs, segmentRooms, strokeWidth, hatchedStrips, type RoomRegion } from '../src/planner/raster'
+import { applyH, binarize, boxBlur, cleanRaster, components, despeckle, distanceToInk, dominantAngle, flattenBackground, floodRoom, groundRoomBox, homography, keepWallStrokes, orderCorners, removeBlobs, segmentRooms, strokeWidth, hatchedStrips, keepLongRuns, textHeight, type RoomRegion } from '../src/planner/raster'
 
 /** серый лист w × h с рисовалкой прямоугольников */
 function sheet(w: number, h: number, bg = 255) {
@@ -456,5 +456,33 @@ describe('заштрихованная полоса — не комната', ()
     for (let y = 5; y < 115; y += 6) for (let x = 322; x < 345; x += 6) dot(x, y, 3)
     const regions = [room(10, 10, 110, 110), room(115, 10, 215, 110), room(220, 10, 315, 110), room(320, 5, 348, 115)]
     expect(hatchedStrips(regions, { ink, w: W, h: H })).toEqual([3])
+  })
+})
+
+describe('цифра, прилипшая к стене', () => {
+  it('высота надписей меряется по отдельным знакам; короткие штрихи уходят, стена остаётся', () => {
+    const W = 400
+    const H = 300
+    const ink = new Uint8Array(W * H)
+    const put = (x1: number, y1: number, x2: number, y2: number) => {
+      for (let y = y1; y <= y2; y++) for (let x = x1; x <= x2; x++) ink[y * W + x] = 1
+    }
+    // стена по верху, толщиной 3 px
+    put(0, 10, W - 1, 12)
+    // «цифры» 6 × 12: рамка из штрихов в 2 px; одна прилипла к стене снизу
+    const digit = (x: number, y: number) => {
+      put(x, y, x + 5, y + 1)
+      put(x, y + 10, x + 5, y + 11)
+      put(x, y, x + 1, y + 11)
+      put(x + 4, y, x + 5, y + 11)
+    }
+    digit(60, 13)
+    for (let k = 0; k < 12; k++) digit(10 + k * 14, 60)
+    const bin = { ink, w: W, h: H }
+    expect(textHeight(bin)).toBe(12)
+    const walls = keepLongRuns(bin, Math.round(1.3 * 12) + 2)
+    expect(walls.ink[11 * W + 100]).toBe(1)
+    expect(walls.ink[20 * W + 60]).toBe(0)
+    expect(walls.ink[65 * W + 10]).toBe(0)
   })
 })

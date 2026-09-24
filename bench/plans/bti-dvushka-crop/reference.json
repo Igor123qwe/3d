@@ -78,7 +78,89 @@
         "y": 0.746
       }
     ],
-    "openings": [],
+    "openings": [
+      {
+        "kind": "door",
+        "room": "5ж",
+        "side": "right",
+        "at": 0.85,
+        "x": 0.501,
+        "y": 0.441,
+        "width_cm": 80
+      },
+      {
+        "kind": "door",
+        "room": "4ж",
+        "side": "top",
+        "at": 0.85,
+        "x": 0.472,
+        "y": 0.518,
+        "width_cm": 80
+      },
+      {
+        "kind": "door",
+        "room": "6",
+        "side": "bottom",
+        "at": 0.75,
+        "x": 0.659,
+        "y": 0.341,
+        "width_cm": 80
+      },
+      {
+        "kind": "door",
+        "room": "2",
+        "side": "top",
+        "at": 0.15,
+        "x": 0.601,
+        "y": 0.514,
+        "width_cm": 80
+      },
+      {
+        "kind": "door",
+        "room": "1",
+        "side": "right",
+        "at": 0.85,
+        "x": 0.923,
+        "y": 0.433,
+        "width_cm": 90
+      },
+      {
+        "kind": "window",
+        "room": "5ж",
+        "side": "left",
+        "at": 0.55,
+        "x": 0.125,
+        "y": 0.32,
+        "width_cm": 150
+      },
+      {
+        "kind": "window",
+        "room": "4ж",
+        "side": "left",
+        "at": 0.55,
+        "x": 0.123,
+        "y": 0.753,
+        "width_cm": 150
+      },
+      {
+        "kind": "window",
+        "room": "4ж",
+        "side": "bottom",
+        "at": 0.4,
+        "x": 0.287,
+        "y": 0.946,
+        "width_cm": 150
+      },
+      {
+        "kind": "window",
+        "room": "2",
+        "side": "bottom",
+        "at": 0.55,
+        "x": 0.729,
+        "y": 0.946,
+        "width_cm": 150
+      }
+    ],
     "dimensions": [],
     "walls": []
   },
@@ -89,7 +171,7 @@
       "max": 2.2
     },
     "wallsOnInk": 0.8,
-    "openings": 0,
+    "openings": 9,
     "shapeIou": {
       "min": 0.8,
       "skip": []
