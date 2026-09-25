@@ -1,6 +1,7 @@
 // Проверка планировки по правилам эргономики, которыми пользуются дизайнеры интерьера.
 import type { Furniture, Issue, Opening, Plan, Pt, Room, Wall } from './types'
 import { CATALOG_MAP, type CatalogItem, type Clearance } from './catalog'
+import { findGaps } from './walledit'
 import {
   add,
   angleDeg,
@@ -325,5 +326,9 @@ export function runChecks(plan: Plan, rooms: Room[]): CheckResult {
 
   const order = { error: 0, warn: 1, info: 2 }
   issues.sort((a, b) => order[a.level] - order[b.level])
+  // разрывы между стенами: из-за них комната не замыкается и не находится
+  for (const g of findGaps(plan.walls).slice(0, 10)) {
+    push({ id: `gap-${g.id}-${g.end}`, level: 'warn', text: `Стена не доходит до соседней на ${Math.max(1, Math.round(g.gap))} см — комната тут не замкнётся. «Замкнуть разрывы» выше исправит`, target: { kind: 'wall', id: g.id } })
+  }
   return { issues, badZones, triangle, badDoors }
 }

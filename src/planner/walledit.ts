@@ -375,3 +375,86 @@ export function setRoomSide(plan: Plan, a: Pt, b: Pt, length: number, end: 'a' |
   if (!run) return plan
   return pushRun(plan, w.id, (length - L) * dot(out, run.normal))
 }
+
+// ---------- разрывы ----------
+
+/** свободные концы стен: к ним не подходит ни конец, ни тело другой стены */
+export function openEnds(walls: Wall[]): { id: string; end: 'a' | 'b'; p: Pt; out: Pt }[] {
+  const out: { id: string; end: 'a' | 'b'; p: Pt; out: Pt }[] = []
+  for (const w of walls) {
+    if (dist(w.a, w.b) < 1) continue
+    for (const end of ['a', 'b'] as const) {
+      const p = w[end]
+      const q = end === 'a' ? w.b : w.a
+      const held = walls.some((o) => o.id !== w.id && (dist(o.a, p) <= 1 || dist(o.b, p) <= 1 || distToSeg(p, o) <= o.thickness / 2 + 1))
+      if (!held) out.push({ id: w.id, end, p, out: norm(sub(p, q)) })
+    }
+  }
+  return out
+}
+
+export interface WallGap {
+  id: string
+  end: 'a' | 'b'
+  from: Pt
+  to: Pt
+  gap: number
+  /** угол: конец другой стены тоже не дошёл — сводятся оба */
+  other?: { id: string; end: 'a' | 'b' }
+}
+
+/**
+ * Разрывы до maxGap см: свободный конец стены, которому вдоль неё до другой
+ * стены (до её оси) не больше maxGap. Комната из таких стен не замыкается и
+ * не находится — у пользователя прихожая после правок стала «пустым местом»
+ */
+export function findGaps(walls: Wall[], maxGap = 30): WallGap[] {
+  const ends = openEnds(walls)
+  const isOpen = (id: string, end: 'a' | 'b') => ends.some((e) => e.id === id && e.end === end)
+  const gaps: WallGap[] = []
+  for (const e of ends) {
+    let best: WallGap | null = null
+    for (const o of walls) {
+      if (o.id === e.id) continue
+      const Lo = dist(o.a, o.b)
+      if (Lo < 1) continue
+      const d = norm(sub(o.b, o.a))
+      const den = cross(e.out, d)
+      if (Math.abs(den) < 0.2) continue
+      // луч p + out·s против оси o: a + d·t
+      const ap = sub(o.a, e.p)
+      const s = cross(ap, d) / den
+      const t = cross(ap, e.out) / den
+      if (s <= 0.5 || s > maxGap + o.thickness / 2) continue
+      const to = add(e.p, mul(e.out, s))
+      let other: WallGap['other']
+      if (t < -o.thickness / 2 || t > Lo + o.thickness / 2) {
+        // мимо конца o: годится, только если это угол, где o тоже не дошла
+        const oend: 'a' | 'b' = t < 0 ? 'a' : 'b'
+        const over = t < 0 ? -t : t - Lo
+        if (over > maxGap || !isOpen(o.id, oend)) continue
+        other = { id: o.id, end: oend }
+      }
+      if (!best || s < best.gap) best = { id: e.id, end: e.end, from: e.p, to, gap: s, ...(other ? { other } : {}) }
+    }
+    if (best) gaps.push(best)
+  }
+  // угол попадает дважды — с каждой стороны; оставляем один
+  return gaps.filter((g, i) => !g.other || !gaps.slice(0, i).some((h) => h.other && h.id === g.other!.id && h.other.id === g.id))
+}
+
+/** Замкнуть разрывы: концы дотягиваются до соседних стен; зафиксированные стены не трогаются */
+export function closeGaps(plan: Plan, maxGap = 30): { plan: Plan; closed: number } {
+  let p = plan
+  let closed = 0
+  for (const g of findGaps(plan.walls, maxGap)) {
+    const move = (walls: Wall[], id: string, end: 'a' | 'b', to: Pt) => walls.map((w) => (w.id === id ? { ...w, [end]: { ...to } } : w))
+    let walls = move(p.walls, g.id, g.end, g.to)
+    if (g.other) walls = move(walls, g.other.id, g.other.end, g.to)
+    const next = { ...p, walls }
+    if (touchesLocked(p, next)) continue
+    p = next
+    closed++
+  }
+  return { plan: closed ? normalizeWalls(p) : plan, closed }
+}

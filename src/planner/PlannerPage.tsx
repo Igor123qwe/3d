@@ -45,7 +45,7 @@ import type { Guide } from './snapping'
 import { aiStatus, askLayout, askNumbers, askRoomLabel, askSpot, cropForVision, lookupProductViaServer, numberSheet, recognizePlan, type AiCost, type AiStatus, type NumbersResult } from './ai'
 import { applyAiPlan, convertAiPlan, fitResultToLabels, marksFromReads, roomLabelInBox, type ConvertResult } from './planai'
 import { evenWalls, rectifyWalls } from './rectify'
-import { deleteRun, guardLocks, setAllLocked, setRunLength, setRunLocked, setRunThickness, touchesLocked, wallRun } from './walledit'
+import { closeGaps, deleteRun, findGaps, guardLocks, setAllLocked, setRunLength, setRunLocked, setRunThickness, touchesLocked, wallRun } from './walledit'
 import { pointOnSide } from './reconstruct'
 import { pointOnOutline } from './picture'
 import type { LabelDispute } from './segment'
@@ -1863,6 +1863,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   }
 
   const allWallsLocked = plan.walls.length > 0 && plan.walls.every((w) => w.locked)
+  const wallGaps = useMemo(() => findGaps(plan.walls), [plan.walls])
   const totalArea = rooms.reduce((s, r) => s + r.area, 0)
   const toggleLayer = (k: keyof Layers) => setLayers((l) => ({ ...l, [k]: !l[k] }))
 
@@ -2719,6 +2720,29 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
 
   const renderChecks = () => (
     <div>
+      {wallGaps.length > 0 && (
+        <div className="pl-block">
+          <div className="pl-note">
+            Стены не сходятся в {wallGaps.length === 1 ? 'одном месте' : `${wallGaps.length} местах`} (до 30 см) — там комната не замыкается и не считается комнатой.
+          </div>
+          <button
+            className="pl-btn primary"
+            onClick={() => {
+              const before = rooms.length
+              const r = closeGaps(plan)
+              if (!r.closed) {
+                setToast('Разрывы у зафиксированных стен — снимите замок, чтобы замкнуть')
+                return
+              }
+              history.apply(() => r.plan)
+              const after = buildRooms(r.plan).rooms.length
+              setToast(`Замкнуто разрывов: ${r.closed}${after > before ? `, комнат стало ${after} (было ${before})` : ''}. Ctrl+Z вернёт`)
+            }}
+          >
+            Замкнуть разрывы
+          </button>
+        </div>
+      )}
       <label className="pl-field">
         <span>Показывать зоны эргономики на плане</span>
         <input type="checkbox" checked={layers.ergo} onChange={() => toggleLayer('ergo')} />

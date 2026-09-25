@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { deleteRun, guardLocks, normalizeWalls, pushRun, runSection, setAllLocked, setRoomSide, setRunLength, setRunLocked, touchesLocked, wallRun } from '../src/planner/walledit'
+import { closeGaps, deleteRun, findGaps, guardLocks, normalizeWalls, pushRun, runSection, setAllLocked, setRoomSide, setRunLength, setRunLocked, touchesLocked, wallRun } from '../src/planner/walledit'
 import { buildRooms } from '../src/planner/rooms'
 import { emptyPlan, type Plan, type Wall } from '../src/planner/types'
 
@@ -143,6 +143,35 @@ describe('правка стен как в The Sims', () => {
       const q = normalizeWalls(setAllLocked({ ...emptyPlan(), walls: [w('a', 0, 0, 300, 0), w('b', 300, 0, 500, 0)] }, true))
       expect(q.walls).toHaveLength(2)
       expect(setAllLocked(p0, false).walls.every((x) => !x.locked)).toBe(true)
+    })
+  })
+
+  describe('разрывы', () => {
+    it('перегородка не дошла до верха 15 см — дотягивается, комнат снова две', () => {
+      const p0: Plan = { ...twoRooms(), walls: twoRooms().walls.map((x) => (x.id === 'mid' ? { ...x, a: { x: 400, y: 15 } } : x)) }
+      // пока перегородка не дошла — комната одна, во всю квартиру
+      expect(roomsOf(p0)).toEqual([[800, 400]])
+      expect(findGaps(p0.walls).map((g) => Math.round(g.gap))).toEqual([15])
+      const { plan, closed } = closeGaps(p0)
+      expect(closed).toBe(1)
+      expect(roomsOf(plan)).toEqual([
+        [400, 400],
+        [400, 400],
+      ])
+    })
+
+    it('угол, где не дошли обе стены, — сводятся обе в точку угла', () => {
+      const p0: Plan = { ...emptyPlan(), walls: [w('t', 12, 0, 400, 0), w('r', 400, 0, 400, 300), w('b', 400, 300, 0, 300), w('l', 0, 300, 0, 10)] }
+      expect(roomsOf(p0)).toEqual([])
+      const { plan } = closeGaps(p0)
+      expect(roomsOf(plan)).toEqual([[400, 300]])
+    })
+
+    it('разрыв больше 30 см и зафиксированная стена — не трогаются', () => {
+      const far: Plan = { ...twoRooms(), walls: twoRooms().walls.map((x) => (x.id === 'mid' ? { ...x, a: { x: 400, y: 60 } } : x)) }
+      expect(closeGaps(far).closed).toBe(0)
+      const near: Plan = { ...twoRooms(), walls: twoRooms().walls.map((x) => (x.id === 'mid' ? { ...x, a: { x: 400, y: 15 }, locked: true } : x)) }
+      expect(closeGaps(near).closed).toBe(0)
     })
   })
 })
