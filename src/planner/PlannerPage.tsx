@@ -43,12 +43,12 @@ import { DEFAULT_TRACE, calibrate, detectWalls, grayscaleOf, joinCorners, loadUn
 import { applyH, cleanRaster, distanceToInk, dominantAngle, floodRoom, grayToImage, groundRoomBox, hatchedStrips, labelBoxes, perspectiveQuad, rectTarget, rotateImage, segmentRooms, segmentRoomsAuto, textHeight, warpToRect, withoutLooseText, type CleanResult, type RoomRegion, type TextBox } from './raster'
 import type { Guide } from './snapping'
 import { aiStatus, askLayout, askNumbers, askRoomLabel, askSpot, cropForVision, lookupProductViaServer, numberSheet, recognizePlan, type AiCost, type AiStatus, type NumbersResult } from './ai'
-import { applyAiPlan, convertAiPlan, fitResultToLabels, marksFromReads, type ConvertResult } from './planai'
+import { applyAiPlan, convertAiPlan, fitResultToLabels, marksFromReads, roomLabelInBox, type ConvertResult } from './planai'
 import { evenWalls, rectifyWalls } from './rectify'
 import { pointOnSide } from './reconstruct'
 import { pointOnOutline } from './picture'
 import type { LabelDispute } from './segment'
-import type { AiBox, AiMark, AiPlan } from './aicontract'
+import type { AiBox, AiMark, AiPlan, AiRoomLabel } from './aicontract'
 import { checkAiPlan, sizeFromText } from './aicontract'
 import { applyLayout, catalogForRoom, layoutSummary, vetLayout } from './autolayout'
 import {
@@ -79,6 +79,9 @@ const LS_UI = 'boop.planner.ui.v1'
 const DEFAULT_LAYERS: Layers = { grid: true, underlay: true, rooms: true, furniture: true, electric: true, dims: true, ergo: false, labels: true }
 
 /** растр подложки для распознавания и его производные, считаются по требованию */
+/** коммит, с которого запущен сервер: по нему видно, что работает свежий код, а не прежняя копия */
+const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : 'dev'
+
 interface Raster {
   src: string
   /** ширина растра, px: у рабочей копии меньше, чем у подложки */
@@ -969,6 +972,19 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plan.underlay])
 
+  /** поля вокруг комнаты на её вырезке для модели, px */
+  const cropPad = (u: Underlay) => Math.round(Math.max(u.px.w, u.px.h) * 0.05)
+
+  /**
+   * Место вдоль стены — из вырезки в рамку комнаты: модель видит комнату с
+   * полями вокруг (вырезка обрезана краем картинки — как в cropForVision)
+   */
+  const inRoomBox = (room: AiRoomLabel, r: RoomRegion, u: Underlay): AiRoomLabel => {
+    const pad = cropPad(u)
+    const crop = { x1: Math.max(0, r.x1 - pad), y1: Math.max(0, r.y1 - pad), x2: Math.min(u.px.w, r.x2 + pad), y2: Math.min(u.px.h, r.y2 + pad) }
+    return roomLabelInBox(room, crop, r)
+  }
+
   /**
    * Подписи, которые стоит прочитать по одному: внутри найденных комнат и у
    * их стен, сверху вниз и слева направо. Квадратики штриховки за наружной
@@ -1045,7 +1061,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             // соседние комнаты на фрагменте закрашены: у Г-образной комнаты
             // в рамку попадает соседка, и модель читала её номер
             const others = regions.filter((g) => g !== r && g.poly).map((g) => g.poly!)
-            const crop = await cropForVision(photo, r, Math.round(Math.max(u.px.w, u.px.h) * 0.05), 640, others, u.px.w)
+            const crop = await cropForVision(photo, r, cropPad(u), 640, others, u.px.w)
             // пропорции подсказывают модели, что перед ней: вытянутый коридор и
             // квадратная комната путаются, если смотреть на них вслепую. Номера
             // в подсказке нет: модель переписывала его в имя комнаты
@@ -1078,8 +1094,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           }
         }),
       )
-      answers.forEach((ans, k) => {
+      answers.forEach((ans0, k) => {
         const r = batch[k]
+        const ans = ans0 ? { ...ans0, room: inRoomBox(ans0.room, r, u) } : null
         const box = { x1: r.x1 / u.px.w, y1: r.y1 / u.px.h, x2: r.x2 / u.px.w, y2: r.y2 / u.px.h }
         const at = { x: r.cx / u.px.w, y: r.cy / u.px.h }
         if (!ans) {
@@ -1691,9 +1708,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       if (attempts > 1) lines.push(`Попыток две: первая разошлась, вторая — модель ${cost.model}.`)
       if (r.note) lines.push(`Модель: ${r.note}`)
       lines.push(q.verdict === 'ok' ? 'Проверьте чертёж поверх фото и подтвердите масштаб.' : 'Результат требует проверки: смотрите разделы выше и уточните спорные места.')
+      lines.push(`Версия программы: ${APP_VERSION}.`)
       // сырой ответ модели и отчёт — в консоль и по кнопке в буфер: без них не разобрать, что пошло не так
       // размеры по одному и что из них легло на стены — чтобы по отчёту было видно, на каком шаге теряются числа
       const debugReport = {
+        version: APP_VERSION,
         model: cost.model,
         tried: cost.tried,
         answer: read,

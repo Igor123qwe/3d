@@ -14,7 +14,7 @@
 // 3. Если модель прочитала комнаты с размерами, чертёж строится заново по
 //    числам (reconstruct.ts), а стены с картинки остаются запасным путём:
 //    берётся тот вариант, где замкнулось больше комнат.
-import type { AiBox, AiDimension, AiMark, AiPlan, AiRoom } from './aicontract'
+import type { AiBox, AiDimension, AiMark, AiPlan, AiRoom, AiRoomLabel, AiSide } from './aicontract'
 import { sizeFromText } from './aicontract'
 import type { Opening, Plan, Pt, RoomMeta, Underlay, Wall } from './types'
 import { uid } from './types'
@@ -635,6 +635,27 @@ export function floorFor(name: string, kind?: string): RoomMeta['floor'] {
   if (/кладов|гардероб/.test(n)) return 'plain'
   if (/гостин|зал|комнат|спальн|кабинет|детск|жил/.test(n)) return 'laminate'
   return 'laminate'
+}
+
+/**
+ * Место вдоль стены — из вырезки в рамку комнаты. Модель видит комнату с
+ * полями вокруг и долю вдоль стороны называет по всей вырезке, а подписи и
+ * проёмы встают по рамке комнаты. У ниши на краю прихожей это ошибка в
+ * полметра: «0,68» у правого края попадала мимо ниши, в коридор, а «1,29»
+ * не узнавала своей грани. crop и box — в одних пикселях
+ */
+export function roomLabelInBox(room: AiRoomLabel, crop: AiBox, box: AiBox): AiRoomLabel {
+  const fix = (side: AiSide, at: number) => {
+    const across = side === 'top' || side === 'bottom'
+    const [c1, c2, b1, b2] = across ? [crop.x1, crop.x2, box.x1, box.x2] : [crop.y1, crop.y2, box.y1, box.y2]
+    const v = c1 + at * (c2 - c1)
+    return Math.min(1, Math.max(0, (v - b1) / Math.max(1, b2 - b1)))
+  }
+  return {
+    ...room,
+    ...(room.walls ? { walls: room.walls.map((w) => ({ ...w, at: fix(w.side, w.at) })) } : {}),
+    ...(room.openings ? { openings: room.openings.map((o) => ({ ...o, at: fix(o.side, o.at) })) } : {}),
+  }
 }
 
 /**

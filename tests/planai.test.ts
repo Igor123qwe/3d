@@ -8,6 +8,7 @@ import {
   dedupeWalls,
   floorFor,
   marksFromReads,
+  roomLabelInBox,
   robustMedian,
   roundThickness,
   scaleFromDimensions,
@@ -474,5 +475,31 @@ describe('размеры по одному', () => {
   it('числа проходят через сборку чертежа в координаты плана', () => {
     const res = convertAiPlan(boxPlan({ marks: [{ x: 0.5, y: 0.2, vertical: false, cm: 780 }] }), underlay(1), { keepScale: true })
     expect(res.marks).toEqual([{ at: { x: 500, y: 160 }, alongX: true, cm: 780 }])
+  })
+})
+
+describe('место вдоль стены — из вырезки в рамку комнаты', () => {
+  it('поля вырезки учитываются: ниша у правого края — у правого края рамки, а не в коридоре', () => {
+    // комната 100..611 по x, 50..458 по y; вырезка с полями 60 (справа обрезана краем картинки 650)
+    const box = { x1: 100, y1: 50, x2: 611, y2: 458 }
+    const crop = { x1: 40, y1: 0, x2: 650, y2: 518 }
+    const got = roomLabelInBox(
+      {
+        walls: [
+          // «0,68» — середина ниши 577 по x: в вырезке (577 − 40) / 610 = 0,88
+          { side: 'bottom', at: 0.88, cm: 68 },
+          // «1,29» — середина правой стены ниши, 103 по y: в вырезке 103 / 518 = 0,2
+          { side: 'right', at: 0.2, cm: 129 },
+        ],
+        openings: [{ kind: 'door', side: 'left', at: 0, widthCm: 80 }],
+      },
+      crop,
+      box,
+    )
+    expect(got.walls![0].at).toBeCloseTo((0.88 * 610 + 40 - 100) / 511, 3)
+    expect(got.walls![0].at).toBeGreaterThan(0.92)
+    expect(got.walls![1].at).toBeCloseTo((0.2 * 518 - 50) / 408, 3)
+    // место в полях вырезки прижимается к краю рамки
+    expect(got.openings![0].at).toBe(0)
   })
 })

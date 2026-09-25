@@ -12,8 +12,7 @@ import { fileURLToPath } from 'node:url'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const win = process.platform === 'win32'
 const npm = win ? 'npm.cmd' : 'npm'
-const port = Number(process.env.PORT) || Number(process.argv[2]) || 5173
-const url = `http://localhost:${port}`
+const wantPort = Number(process.env.PORT) || Number(process.argv[2]) || 5173
 
 const say = (s) => console.log(s)
 const run = (cmd, args) => spawnSync(cmd, args, { cwd: root, stdio: 'inherit', shell: win })
@@ -71,13 +70,32 @@ if (!existsSync(env)) {
 }
 
 // ---------- 4. запуск ----------
+// Порт занят — значит, работает прежняя копия: у неё старый код. Раньше
+// сервер молча уходил на соседний порт, а браузер открывался по старому
+// адресу, на прежней копии, — и обновление было не видно
+const answers = async (p) => {
+  try {
+    await fetch(`http://localhost:${p}`, { signal: AbortSignal.timeout(1500) })
+    return true
+  } catch {
+    return false
+  }
+}
+let port = wantPort
+if (await answers(port)) {
+  say(`[!] На порту ${port} уже работает прежняя копия планировщика — со старым кодом.`)
+  say('    Закройте её окно (или нажмите в нём Ctrl+C): по старому адресу откроется она.')
+  while (port < wantPort + 20 && (await answers(port))) port++
+}
+const url = `http://localhost:${port}`
 say(`[4/4] Запускаю. Адрес: ${url}`)
 say('')
 say('    Браузер откроется сам, как только сервер поднимется.')
 say('    Чтобы остановить — Ctrl+C.')
 say('')
 
-const dev = spawn(npm, ['run', 'dev', '--', '--port', String(port)], { cwd: root, stdio: 'inherit', shell: win })
+// --strictPort: занято — ошибка, а не тихий уход на другой порт мимо браузера
+const dev = spawn(npm, ['run', 'dev', '--', '--port', String(port), '--strictPort'], { cwd: root, stdio: 'inherit', shell: win })
 dev.on('exit', (code) => process.exit(code ?? 0))
 
 /** открыть браузер, когда сервер начал отвечать */
