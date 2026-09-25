@@ -8,6 +8,8 @@ import { openingGeom, type CheckResult } from './checks'
 import { Glyph } from './Glyph'
 import { ACCENT, Scene, planBounds, ptsAttr, sortedFurniture, wallPolygon } from './Scene'
 import { snapFurniture, snapOpening, snapWallPoint, type Guide } from './snapping'
+import { deleteRun, pushRun, runSection, runSpan, stretchRun, wallRun, type WallRun } from './walledit'
+import { buildRooms } from './rooms'
 import {
   addDim,
   addFurniture,
@@ -90,6 +92,8 @@ export interface CanvasProps {
   onCorners?: (pts: Pt[]) => void
   /** обведён спорный участок: что там на самом деле — решает страница */
   onRefine?: (area: Area) => void
+  /** короткое сообщение пользователю: правка разомкнула комнату и т. п. */
+  onNotice?: (text: string) => void
 }
 
 type Drag =
@@ -101,7 +105,8 @@ type Drag =
   | { kind: 'rotate'; id: string; plan0: Plan }
   | { kind: 'resize'; id: string; plan0: Plan; item0: Furniture }
   | { kind: 'node'; from: Pt; plan0: Plan }
-  | { kind: 'wall'; id: string; plan0: Plan; start: Pt; wall0: Wall }
+  | { kind: 'wall'; id: string; plan0: Plan; start: Pt; run: WallRun; part?: { lo: number; hi: number }; offset: number; last?: Plan }
+  | { kind: 'stretch'; id: string; plan0: Plan; end: 'a' | 'b'; from: Pt; dirOut: Pt; delta: number; last?: Plan }
   | { kind: 'opening'; id: string; plan0: Plan }
   | { kind: 'dim'; id: string; plan0: Plan; dim0: DimensionLine }
   | { kind: 'underlay'; start: Pt; plan0: Plan }
@@ -116,7 +121,7 @@ const isEditable = (t: EventTarget | null) => {
 }
 
 export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) => {
-  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view, onViewChange, onHint, photos, onCalibrate, imageLines, onRoomPick, onCorners, onRefine } = props
+  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view, onViewChange, onHint, photos, onCalibrate, imageLines, onRoomPick, onCorners, onRefine, onNotice } = props
   const svgRef = useRef<SVGSVGElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({ w: 800, h: 600 })
@@ -131,6 +136,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   const [cornerPts, setCornerPts] = useState<Pt[]>([])
   useEffect(() => setCornerPts([]), [tool])
   const [hover, setHover] = useState<Selection>(null)
+  const [hoverPart, setHoverPart] = useState<{ id: string; lo: number; hi: number } | null>(null)
   const [ghost, setGhost] = useState<{ x: number; y: number; rot: number } | null>(null)
   const [ghostRot, setGhostRot] = useState(0)
   const [openingGhost, setOpeningGhost] = useState<Opening | null>(null)
@@ -247,9 +253,12 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     let text = ''
     switch (tool) {
       case 'select':
-        text = selection
-          ? 'Перетаскивайте объект. Ручка сверху — поворот, уголок — размер. Del — удалить, R — повернуть на 90°, Ctrl+D — дублировать'
-          : 'Клик — выбрать объект или комнату. Перетаскивание пустого места — сдвиг, колесо — масштаб'
+        text =
+          selection?.kind === 'wall'
+            ? 'Стена: тяните поперёк — сдвинется вся прямая, примыкающие стены потянутся за ней. Alt + тянуть — только участок до ближайших стыков (ниша, выступ). Кружок на конце — длина. Del — удалить прямую'
+            : selection
+              ? 'Перетаскивайте объект. Ручка сверху — поворот, уголок — размер. Del — удалить, R — повернуть на 90°, Ctrl+D — дублировать'
+              : 'Клик — выбрать объект, стену или комнату. Перетаскивание пустого места — сдвиг, колесо — масштаб'
         break
       case 'wall':
         text = draft.length
@@ -535,14 +544,16 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         }
       }
     }
+    // кружки на концах выбранной прямой: длина; с Shift — свободно, как раньше
     if (selection?.kind === 'wall') {
-      const w = wallMap.get(selection.id)
-      if (w) {
-        for (const p of [w.a, w.b]) {
-          if (dist(raw, p) < 10 / z) {
-            drag.current = { kind: 'node', from: p, plan0: plan }
-            return
-          }
+      const run = wallRun(plan.walls, selection.id)
+      if (run) {
+        for (const end of ['a', 'b'] as const) {
+          const p = run[end]
+          if (dist(raw, p) >= 10 / z) continue
+          if (e.shiftKey) drag.current = { kind: 'node', from: p, plan0: plan }
+          else drag.current = { kind: 'stretch', id: selection.id, plan0: plan, end, from: p, dirOut: end === 'a' ? mul(run.dir, -1) : run.dir, delta: 0 }
+          return
         }
       }
     }
@@ -560,7 +571,9 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     }
     if (hit?.kind === 'wall') {
       if (!sameSel(hit, selection)) onSelect(hit)
-      drag.current = { kind: 'wall', id: hit.id, plan0: plan, start: raw, wall0: wallMap.get(hit.id)! }
+      const run = wallRun(plan.walls, hit.id)
+      // вся прямая или, с Alt, участок до ближайших стыков
+      if (run) drag.current = { kind: 'wall', id: hit.id, plan0: plan, start: raw, run, part: e.altKey ? runSection(plan.walls, run, raw) : undefined, offset: 0 }
       return
     }
     if (hit?.kind === 'dim') {
@@ -599,6 +612,12 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       if (tool === 'select') {
         const h = hitTest(raw)
         setHover((prev) => (sameSel(prev, h) ? prev : h))
+        // с Alt над стеной подсвечивается участок, который выдвинется
+        if (h?.kind === 'wall' && e.altKey) {
+          const run = wallRun(plan.walls, h.id)
+          const part = run ? runSection(plan.walls, run, raw) : null
+          setHoverPart((prev) => (part && (!prev || prev.id !== h.id || prev.lo !== part.lo || prev.hi !== part.hi) ? { id: h.id, ...part } : part ? prev : null))
+        } else setHoverPart((prev) => (prev ? null : prev))
       } else updateDrawingCursor(raw)
       return
     }
@@ -663,15 +682,32 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         return
       }
       case 'wall': {
-        const delta = sub(raw, d.start)
-        const na = snapPt(add(d.wall0.a, delta), grid)
-        const dd = sub(na, d.wall0.a)
-        history.preview(
-          moveNodes(d.plan0, [
-            { from: d.wall0.a, to: add(d.wall0.a, dd) },
-            { from: d.wall0.b, to: add(d.wall0.b, dd) },
-          ]),
-        )
+        // только поперёк: на сетку и в линию с соседней параллельной стеной
+        const n = d.run.normal
+        const want = dot(sub(raw, d.start), n)
+        let off = e.shiftKey ? want : roundTo(want, grid || 1)
+        if (!e.shiftKey) {
+          const ids = new Set(d.run.ids)
+          let best = tol
+          for (const w of d.plan0.walls) {
+            if (ids.has(w.id) || Math.abs(dot(norm(sub(w.b, w.a)), n)) > 0.01) continue
+            const at = dot(sub(w.a, d.run.a), n)
+            if (Math.abs(at) > 0.5 && Math.abs(at - want) < best) {
+              best = Math.abs(at - want)
+              off = at
+            }
+          }
+        }
+        d.offset = off
+        d.last = pushRun(d.plan0, d.id, off, d.part)
+        history.preview(d.last)
+        return
+      }
+      case 'stretch': {
+        const want = dot(sub(raw, d.from), d.dirOut)
+        d.delta = e.shiftKey ? want : roundTo(want, grid || 1)
+        d.last = stretchRun(d.plan0, d.id, d.end, d.delta)
+        history.preview(d.last)
         return
       }
       case 'opening': {
@@ -730,11 +766,22 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         return
       }
       case 'node':
-      case 'wall':
         history.preview((pl) => cleanupWalls(pl))
         history.endPreview()
         setGuides([])
         return
+      case 'wall':
+      case 'stretch': {
+        history.endPreview()
+        setGuides([])
+        // правка не должна тихо ломать комнаты: разомкнулась — сказать сразу
+        if (d.last) {
+          const before = buildRooms(d.plan0).rooms.length
+          const after = buildRooms(d.last).rooms.length
+          if (after < before) onNotice?.(`Контур комнаты разомкнулся: комнат было ${before}, стало ${after}. Ctrl+Z вернёт как было`)
+        }
+        return
+      }
       default:
         history.endPreview()
         setGuides([])
@@ -790,7 +837,8 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         e.preventDefault()
         // комната — следствие контура стен, удалять в ней нечего
         if (selection.kind === 'room') return
-        history.apply((pl) => deleteSelection(pl, selection))
+        // стена — прямая целиком: удаляется то, что подсвечено
+        history.apply((pl) => (selection.kind === 'wall' ? deleteRun(pl, selection.id) : deleteSelection(pl, selection)))
         onSelect(null)
         return
       }
@@ -839,7 +887,14 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   const rubber = tool === 'wall' && draft.length && cursor ? { a: draft[draft.length - 1], b: cursor.p } : null
   const selFurn = selection?.kind === 'furniture' ? plan.furniture.find((f) => f.id === selection.id) : undefined
   const selCat = selFurn ? CATALOG_MAP[selFurn.type] : undefined
-  const selWall = selection?.kind === 'wall' ? wallMap.get(selection.id) : undefined
+  const selRun = selection?.kind === 'wall' ? wallRun(plan.walls, selection.id) : null
+  const hoverRun = hover?.kind === 'wall' ? wallRun(plan.walls, hover.id) : null
+  /** полоса прямой [lo, hi] во всю толщину — подсветка поверх стен */
+  const runBand = (run: WallRun, lo: number, hi: number, fill: string, key: string) => {
+    const [p, q] = runSpan(run, lo, hi)
+    const h = mul(run.normal, run.thickness / 2 + 1 / zoom)
+    return <polygon key={key} points={ptsAttr([add(p, h), add(q, h), sub(q, h), sub(p, h)])} fill={fill} stroke="none" pointerEvents="none" />
+  }
   const ghostWall = openingGhost ? wallMap.get(openingGhost.wallId) : undefined
 
   const wallGhost = (w: Wall, key: string) => <polygon key={key} points={ptsAttr(wallPolygon(w, [...plan.walls, w]))} fill="rgba(37,99,235,0.45)" stroke={ACCENT} strokeWidth={1} {...NS} />
@@ -884,7 +939,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         {layers.grid && major > 12 && <rect width={size.w} height={size.h} fill="url(#pl-grid-major)" />}
 
         <g transform={`translate(${view.x} ${view.y}) scale(${zoom})`}>
-          <Scene plan={plan} rooms={rooms} check={check} layers={layers} unit={unit} zoom={zoom} selection={selection} hover={hover} badItems={badItems} photos={photos} />
+          <Scene plan={plan} rooms={rooms} check={check} layers={layers} unit={unit} zoom={zoom} selection={selection?.kind === 'wall' ? null : selection} hover={hover?.kind === 'wall' ? null : hover} badItems={badItems} photos={photos} />
 
           {/* направляющие */}
           {guides.map((g, i) => (
@@ -1024,13 +1079,35 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
               )
             })()}
 
-          {/* ручки выбранной стены */}
-          {selWall && (
+          {/* стена под курсором: вся прямая или, с Alt, участок до стыков */}
+          {hoverRun && !(selRun && hoverRun.ids.includes(selection!.id)) && (
+            hoverPart && hover?.kind === 'wall' && hoverPart.id === hover.id ? runBand(hoverRun, hoverPart.lo, hoverPart.hi, 'rgba(37,99,235,0.35)', 'hover-part') : runBand(hoverRun, 0, dist(hoverRun.a, hoverRun.b), 'rgba(75,85,99,0.55)', 'hover-run')
+          )}
+          {/* выбранная прямая: подсветка, стрелки «тянуть поперёк», кружки на концах, длина */}
+          {selRun && (
             <g>
-              {[selWall.a, selWall.b].map((p, i) => (
+              {runBand(selRun, 0, dist(selRun.a, selRun.b), ACCENT, 'sel-run')}
+              {(() => {
+                // стрелки — на трети прямой: посередине стоит её длина
+                const m = lerp(selRun.a, selRun.b, dist(selRun.a, selRun.b) * zoom > 160 ? 0.3 : 0.5)
+                const k = selRun.thickness / 2 + 10 / zoom
+                const arrow = (sgn: number) => {
+                  const tip = add(m, mul(selRun.normal, sgn * (k + 8 / zoom)))
+                  const base = add(m, mul(selRun.normal, sgn * k))
+                  const side = mul(selRun.dir, 6 / zoom)
+                  return <polygon key={sgn} points={ptsAttr([tip, add(base, side), sub(base, side)])} fill={ACCENT} stroke="#fff" strokeWidth={1} {...NS} />
+                }
+                return [arrow(1), arrow(-1)]
+              })()}
+              {[selRun.a, selRun.b].map((p, i) => (
                 <circle key={i} cx={p.x} cy={p.y} r={6 / zoom} fill="#fff" stroke={ACCENT} strokeWidth={1.5} {...NS} />
               ))}
-              {lengthLabel(selWall.a, selWall.b, 'sel-wall-len')}
+              {lengthLabel(selRun.a, selRun.b, 'sel-wall-len')}
+              {drag.current?.kind === 'wall' && Math.abs(drag.current.offset) >= 0.5 && (
+                <text x={add(lerp(selRun.a, selRun.b, 0.7), mul(selRun.normal, selRun.thickness / 2 + 16 / zoom)).x} y={add(lerp(selRun.a, selRun.b, 0.7), mul(selRun.normal, selRun.thickness / 2 + 16 / zoom)).y} dy={4 / zoom} fontSize={12 / zoom} textAnchor="middle" fill={ACCENT} stroke="#fff" strokeWidth={3 / zoom} paintOrder="stroke" fontFamily="system-ui, sans-serif" fontWeight={700}>
+                  сдвиг {fmtLen(Math.abs(drag.current.offset), unit)}
+                </text>
+              )}
             </g>
           )}
         </g>

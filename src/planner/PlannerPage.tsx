@@ -45,6 +45,7 @@ import type { Guide } from './snapping'
 import { aiStatus, askLayout, askNumbers, askRoomLabel, askSpot, cropForVision, lookupProductViaServer, numberSheet, recognizePlan, type AiCost, type AiStatus, type NumbersResult } from './ai'
 import { applyAiPlan, convertAiPlan, fitResultToLabels, marksFromReads, roomLabelInBox, type ConvertResult } from './planai'
 import { evenWalls, rectifyWalls } from './rectify'
+import { deleteRun, setRunLength, setRunThickness, wallRun } from './walledit'
 import { pointOnSide } from './reconstruct'
 import { pointOnOutline } from './picture'
 import type { LabelDispute } from './segment'
@@ -2011,17 +2012,19 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     if (selection?.kind === 'wall') {
       const w = plan.walls.find((x) => x.id === selection.id)
       if (!w) return null
-      const L = dist(w.a, w.b)
+      // стена — прямая целиком: длина и толщина у всей прямой
+      const run = wallRun(plan.walls, w.id)
+      const L = run ? dist(run.a, run.b) : dist(w.a, w.b)
       return (
         <div>
           <div className="pl-props-title">Стена</div>
           <label className="pl-field">
             <span>Длина, см</span>
-            <NumberField value={Math.round(L)} min={MIN_WALL_LENGTH} step={5} onCommit={(v) => history.apply((p) => setWallLength(p, w.id, v))} />
+            <NumberField value={Math.round(L)} min={MIN_WALL_LENGTH} step={5} onCommit={(v) => history.apply((p) => setRunLength(p, w.id, v))} />
           </label>
           <label className="pl-field">
             <span>Толщина, см</span>
-            <select value={w.thickness} onChange={(e) => history.apply((p) => updateWall(p, w.id, { thickness: Number(e.target.value) }))}>
+            <select value={w.thickness} onChange={(e) => history.apply((p) => setRunThickness(p, w.id, Number(e.target.value)))}>
               {WALL_THICKNESSES.map((t) => (
                 <option key={t} value={t}>
                   {t}
@@ -2029,7 +2032,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
               ))}
             </select>
           </label>
-          <div className="pl-note">Тяните за кружки на концах, чтобы изменить длину; соседние стены подстроятся. Тяните за тело стены — она сдвинется параллельно.</div>
+          <div className="pl-note">Тяните стену поперёк — сдвинется вся прямая, примыкающие стены потянутся за ней, комнаты останутся замкнутыми. С Alt — только участок до ближайших стыков: так делается ниша или выступ. Кружки на концах — длина (поперечная стена едет следом), с Shift — свободно.</div>
           <div className="pl-row">
             {(['door', 'window', 'doorway'] as const).map((k) => (
               <button
@@ -2053,7 +2056,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           <button
             className="pl-btn danger"
             onClick={() => {
-              history.apply((p) => deleteSelection(p, selection))
+              // стена — прямая целиком: удаляется то, что подсвечено
+              history.apply((p) => deleteRun(p, w.id))
               setSelection(null)
             }}
           >
@@ -3057,6 +3061,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           onRoomPick={(p) => void onRoomPick(p)}
           onCorners={(pts) => void onCorners(pts)}
           onRefine={onRefineArea}
+          onNotice={setToast}
         />
       )}
 
