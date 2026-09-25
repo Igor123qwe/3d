@@ -1,4 +1,4 @@
-import type { Plan } from './types'
+import type { DimRef, Plan } from './types'
 
 export function downloadBlob(name: string, blob: Blob): void {
   const url = URL.createObjectURL(blob)
@@ -147,7 +147,19 @@ export function normalizePlan(p: Partial<Plan>): Plan {
       const a = pt(d?.a)
       const b = pt(d?.b)
       if (!a || !b) return null
-      return { id: typeof d.id === 'string' ? d.id : `d${i}`, a, b, offset: num(d.offset, 30) }
+      const dim: Plan['dims'][number] = { id: typeof d.id === 'string' ? d.id : `d${i}`, a, b, offset: num(d.offset, 30) }
+      // привязка к стене — только к той, что есть в плане
+      const ref = (r: unknown): DimRef | undefined => {
+        const x = r as Partial<DimRef> | undefined
+        if (!x || typeof x.wallId !== 'string' || !wallIds.has(x.wallId)) return undefined
+        const side = x.side === 1 || x.side === -1 ? x.side : 0
+        return x.end === 'a' || x.end === 'b' ? { wallId: x.wallId, side, end: x.end } : { wallId: x.wallId, side }
+      }
+      const aRef = ref(d.aRef)
+      const bRef = ref(d.bRef)
+      if (aRef) dim.aRef = aRef
+      if (bRef) dim.bRef = bRef
+      return dim
     }),
     settings: { grid: Math.max(1, num(p.settings?.grid, 10)) },
     ...(underlayOf(p.underlay) ? { underlay: underlayOf(p.underlay)! } : {}),

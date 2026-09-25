@@ -1,5 +1,5 @@
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
-import type { DimensionLine, EditMode, Furniture, Layers, LengthUnit, Opening, Plan, Pt, Room, Selection, Tool, Wall, WallRef } from './types'
+import type { DimRef, DimensionLine, EditMode, Furniture, Layers, LengthUnit, Opening, Plan, Pt, Room, Selection, Tool, Wall, WallRef } from './types'
 import type { Area } from './ops'
 import type { PlanHistory } from './store'
 import type { CatalogItem } from './catalog'
@@ -10,8 +10,8 @@ import { ACCENT, Scene, planBounds, ptsAttr, sortedFurniture, wallPolygon } from
 import { snapFurniture, snapOpening, snapWallPoint, type Guide } from './snapping'
 import { deleteRun, deleteSection, movedSection, pushRun, refLength, runSection, runSpan, setRoomSide, stretchRun, touchesLocked, wallAtCorner, wallRun, type WallRun } from './walledit'
 import { buildRooms } from './rooms'
+import { addDimRef, dimSnap, squareDim } from './dims'
 import {
-  addDim,
   addFurniture,
   addOpening,
   addRect,
@@ -150,6 +150,8 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   const [roomDraft, setRoomDraft] = useState<{ a: Pt; b: Pt } | null>(null)
   const [areaDraft, setAreaDraft] = useState<{ a: Pt; b: Pt } | null>(null)
   const [dimStart, setDimStart] = useState<Pt | null>(null)
+  /** первый конец размера привязан к стене */
+  const [dimStartRef, setDimStartRef] = useState<DimRef | undefined>(undefined)
   const [measure, setMeasure] = useState<{ a: Pt; b: Pt; live: boolean } | null>(null)
   const [calibA, setCalibA] = useState<Pt | null>(null)
   const [cornerPts, setCornerPts] = useState<Pt[]>([])
@@ -347,7 +349,9 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         text = placing ? `«${placing.name}»: кликните, куда поставить. R — повернуть, Esc — отмена. Объект сам прилипает к стене` : 'Выберите предмет в каталоге'
         break
       case 'dimension':
-        text = dimStart ? 'Клик — вторая точка размера' : 'Клик — первая точка размерной линии'
+        text = dimStart
+          ? 'Клик — вторая точка. На грани стены напротив размер встанет поперёк'
+          : 'Клик по грани, оси или концу стены — размер привяжется к стене и будет следовать за ней. Щелчок мимо стен — свободная точка'
         break
       case 'measure':
         text = measure?.live ? 'Клик — зафиксировать измерение' : 'Клик — начать измерение рулеткой'
@@ -430,7 +434,19 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           break
         }
         case 'room':
-        case 'dimension':
+        case 'dimension': {
+          // конец размера ложится на стену: конец, грань или ось; мимо стен — обычная привязка
+          const w = dimSnap(p.walls, raw, tol)
+          if (w) {
+            setCursor({ p: w.p, kind: w.ref.end ? 'endpoint' : 'face' })
+            setGuides([])
+            break
+          }
+          const s = snapWallPoint(raw, p.walls, { grid: g, tol, ortho: false, lines: imageLines })
+          setCursor({ p: s.p, kind: s.kind })
+          setGuides(s.guides)
+          break
+        }
         case 'measure':
         case 'calibrate': {
           const s = snapWallPoint(raw, p.walls, { grid: g, tol, ortho: false, lines: imageLines })
@@ -522,12 +538,18 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           return
         }
         case 'dimension': {
-          const s = snapWallPoint(raw, p.walls, { grid: g, tol, ortho: false, lines: imageLines })
-          if (!dimStart) setDimStart(s.p)
-          else {
+          const w = dimSnap(p.walls, raw, tol)
+          const pt = w ? w.p : snapWallPoint(raw, p.walls, { grid: g, tol, ortho: false, lines: imageLines }).p
+          if (!dimStart) {
+            setDimStart(pt)
+            setDimStartRef(w?.ref)
+          } else {
             const a = dimStart
-            history.apply((pl) => addDim(pl, a, s.p, 30))
+            const aRef = dimStartRef
+            const b = squareDim(p.walls, a, aRef, pt, w?.ref)
+            if (dist(a, b) >= 1) history.apply((pl) => addDimRef(pl, a, b, 30, aRef, w?.ref))
             setDimStart(null)
+            setDimStartRef(undefined)
           }
           return
         }
@@ -557,7 +579,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         }
       }
     },
-    [tool, tol, ortho, wallThickness, history, rooms, placing, ghostRot, dimStart, calibA, cornerPts, onCalibrate, onRoomPick, onCorners, onSelect, onToolChange, onHint, finishDraft, imageLines],
+    [tool, tol, ortho, wallThickness, history, rooms, placing, ghostRot, dimStart, dimStartRef, calibA, cornerPts, onCalibrate, onRoomPick, onCorners, onSelect, onToolChange, onHint, finishDraft, imageLines],
   )
 
   // ---------- указатель ----------
@@ -1251,8 +1273,17 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           {/* размер: первая точка */}
           {dimStart && cursor && (
             <g>
-              <line x1={dimStart.x} y1={dimStart.y} x2={cursor.p.x} y2={cursor.p.y} stroke={ACCENT} strokeWidth={1} strokeDasharray="4 3" {...NS} />
-              {lengthLabel(dimStart, cursor.p, 'dim-len')}
+              {(() => {
+                // напротив грани — поперёк, как встанет размер
+                const w = cursor.kind === 'face' ? dimSnap(plan.walls, cursor.p, 0.5) : null
+                const b = squareDim(plan.walls, dimStart, dimStartRef, cursor.p, w?.ref)
+                return (
+                  <>
+                    <line x1={dimStart.x} y1={dimStart.y} x2={b.x} y2={b.y} stroke={ACCENT} strokeWidth={1} strokeDasharray="4 3" {...NS} />
+                    {lengthLabel(dimStart, b, 'dim-len')}
+                  </>
+                )
+              })()}
             </g>
           )}
 
@@ -1299,7 +1330,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           )}
           {cursor && (tool === 'wall' || tool === 'room' || tool === 'dimension' || tool === 'measure' || tool === 'calibrate') && (
             <g pointerEvents="none">
-              <circle cx={cursor.p.x} cy={cursor.p.y} r={(cursor.kind === 'endpoint' ? 7 : 4) / zoom} fill="none" stroke={cursor.kind === 'endpoint' ? '#f43f5e' : ACCENT} strokeWidth={1.5} {...NS} />
+              <circle cx={cursor.p.x} cy={cursor.p.y} r={(cursor.kind === 'endpoint' ? 7 : cursor.kind === 'face' ? 5 : 4) / zoom} fill="none" stroke={cursor.kind === 'endpoint' ? '#f43f5e' : cursor.kind === 'face' ? '#16a34a' : ACCENT} strokeWidth={1.5} {...NS} />
             </g>
           )}
 

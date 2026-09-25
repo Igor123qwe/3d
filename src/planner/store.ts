@@ -27,7 +27,11 @@ export interface PlanHistory {
   replace: (plan: Plan) => void
 }
 
-export function usePlanHistory(initial: () => Plan): PlanHistory {
+/**
+ * follow — что пересчитать после каждой правки: размеры, привязанные к
+ * стенам, переезжают следом (prev — план до правки, next — после)
+ */
+export function usePlanHistory(initial: () => Plan, follow: (prev: Plan, next: Plan) => Plan = (_, next) => next): PlanHistory {
   const [h, setH] = useState<Hist>(() => ({ past: [], present: initial(), future: [] }))
   const presentRef = useRef(h.present)
   presentRef.current = h.present
@@ -35,16 +39,19 @@ export function usePlanHistory(initial: () => Plan): PlanHistory {
 
   const apply = useCallback((fn: (p: Plan) => Plan) => {
     setH((s) => {
-      const next = fn(s.present)
-      if (next === s.present) return s
+      const raw = fn(s.present)
+      if (raw === s.present) return s
+      const next = follow(s.present, raw)
       return { past: [...s.past.slice(-LIMIT + 1), s.present], present: next, future: [] }
     })
-  }, [])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const preview = useCallback((next: Plan | ((p: Plan) => Plan)) => {
     if (!dragStart.current) dragStart.current = presentRef.current
-    setH((s) => ({ ...s, present: typeof next === 'function' ? next(s.present) : next }))
-  }, [])
+    const start = dragStart.current
+    // перетаскивание считается от исходного плана: от него же и следуют размеры
+    setH((s) => ({ ...s, present: typeof next === 'function' ? follow(s.present, next(s.present)) : follow(start, next) }))
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const endPreview = useCallback(() => {
     const start = dragStart.current

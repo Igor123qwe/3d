@@ -105,12 +105,25 @@ export interface RoomMeta {
 
 export type FloorKey = 'laminate' | 'parquet' | 'tile' | 'carpet' | 'concrete' | 'plain'
 
+/**
+ * Конец размера привязан к стене: к её оси (side 0), к грани (±1 — со
+ * стороны perp(b − a) или противоположной) или к концу стены (end). После
+ * правки стен конец переезжает следом
+ */
+export interface DimRef {
+  wallId: string
+  side: -1 | 0 | 1
+  end?: 'a' | 'b'
+}
+
 export interface DimensionLine {
   id: string
   a: Pt
   b: Pt
   /** смещение размерной линии от отрезка a-b, см */
   offset: number
+  aRef?: DimRef
+  bRef?: DimRef
 }
 
 export interface PlanSettings {

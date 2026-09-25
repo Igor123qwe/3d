@@ -45,6 +45,7 @@ import type { Guide } from './snapping'
 import { aiStatus, askLayout, askNumbers, askRoomLabel, askSpot, cropForVision, lookupProductViaServer, numberSheet, recognizePlan, type AiCost, type AiStatus, type NumbersResult } from './ai'
 import { applyAiPlan, convertAiPlan, fitResultToLabels, marksFromReads, roomLabelInBox, type ConvertResult } from './planai'
 import { evenWalls, rectifyWalls } from './rectify'
+import { followDims, roomDims } from './dims'
 import { closeGaps, deleteRun, findGaps, guardLocks, refLength, setAllLocked, setRunLengthBy, setRunLocked, setRunThickness, touchesLocked, wallRun } from './walledit'
 import { pointOnSide } from './reconstruct'
 import { pointOnOutline } from './picture'
@@ -255,7 +256,7 @@ interface Props {
 }
 
 export const PlannerPage: React.FC<Props> = ({ onBack }) => {
-  const history = usePlanHistory(loadInitialPlan)
+  const history = usePlanHistory(loadInitialPlan, followDims)
   const { plan } = history
   const planRef = useRef(plan)
   planRef.current = plan
@@ -2296,6 +2297,17 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           <div className="pl-note">
             Площадь считается по внутренним граням стен — как в техпаспорте. Комната появляется сама из замкнутого контура: чтобы убрать её, удалите стену.
           </div>
+          <button
+            className="pl-btn"
+            onClick={() => {
+              history.apply((p) => roomDims(p, r.inner))
+              setLayers((l) => ({ ...l, dims: true }))
+              setToast('Размеры комнаты в чистоте на плане. Они привязаны к стенам: двигайте стены — размеры обновятся сами')
+            }}
+            title="Ширина и глубина комнаты между внутренними гранями — размерными линиями, привязанными к стенам"
+          >
+            ↔ Размеры комнаты на план
+          </button>
         </div>
       )
     }
@@ -2313,6 +2325,18 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             <span>Отступ, см</span>
             <NumberField value={d.offset} step={5} onCommit={(v) => history.apply((p) => updateDim(p, d.id, { offset: v || 5 }))} />
           </label>
+          <div className="pl-note">
+            {d.aRef && d.bRef
+              ? 'Оба конца привязаны к стенам: размер следует за ними при любой правке.'
+              : d.aRef || d.bRef
+                ? 'Один конец привязан к стене и следует за ней, другой стоит на месте.'
+                : 'Размер свободный: стоит на месте, когда стены двигают. Привязать — нарисуйте заново, щёлкая по грани или оси стены.'}
+          </div>
+          {(d.aRef || d.bRef) && (
+            <button className="pl-btn" onClick={() => history.apply((p) => ({ ...p, dims: p.dims.map((x) => (x.id === d.id ? { id: x.id, a: x.a, b: x.b, offset: x.offset } : x)) }))}>
+              Отвязать от стен
+            </button>
+          )}
           <button
             className="pl-btn danger"
             onClick={() => {

@@ -376,7 +376,13 @@ export const Scene: React.FC<SceneProps> = ({ plan, rooms, check, layers, unit, 
             </g>
           )}
           {plan.dims.map((d: DimensionLine) => (
-            <DimLine key={d.id} a={d.a} b={d.b} offset={d.offset} zoom={zoom} unit={unit} selected={selection?.kind === 'dim' && selId === d.id} />
+            <g key={d.id}>
+              <DimLine a={d.a} b={d.b} offset={d.offset} zoom={zoom} unit={unit} selected={selection?.kind === 'dim' && selId === d.id} />
+              {/* у выбранного размера — какие концы держатся за стены */}
+              {selection?.kind === 'dim' &&
+                selId === d.id &&
+                ([d.aRef ? d.a : null, d.bRef ? d.b : null] as (Pt | null)[]).map((p, i) => p && <circle key={i} cx={p.x} cy={p.y} r={3.5 / zoom} fill="#16a34a" stroke="#fff" strokeWidth={1} {...NS} />)}
+            </g>
           ))}
         </g>
       )}
