@@ -3,7 +3,7 @@
 // Ключа здесь нет и быть не может: браузер ходит на свой же /api, а роутер
 // зовёт сервер. Если ИИ не подключён, каждая функция честно говорит об этом,
 // и приложение продолжает работать на прежних локальных алгоритмах.
-import type { AiNumberRead, AiPlacement, AiPlan, AiRoomLabel, AiSpot } from './aicontract'
+import type { AiNumberRead, AiPlacement, AiPlan, AiRoomLabel, AiSpot, AiZone } from './aicontract'
 import type { ProductInfo } from './products'
 import type { Pt } from './types'
 
@@ -304,7 +304,30 @@ export interface LayoutAsk {
   areaM2: number
   catalog: { type: string; name: string; w: number; d: number }[]
   style?: string
+  /** назначение комнаты: детская, кабинет… */
+  purpose?: string
+  /** пожелания жильцов своими словами */
+  wishes?: string
+  /** остальные комнаты квартиры */
+  apartment?: { room: string; purpose?: string; areaM2: number }[]
+  /** что уже стоит в комнате */
+  existing?: { type: string; name: string; x: number; y: number; w: number; d: number; rot: number }[]
 }
 
 export const askLayout = (ask: LayoutAsk, signal?: AbortSignal): Promise<LayoutResult> =>
   post<LayoutResult>('layout', ask, signal)
+
+// ---------- зонирование квартиры ----------
+export interface ZonesAsk {
+  wishes?: string
+  rooms: { id: string; name: string; areaM2: number; size: [number, number]; windows: number; doors: number }[]
+}
+
+export interface ZonesResult {
+  rooms: AiZone[]
+  ai: AiCost
+}
+
+/** Какой комнате какое назначение — с учётом пожеланий, перед расстановкой всей квартиры */
+export const askZones = (ask: ZonesAsk, signal?: AbortSignal): Promise<ZonesResult> =>
+  post<ZonesResult>('layout', { zones: true, ...ask }, signal)

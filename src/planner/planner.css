@@ -1543,3 +1543,101 @@
   font-size: 11px;
   color: #6b7280;
 }
+
+/* расстановка с ИИ: пожелания, область, отчёт */
+.pl-furnish {
+  width: min(600px, 100%);
+  max-height: calc(100% - 32px);
+  overflow: auto;
+}
+.pl-furnish .pl-ask-foot {
+  gap: 8px;
+  align-items: center;
+}
+.pl-furnish-row {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  font-size: 14px;
+}
+.pl-furnish-row select,
+.pl-furnish-row input,
+.pl-furnish textarea {
+  font: inherit;
+  font-size: 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--pl-line);
+  border-radius: var(--pl-radius);
+  background: var(--pl-surface);
+  color: inherit;
+  min-width: 0;
+}
+.pl-furnish textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  line-height: 1.4;
+  margin: 4px 0 8px;
+}
+.pl-furnish-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+.pl-furnish-check {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 13px;
+  color: var(--pl-ink-2);
+  margin-top: 8px;
+  line-height: 1.35;
+}
+.pl-furnish-note {
+  font-size: 12.5px !important;
+  color: var(--pl-muted) !important;
+  margin: 10px 0 0 !important;
+}
+.pl-furnish-warn {
+  color: #9a3412 !important;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: var(--pl-radius);
+  padding: 6px 10px;
+  font-size: 13px !important;
+}
+.pl-furnish-busy {
+  margin-right: auto;
+  font-size: 13px;
+  color: var(--pl-accent);
+}
+.pl-furnish-report {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13.5px;
+}
+.pl-furnish-report li {
+  padding: 8px 10px;
+  border: 1px solid var(--pl-line);
+  border-radius: var(--pl-radius);
+}
+.pl-furnish-report small {
+  display: block;
+  color: var(--pl-muted);
+  margin-top: 2px;
+}
+.pl-furnish-was {
+  color: var(--pl-muted);
+}
+.pl-furnish-cta {
+  width: 100%;
+  justify-content: center;
+  margin-bottom: 10px;
+  border-color: var(--pl-accent);
+  color: var(--pl-accent);
+}

@@ -42,7 +42,7 @@ import { decodePlan, parseHash, planShareUrl } from './share'
 import { DEFAULT_TRACE, calibrate, detectWalls, grayscaleOf, joinCorners, loadUnderlayImage, makeUnderlay, mergeCollinear, nameFromFile, planFromImage, toPixel, toPlan, tracePlan, type LoadedImage, type TraceOptions } from './underlay'
 import { applyH, cleanRaster, distanceToInk, dominantAngle, floodRoom, grayToImage, groundRoomBox, hatchedStrips, labelBoxes, perspectiveQuad, rectTarget, rotateImage, segmentRooms, segmentRoomsAuto, textHeight, warpToRect, withoutLooseText, type CleanResult, type RoomRegion, type TextBox } from './raster'
 import type { Guide } from './snapping'
-import { aiStatus, askLayout, askNumbers, askRoomLabel, askSpot, cropForVision, lookupProductViaServer, numberSheet, recognizePlan, type AiCost, type AiStatus, type NumbersResult } from './ai'
+import { aiStatus, askLayout, askNumbers, askZones, askRoomLabel, askSpot, cropForVision, lookupProductViaServer, numberSheet, recognizePlan, type AiCost, type AiStatus, type NumbersResult } from './ai'
 import { applyAiPlan, convertAiPlan, fitResultToLabels, marksFromReads, roomLabelInBox, type ConvertResult } from './planai'
 import { evenWalls, rectifyWalls } from './rectify'
 import { followDims, roomDims } from './dims'
@@ -52,7 +52,8 @@ import { pointOnOutline } from './picture'
 import type { LabelDispute } from './segment'
 import type { AiBox, AiMark, AiPlan, AiRoomLabel } from './aicontract'
 import { checkAiPlan, sizeFromText } from './aicontract'
-import { applyLayout, catalogForRoom, layoutSummary, vetLayout } from './autolayout'
+import { furnish, type FurnishOptions } from './furnish'
+import { FurnishDialog } from './FurnishDialog'
 import {
   DEFAULT_AUTO,
   ELECTRIC_NAMES,
@@ -283,6 +284,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const [ask, setAsk] = useState<{ title: string; text?: string; options: AskOption[]; onPick: (key: string) => void } | null>(null)
   /** план, который только что построили из шаблона или схемы, чтобы отличать его от своей работы */
   const untouched = useRef<Plan | null>(null)
+  /** диалог «Расставить мебель с ИИ»: для всей квартиры или комнаты */
+  const [furnishFor, setFurnishFor] = useState<null | 'all' | string>(null)
   /** масштаб подложки известен: задан руками или прочитан ИИ с размеров плана */
   const [scaleKnown, setScaleKnown] = useState(false)
   const [hint, setHint] = useState('')
@@ -1818,36 +1821,25 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     }
   }
 
-  /** Расставить мебель в комнате руками дизайнера, но проверить геометрией */
-  const runAiLayout = async (roomId: string) => {
-    const room = rooms.find((r) => r.meta.id === roomId)
-    if (!room || aiBusy) return
-    setAiBusy(`Расставляю: ${room.meta.name}…`)
+  /** Расставить мебель с ИИ по пожеланиям: вся квартира или комната; всё проверено геометрией */
+  const runFurnish = async (o: FurnishOptions, progress: (text: string) => void) => {
+    if (aiBusy) return null
+    setAiBusy('Расставляю мебель…')
     try {
-      const openings = plan.openings.flatMap((op) => {
-        const wall = plan.walls.find((w) => w.id === op.wallId)
-        if (!wall) return []
-        const c = lerp(wall.a, wall.b, op.t)
-        return [{ kind: op.kind, x: c.x, y: c.y, width: op.width }]
+      const rep = await furnish(plan, rooms, o, {
+        zones: (a) => askZones(a),
+        layout: (a) => askLayout(a),
+        onProgress: (t) => {
+          progress(t)
+          setAiBusy(t)
+        },
       })
-      const { items, ai: cost } = await askLayout({
-        polygon: room.polygon.map((p) => ({ x: p.x, y: p.y })),
-        openings,
-        room: room.meta.name,
-        areaM2: room.area,
-        catalog: catalogForRoom(room.meta.name, CATALOG),
-      })
-      const checks = vetLayout(items, room, plan)
-      const accepted = checks.filter((c) => c.ok).length
-      if (!accepted) {
-        setToast(`Ничего не подошло. ${layoutSummary(checks)}`)
-        return
-      }
-      history.apply((prev) => applyLayout(prev, checks))
-      noteCost('расстановка', cost)
-      setToast(`${room.meta.name}: ${layoutSummary(checks)}`)
-    } catch (e) {
-      setToast(`Расставить не вышло: ${(e as Error).message}`)
+      if (rep.plan !== plan) history.apply(() => rep.plan)
+      const rub = rep.costs.reduce((sum, c) => sum + c.costRub, 0)
+      if (rep.costs.length) setAiLast(`расстановка: ${rep.costs.length} запр., ${rep.costs[rep.costs.length - 1].model}${rub > 0 ? `, ${rub.toFixed(2)} ₽` : ''}`)
+      setModeRaw('furnish')
+      setLayers((l) => (l.furniture ? l : { ...l, furniture: true }))
+      return rep
     } finally {
       setAiBusy('')
     }
@@ -2308,6 +2300,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           >
             ↔ Размеры комнаты на план
           </button>
+          <button className="pl-btn" onClick={() => setFurnishFor(r.meta.id)} title="ИИ обставит комнату по вашим пожеланиям">
+            ✨ Обставить с ИИ…
+          </button>
         </div>
       )
     }
@@ -2542,7 +2537,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                   <button
                     className="pl-btn pl-room-ai"
                     title={`Расставить мебель: ${r.meta.name}`}
-                    onClick={() => void runAiLayout(r.meta.id)}
+                    onClick={() => setFurnishFor(r.meta.id)}
                     disabled={!!aiBusy}
                   >
                     ✨
@@ -2552,7 +2547,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             ))}
             {ai.enabled && (
               <div className="pl-note">
-                «✨» расставит мебель в комнате по правилам эргономики. Всё, что не помещается, перекрывает дверь или
+                «✨» расставит мебель в комнате по вашим пожеланиям и правилам эргономики. Всё, что не помещается, перекрывает дверь или
                 наезжает на соседний предмет, отбрасывается — в план попадает только проверенное.
               </div>
             )}
@@ -2577,6 +2572,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
 
   const renderCatalog = () => (
     <div>
+      {rooms.length > 0 && (
+        <button className="pl-btn pl-furnish-cta" onClick={() => setFurnishFor(selection?.kind === 'room' ? selection.id : 'all')} title={ai.enabled ? 'ИИ расставит мебель по вашим пожеланиям' : 'ИИ не подключён на сервере'}>
+          ✨ Расставить с ИИ по пожеланиям
+        </button>
+      )}
       <div className="pl-segment">
         <button className={catMode === 'schemes' ? 'active' : ''} onClick={() => setCatMode('schemes')}>
           Схемы
@@ -3178,6 +3178,14 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             <span className="pl-tool-name">Каталог</span>
           </button>
         )}
+        {mode === 'furnish' && (
+          <button className="pl-tool" onClick={() => setFurnishFor(selection?.kind === 'room' ? selection.id : 'all')} disabled={!rooms.length} title="Расставить мебель с ИИ: вся квартира или комната, по вашим пожеланиям">
+            <span className="pl-tool-icon">
+              <Icon name="sparkles" size={22} />
+            </span>
+            <span className="pl-tool-name">ИИ</span>
+          </button>
+        )}
         {mode === 'electric' && (
           <button
             className={`pl-tool ${panel === 'electric' ? 'active' : ''}`}
@@ -3345,6 +3353,15 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         onPaste={() => void intake.pasteFromClipboard()}
       />
       {ask && <AskDialog title={ask.title} text={ask.text} options={ask.options} onPick={ask.onPick} onCancel={() => setAsk(null)} />}
+      {furnishFor && (
+        <FurnishDialog
+          rooms={rooms.map((r) => ({ id: r.meta.id, name: r.meta.name, area: r.area }))}
+          initialScope={furnishFor}
+          aiEnabled={ai.enabled}
+          onRun={runFurnish}
+          onClose={() => setFurnishFor(null)}
+        />
+      )}
       <footer className="pl-status">
         <span className="pl-status-hint">{aiBusy ? `✨ ${aiBusy}` : hint}</span>
         <span className="pl-status-stats">

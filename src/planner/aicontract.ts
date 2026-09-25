@@ -379,6 +379,50 @@ export function checkAiLayout(data: unknown): AiPlacement[] {
   return out
 }
 
+/** назначения комнат, из которых выбирает зонирование */
+export const ROOM_PURPOSES = [
+  'Гостиная',
+  'Спальня',
+  'Детская',
+  'Кабинет',
+  'Спальня-кабинет',
+  'Гостевая',
+  'Столовая',
+  'Кухня',
+  'Кухня-гостиная',
+  'Прихожая',
+  'Коридор',
+  'Санузел',
+  'Ванная',
+  'Туалет',
+  'Гардеробная',
+  'Кладовая',
+  'Балкон',
+  'Лоджия',
+] as const
+
+export interface AiZone {
+  id: string
+  purpose: string
+  why: string
+}
+
+/** Зонирование квартиры: назначение каждой комнаты. Неизвестные id и пустые назначения отбрасываются */
+export function checkAiZones(data: unknown, ids?: string[]): AiZone[] {
+  const d = data as Record<string, unknown> | null
+  const items = Array.isArray(d?.rooms) ? (d as { rooms: unknown[] }).rooms : Array.isArray(data) ? (data as unknown[]) : []
+  const out: AiZone[] = []
+  for (const raw of items.slice(0, 40)) {
+    const it = raw as Record<string, unknown>
+    const id = typeof it.id === 'string' ? it.id.trim() : String(it.id ?? '')
+    const purpose = typeof it.purpose === 'string' ? it.purpose.trim().slice(0, 40) : ''
+    if (!id || !purpose || (ids && !ids.includes(id)) || out.some((z) => z.id === id)) continue
+    out.push({ id, purpose, why: typeof it.why === 'string' ? it.why.trim().slice(0, 200) : '' })
+  }
+  if (!out.length) throw new Error('пустое зонирование')
+  return out
+}
+
 // ---------- товар со страницы магазина ----------
 export interface AiProductFields {
   name?: string

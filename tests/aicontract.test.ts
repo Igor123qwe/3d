@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { checkAiLayout, checkAiNumbers, checkAiPlan, checkAiProduct, checkAiRoomLabel, extractJson, sizeFromText } from '../src/planner/aicontract'
+import { checkAiLayout, checkAiNumbers, checkAiPlan, checkAiProduct, checkAiRoomLabel, checkAiZones, extractJson, sizeFromText } from '../src/planner/aicontract'
 
 const wall = { x1: 0.1, y1: 0.1, x2: 0.9, y2: 0.1, thickness_cm: 25 }
 
@@ -194,5 +194,31 @@ describe('размеры с листа вырезок', () => {
       { n: 3, text: '0.26' },
     ])
     expect(() => checkAiNumbers({ note: 'не вижу' })).toThrow()
+  })
+})
+
+describe('зонирование квартиры', () => {
+  it('берёт назначения по известным id, мусор и повторы отбрасывает', () => {
+    const z = checkAiZones(
+      {
+        rooms: [
+          { id: 'r1', purpose: 'Спальня', why: 'тихая' },
+          { id: 'r1', purpose: 'Кабинет' },
+          { id: 'r9', purpose: 'Детская' },
+          { id: 'r2', purpose: '' },
+          { id: 'r3', purpose: 'Детская', why: 42 },
+        ],
+      },
+      ['r1', 'r2', 'r3'],
+    )
+    expect(z).toEqual([
+      { id: 'r1', purpose: 'Спальня', why: 'тихая' },
+      { id: 'r3', purpose: 'Детская', why: '' },
+    ])
+  })
+
+  it('пустой ответ — ошибка, чтобы взялась следующая модель', () => {
+    expect(() => checkAiZones({ rooms: [] })).toThrow()
+    expect(() => checkAiZones('чушь')).toThrow()
   })
 })

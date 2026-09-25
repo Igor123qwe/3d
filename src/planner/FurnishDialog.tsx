@@ -1,0 +1,185 @@
+// Диалог «Расставить мебель с ИИ»: пожелания своими словами, вся квартира
+// или одна комната, заменить стоящую мебель или дополнить. После прогона —
+// отчёт по комнатам: что поставлено, что отброшено проверкой и почему.
+import React, { useEffect, useRef, useState } from 'react'
+import { ROOM_PURPOSES } from './aicontract'
+import type { FurnishOptions, FurnishReport } from './furnish'
+
+const LS_WISHES = 'boop.planner.wishes'
+
+/** быстрые добавки к пожеланиям: щелчок дописывает фразу */
+const WISH_CHIPS = [
+  'двое взрослых и ребёнок',
+  'рабочее место на двоих',
+  'много хранения',
+  'гости остаются ночевать',
+  'обеденный стол на 6 человек',
+  'кровать 160 × 200',
+  'минимум мебели, больше места',
+  'кошка или собака',
+  'стиль — скандинавский',
+]
+
+interface Props {
+  rooms: { id: string; name: string; area: number }[]
+  initialScope: 'all' | string
+  aiEnabled: boolean
+  onRun: (o: FurnishOptions, progress: (text: string) => void) => Promise<FurnishReport | null>
+  onClose: () => void
+}
+
+const readWishes = () => {
+  try {
+    return localStorage.getItem(LS_WISHES) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled, onRun, onClose }) => {
+  const [scope, setScope] = useState<'all' | string>(initialScope)
+  const [wishes, setWishes] = useState(readWishes)
+  const [replace, setReplace] = useState(false)
+  const [rename, setRename] = useState(true)
+  const room = rooms.find((r) => r.id === scope)
+  const [purpose, setPurpose] = useState(room?.name ?? '')
+  const [busy, setBusy] = useState('')
+  const [report, setReport] = useState<FurnishReport | null>(null)
+  const [error, setError] = useState('')
+  const area = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    area.current?.focus()
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !busy) onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [busy, onClose])
+
+  useEffect(() => setPurpose(rooms.find((r) => r.id === scope)?.name ?? ''), [scope]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const addWish = (w: string) => setWishes((cur) => (cur.trim() ? `${cur.trim().replace(/[.,;]$/, '')}, ${w}` : w))
+
+  const run = async () => {
+    try {
+      localStorage.setItem(LS_WISHES, wishes)
+    } catch {
+      /* не страшно */
+    }
+    setError('')
+    setBusy('Отправляю…')
+    try {
+      const rep = await onRun({ scope, wishes, replace, rename, purpose: scope === 'all' ? undefined : purpose }, setBusy)
+      setReport(rep)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const placed = report?.rooms.reduce((s, r) => s + r.placed, 0) ?? 0
+  return (
+    <div className="pl-ask-backdrop" onClick={() => !busy && onClose()}>
+      <div className="pl-ask pl-furnish" role="dialog" aria-modal="true" aria-labelledby="pl-furnish-title" onClick={(e) => e.stopPropagation()}>
+        <h2 id="pl-furnish-title">✨ Расставить мебель с ИИ</h2>
+        {report ? (
+          <>
+            <p>{placed ? `Поставлено предметов: ${placed}. Всё легло одной правкой — Ctrl+Z уберёт разом.` : 'Ничего не встало: проверка отбросила всё предложенное.'}</p>
+            {report.zoningFailed && <p className="pl-furnish-warn">Назначения комнат подобрать не вышло ({report.zoningFailed}) — обставлено по их именам.</p>}
+            <ul className="pl-furnish-report">
+              {report.rooms.map((r) => (
+                <li key={r.id}>
+                  <b>{r.purpose}</b>
+                  {r.purpose !== r.name && <span className="pl-furnish-was"> (была «{r.name}»)</span>}
+                  {r.error ? <div className="pl-furnish-warn">Не вышло: {r.error}</div> : <div>{r.summary}</div>}
+                  {r.why && <small>{r.why}</small>}
+                </li>
+              ))}
+            </ul>
+            <div className="pl-ask-foot">
+              <button className="pl-btn primary" onClick={onClose} autoFocus>
+                Готово
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            {!aiEnabled && <p className="pl-furnish-warn">ИИ не подключён на сервере: нужен ключ ROUTERAI_API_KEY в .env.</p>}
+            <div className="pl-furnish-row">
+              <span>Где</span>
+              <select value={scope} onChange={(e) => setScope(e.target.value)} disabled={!!busy}>
+                <option value="all">Вся квартира</option>
+                {rooms.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.name} · {r.area.toFixed(1)} м²
+                  </option>
+                ))}
+              </select>
+            </div>
+            {scope !== 'all' && (
+              <div className="pl-furnish-row">
+                <span>Назначение</span>
+                <input list="pl-purposes" value={purpose} onChange={(e) => setPurpose(e.target.value)} disabled={!!busy} placeholder="Спальня, детская, кабинет…" />
+                <datalist id="pl-purposes">
+                  {ROOM_PURPOSES.map((p) => (
+                    <option key={p} value={p} />
+                  ))}
+                </datalist>
+              </div>
+            )}
+            <label className="pl-furnish-label" htmlFor="pl-wishes">
+              Пожелания своими словами
+            </label>
+            <textarea
+              id="pl-wishes"
+              ref={area}
+              rows={4}
+              maxLength={1000}
+              value={wishes}
+              disabled={!!busy}
+              onChange={(e) => setWishes(e.target.value)}
+              onKeyDown={(e) => {
+                e.stopPropagation()
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void run()
+              }}
+              placeholder="Например: живём вдвоём, работаем из дома — нужны два рабочих места; хочется много хранения и диван для гостей"
+            />
+            <div className="pl-chips">
+              {WISH_CHIPS.map((w) => (
+                <button key={w} className="pl-chip" onClick={() => addWish(w)} disabled={!!busy}>
+                  + {w}
+                </button>
+              ))}
+            </div>
+            <label className="pl-furnish-check">
+              <input type="checkbox" checked={replace} onChange={() => setReplace((v) => !v)} disabled={!!busy} />
+              <span>Убрать мебель, что уже стоит (иначе ИИ дополнит расстановку и не тронет её). Электрика остаётся</span>
+            </label>
+            {scope === 'all' && (
+              <label className="pl-furnish-check">
+                <input type="checkbox" checked={rename} onChange={() => setRename((v) => !v)} disabled={!!busy} />
+                <span>Переименовать комнаты по назначению (кухню, санузел и прихожую ИИ не трогает)</span>
+              </label>
+            )}
+            <p className="pl-furnish-note">
+              {scope === 'all' ? 'Сначала ИИ решит, какой комнате какое назначение по вашим пожеланиям, потом обставит каждую. ' : ''}
+              Каждый предмет проверяется геометрией: вне комнаты, на пути двери или поверх другого — не ставится.
+            </p>
+            {error && <p className="pl-furnish-warn">{error}</p>}
+            <div className="pl-ask-foot">
+              {busy && <span className="pl-furnish-busy">{busy}</span>}
+              <button className="pl-btn ghost" onClick={onClose} disabled={!!busy}>
+                Отмена
+              </button>
+              <button className="pl-btn primary" onClick={() => void run()} disabled={!!busy || !aiEnabled || (scope !== 'all' && !purpose.trim())}>
+                ✨ Расставить
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
