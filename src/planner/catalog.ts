@@ -1,7 +1,7 @@
 // Каталог мебели и оборудования с реальными размерами и зонами эргономики.
 // Локальная система объекта: x — ширина (вправо), y — глубина (вниз).
 // «Спинка» объекта — верхняя грань (-y), «фронт» — нижняя (+y).
-import type { ElectricPoint, ModelRef, ProductRef } from './types'
+import type { EditMode, ElectricPoint, Furniture, ModelRef, ProductRef } from './types'
 
 export type CategoryKey =
   | 'bedroom'
@@ -507,6 +507,12 @@ export const CATALOG: CatalogItem[] = [
 ]
 
 export const CATALOG_MAP: Record<string, CatalogItem> = Object.fromEntries(CATALOG.map((c) => [c.type, c]))
+
+/** точка электрики — розетка, выключатель, светильник, датчик, щит */
+export const isElectricItem = (f: Pick<Furniture, 'type' | 'electric'>): boolean => !!f.electric || CATALOG_MAP[f.type]?.category === 'electric'
+
+/** в каком режиме правится предмет */
+export const itemMode = (f: Pick<Furniture, 'type' | 'electric'>): EditMode => (isElectricItem(f) ? 'electric' : 'furnish')
 
 export const FLOORS: { key: import('./types').FloorKey; name: string; color: string }[] = [
   { key: 'laminate', name: 'Ламинат', color: '#efe3cf' },

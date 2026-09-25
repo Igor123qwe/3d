@@ -160,6 +160,10 @@
   color: var(--pl-ink);
   box-shadow: 0 1px 3px rgba(17, 24, 39, 0.15);
 }
+/* режим правки: стройка, мебель, электрика */
+.pl-mode-switch button.active {
+  color: var(--pl-accent);
+}
 .pl-header-actions {
   display: flex;
   align-items: center;

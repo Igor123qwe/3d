@@ -1,6 +1,6 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { Layers, LengthUnit, Plan, Pt, Selection, Tool, Underlay } from './types'
-import { CATALOG, CATALOG_MAP, CATEGORIES, FLOORS, ROOM_NAMES, dims3d, type CatalogItem, type CategoryKey } from './catalog'
+import type { EditMode, Layers, LengthUnit, Plan, Pt, Selection, Tool, Underlay, WallRef } from './types'
+import { CATALOG, CATALOG_MAP, CATEGORIES, FLOORS, ROOM_NAMES, dims3d, itemMode, type CatalogItem, type CategoryKey } from './catalog'
 import { usePlanHistory } from './store'
 import { buildRooms } from './rooms'
 import { runChecks } from './checks'
@@ -116,6 +116,8 @@ interface UiPrefs {
   unit: LengthUnit
   ortho: boolean
   wallThickness: number
+  mode: EditMode
+  wallRef: WallRef
 }
 
 const loadPrefs = (): UiPrefs => {
@@ -128,12 +130,14 @@ const loadPrefs = (): UiPrefs => {
         unit: p.unit ?? 'cm',
         ortho: p.ortho ?? true,
         wallThickness: p.wallThickness ?? 10,
+        mode: p.mode === 'furnish' || p.mode === 'electric' ? p.mode : 'build',
+        wallRef: p.wallRef === 'inner' || p.wallRef === 'outer' ? p.wallRef : 'axis',
       }
     }
   } catch {
     /* ignore */
   }
-  return { layers: DEFAULT_LAYERS, unit: 'cm', ortho: true, wallThickness: 10 }
+  return { layers: DEFAULT_LAYERS, unit: 'cm', ortho: true, wallThickness: 10, mode: 'build', wallRef: 'axis' }
 }
 
 /** был ли в этом браузере сохранённый план — чтобы не затирать работу планом из ссылки */
@@ -187,6 +191,15 @@ const TOOLS: { tool: Tool; icon: IconName; name: string; key: string }[] = [
   { tool: 'measure', icon: 'ruler', name: 'Рулетка', key: 'L' },
 ]
 
+/** инструменты стройки: выбрали такой — режим сам переключается на стройку */
+const BUILD_TOOLS: Tool[] = ['wall', 'room', 'door', 'window', 'doorway', 'dimension', 'calibrate', 'roomPick', 'corners', 'refine']
+
+const MODES: { mode: EditMode; icon: IconName; name: string; hint: string }[] = [
+  { mode: 'build', icon: 'wall', name: 'Стройка', hint: 'Стены, двери, окна, размеры. Мебель и электрика видны, но не цепляются мышью' },
+  { mode: 'furnish', icon: 'furniture', name: 'Мебель', hint: 'Только мебель: стены и электрика не сдвинутся случайно' },
+  { mode: 'electric', icon: 'bolt', name: 'Электрика', hint: 'Только точки электрики: розетки, выключатели, свет, щит' },
+]
+
 const COLORS = ['', '#e6edf7', '#f5e9d8', '#e6f3e8', '#e0f1f7', '#fdf1dc', '#fbe7ee', '#ececec', '#d9c9b4', '#c7d2fe', '#bbf7d0', '#fecaca', '#fde68a', '#ffffff', '#4b5563']
 
 /**
@@ -238,6 +251,8 @@ interface Props {
 export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const history = usePlanHistory(loadInitialPlan)
   const { plan } = history
+  const planRef = useRef(plan)
+  planRef.current = plan
   const prefs = useMemo(loadPrefs, [])
   const [tool, setToolRaw] = useState<Tool>('select')
   const [selection, setSelection] = useState<Selection>(null)
@@ -246,6 +261,10 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const [unit, setUnit] = useState<LengthUnit>(prefs.unit)
   const [ortho, setOrtho] = useState(prefs.ortho)
   const [wallThickness, setWallThickness] = useState(prefs.wallThickness)
+  /** режим правки: стройка, мебель или электрика */
+  const [mode, setModeRaw] = useState<EditMode>(prefs.mode)
+  /** по какой линии стены считать её длину */
+  const [wallRef, setWallRef] = useState<WallRef>(prefs.wallRef)
   const [view, setView] = useState<View>({ x: 40, y: 40, zoom: 0.7 })
   const [panel, setPanel] = useState<PanelTab>('props')
   const [panelOpen, setPanelOpen] = useState(true)
@@ -350,11 +369,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   }, [plan])
   useEffect(() => {
     try {
-      localStorage.setItem(LS_UI, JSON.stringify({ layers, unit, ortho, wallThickness }))
+      localStorage.setItem(LS_UI, JSON.stringify({ layers, unit, ortho, wallThickness, mode, wallRef }))
     } catch {
       /* ignore */
     }
-  }, [layers, unit, ortho, wallThickness])
+  }, [layers, unit, ortho, wallThickness, mode, wallRef])
 
   useEffect(() => {
     const t = setTimeout(() => canvasRef.current?.fit(), 60)
@@ -485,26 +504,55 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     setToolRaw(t)
     if (t !== 'place') setPlacing(null)
     if (t !== 'select') setSelection(null)
+    // инструмент стройки сам включает режим стройки
+    if (BUILD_TOOLS.includes(t)) setModeRaw('build')
   }, [])
+
+  /** выбранный объект показывает свой режим: из «Проверки» или 3D можно выбрать стену, когда включена мебель */
+  const modeOfSelection = (s: Selection): EditMode | null => {
+    if (!s || s.kind === 'room') return null
+    if (s.kind === 'furniture') {
+      const f = planRef.current.furniture.find((x) => x.id === s.id)
+      return f ? itemMode(f) : null
+    }
+    return 'build'
+  }
 
   const onSelect = useCallback((s: Selection) => {
     setSelection(s)
+    const m = modeOfSelection(s)
+    if (m) setModeRaw(m)
     if (s) {
       setPanel('props')
       if (!isMobile()) setPanelOpen(true)
     }
-  }, [])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Переключить режим: инструмент — «Выбор», панель — своя, чужое выделение снимается */
+  const switchMode = (m: EditMode) => {
+    setModeRaw(m)
+    setToolRaw('select')
+    setPlacing(null)
+    const cur = modeOfSelection(selection)
+    if (cur && cur !== m) setSelection(null)
+    if (m === 'furnish') setLayers((l) => (l.furniture ? l : { ...l, furniture: true }))
+    if (m === 'electric') setLayers((l) => (l.electric ? l : { ...l, electric: true }))
+    setPanel(m === 'furnish' ? 'catalog' : m === 'electric' ? 'electric' : 'props')
+    if (!isMobile()) setPanelOpen(true)
+  }
 
   const pick = (item: CatalogItem) => {
     setPlacing(item)
     setToolRaw('place')
     setSelection(null)
+    setModeRaw(item.electric || item.category === 'electric' ? 'electric' : 'furnish')
     if (isMobile()) setPanelOpen(false)
   }
 
   const openCatalog = () => {
     setPanel('catalog')
     setPanelOpen(true)
+    setModeRaw('furnish')
     if (tool !== 'place') setTool('select')
   }
 
@@ -2848,6 +2896,16 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             {saveState === 'saving' ? 'Сохраняю…' : saveState === 'error' ? 'Не сохранилось' : 'Сохранено'}
           </span>
         </div>
+        {!view3d && (
+          <div className="pl-view-switch pl-mode-switch" role="tablist" aria-label="Режим">
+            {MODES.map((m) => (
+              <button key={m.mode} role="tab" aria-selected={mode === m.mode} className={mode === m.mode ? 'active' : ''} onClick={() => switchMode(m.mode)} title={`${m.name}: ${m.hint}`}>
+                <Icon name={m.icon} size={16} />
+                <span>{m.name}</span>
+              </button>
+            ))}
+          </div>
+        )}
         <div className="pl-view-switch" role="tablist" aria-label="Вид">
           <button role="tab" aria-selected={!view3d} className={!view3d ? 'active' : ''} onClick={() => setView3d(false)} title="Чертёж">
             <Icon name="grid" size={16} /> 2D
@@ -3023,7 +3081,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       </header>
 
       <nav className={`pl-tools ${view3d ? 'hidden' : ''}`}>
-        {TOOLS.map((t) => (
+        {/* инструменты режима: в мебели и электрике стены не рисуются и не цепляются */}
+        {(mode === 'build' ? TOOLS : TOOLS.filter((t) => t.tool === 'select' || t.tool === 'measure')).map((t) => (
           <button key={t.tool} className={`pl-tool ${tool === t.tool ? 'active' : ''}`} onClick={() => setTool(t.tool)} title={t.key ? `${t.name} (${t.key})` : t.name}>
             <span className="pl-tool-icon">
               <Icon name={t.icon} size={22} />
@@ -3031,7 +3090,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             <span className="pl-tool-name">{t.name}</span>
           </button>
         ))}
-        {plan.underlay && (
+        {mode === 'build' && plan.underlay && (
           <>
             <button className={`pl-tool ${tool === 'roomPick' ? 'active' : ''}`} onClick={() => setTool('roomPick')} title="Комната по клику на картинке">
               <span className="pl-tool-icon">
@@ -3053,39 +3112,62 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             </button>
           </>
         )}
-        <button className={`pl-tool ${tool === 'place' || panel === 'catalog' ? 'active' : ''}`} onClick={openCatalog} title="Каталог мебели">
-          <span className="pl-tool-icon">
-            <Icon name="furniture" size={22} />
-          </span>
-          <span className="pl-tool-name">Мебель</span>
-        </button>
+        {mode === 'furnish' && (
+          <button className={`pl-tool ${tool === 'place' || panel === 'catalog' ? 'active' : ''}`} onClick={openCatalog} title="Каталог мебели">
+            <span className="pl-tool-icon">
+              <Icon name="furniture" size={22} />
+            </span>
+            <span className="pl-tool-name">Каталог</span>
+          </button>
+        )}
+        {mode === 'electric' && (
+          <button
+            className={`pl-tool ${panel === 'electric' ? 'active' : ''}`}
+            onClick={() => {
+              setPanel('electric')
+              setPanelOpen(true)
+            }}
+            title="Точки электрики, группы щита, ведомость"
+          >
+            <span className="pl-tool-icon">
+              <Icon name="bolt" size={22} />
+            </span>
+            <span className="pl-tool-name">Проект</span>
+          </button>
+        )}
         <span className="pl-tools-gap" />
-        <button
-          className={`pl-tool small ${allWallsLocked ? 'active' : ''}`}
-          onClick={() => {
-            history.apply((p) => setAllLocked(p, !allWallsLocked))
-            setToast(allWallsLocked ? 'Стены снова можно двигать' : 'Все стены зафиксированы: двигать можно мебель, двери и окна. Снять — той же кнопкой «Замок»')
-          }}
-          disabled={!plan.walls.length}
-          title="Зафиксировать все стены: настроили размеры — больше их случайно не сдвинуть"
-        >
-          <span className="pl-tool-icon">
-            <Icon name={allWallsLocked ? 'lock' : 'unlock'} size={20} />
-          </span>
-          <span className="pl-tool-name">Замок</span>
-        </button>
-        <button className={`pl-tool small ${ortho ? 'active' : ''}`} onClick={() => setOrtho((o) => !o)} title="Рисовать стены только под 0/45/90°">
-          <span className="pl-tool-icon">
-            <Icon name="ortho" size={20} />
-          </span>
-          <span className="pl-tool-name">Орто</span>
-        </button>
-        <button className={`pl-tool small ${layers.ergo ? 'active' : ''}`} onClick={() => toggleLayer('ergo')} title="Показать зоны эргономики">
-          <span className="pl-tool-icon">
-            <Icon name="zones" size={20} />
-          </span>
-          <span className="pl-tool-name">Зоны</span>
-        </button>
+        {mode === 'build' && (
+          <>
+            <button
+              className={`pl-tool small ${allWallsLocked ? 'active' : ''}`}
+              onClick={() => {
+                history.apply((p) => setAllLocked(p, !allWallsLocked))
+                setToast(allWallsLocked ? 'Стены снова можно двигать' : 'Все стены зафиксированы: двигать можно мебель, двери и окна. Снять — той же кнопкой «Замок»')
+              }}
+              disabled={!plan.walls.length}
+              title="Зафиксировать все стены: настроили размеры — больше их случайно не сдвинуть"
+            >
+              <span className="pl-tool-icon">
+                <Icon name={allWallsLocked ? 'lock' : 'unlock'} size={20} />
+              </span>
+              <span className="pl-tool-name">Замок</span>
+            </button>
+            <button className={`pl-tool small ${ortho ? 'active' : ''}`} onClick={() => setOrtho((o) => !o)} title="Рисовать стены только под 0/45/90°">
+              <span className="pl-tool-icon">
+                <Icon name="ortho" size={20} />
+              </span>
+              <span className="pl-tool-name">Орто</span>
+            </button>
+          </>
+        )}
+        {mode === 'furnish' && (
+          <button className={`pl-tool small ${layers.ergo ? 'active' : ''}`} onClick={() => toggleLayer('ergo')} title="Показать зоны эргономики">
+            <span className="pl-tool-icon">
+              <Icon name="zones" size={20} />
+            </span>
+            <span className="pl-tool-name">Зоны</span>
+          </button>
+        )}
       </nav>
 
       {view3d ? (
@@ -3119,6 +3201,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           onCorners={(pts) => void onCorners(pts)}
           onRefine={onRefineArea}
           onNotice={setToast}
+          mode={mode}
         />
       )}
 
@@ -3136,6 +3219,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
               key={k}
               className={`pl-tab ${panel === k ? 'active' : ''}`}
               onClick={() => {
+                if (k === 'catalog' && mode !== 'furnish') switchMode('furnish')
+                else if (k === 'electric' && mode !== 'electric') switchMode('electric')
                 setPanel(k)
                 setPanelOpen(true)
               }}

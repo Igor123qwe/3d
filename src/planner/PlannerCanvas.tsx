@@ -1,9 +1,9 @@
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
-import type { DimensionLine, Furniture, Layers, LengthUnit, Opening, Plan, Pt, Room, Selection, Tool, Wall } from './types'
+import type { DimensionLine, EditMode, Furniture, Layers, LengthUnit, Opening, Plan, Pt, Room, Selection, Tool, Wall } from './types'
 import type { Area } from './ops'
 import type { PlanHistory } from './store'
 import type { CatalogItem } from './catalog'
-import { CATALOG_MAP } from './catalog'
+import { CATALOG_MAP, itemMode } from './catalog'
 import { openingGeom, type CheckResult } from './checks'
 import { Glyph } from './Glyph'
 import { ACCENT, Scene, planBounds, ptsAttr, sortedFurniture, wallPolygon } from './Scene'
@@ -94,6 +94,8 @@ export interface CanvasProps {
   onRefine?: (area: Area) => void
   /** короткое сообщение пользователю: правка разомкнула комнату и т. п. */
   onNotice?: (text: string) => void
+  /** режим правки: мышь цепляет только объекты этого режима */
+  mode?: EditMode
 }
 
 type Drag =
@@ -135,7 +137,8 @@ const UNIT_CM: Record<LengthUnit, number> = { cm: 1, mm: 0.1, m: 100 }
 const UNIT_NAME: Record<LengthUnit, string> = { cm: 'см', mm: 'мм', m: 'м' }
 
 export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) => {
-  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view, onViewChange, onHint, photos, onCalibrate, imageLines, onRoomPick, onCorners, onRefine, onNotice } = props
+  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view, onViewChange, onHint, photos, onCalibrate, imageLines, onRoomPick, onCorners, onRefine, onNotice, mode = 'build' } = props
+  const build = mode === 'build'
   const svgRef = useRef<SVGSVGElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({ w: 800, h: 600 })
@@ -319,7 +322,11 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
             ? 'Стена: тяните поперёк — сдвинется вся прямая, примыкающие стены потянутся за ней. Стрелки — на 1 см, с Shift — на 10. Alt + щелчок — только участок до стыков: его можно выдвинуть или удалить (Del). Кружок на конце — длина'
             : selection
               ? 'Перетаскивайте объект. Ручка сверху — поворот, уголок — размер. Del — удалить, R — повернуть на 90°, Ctrl+D — дублировать'
-              : 'Клик — выбрать объект, стену или комнату. Щелчок по размеру комнаты — ввести точное число. Перетаскивание пустого места — сдвиг, колесо — масштаб'
+              : mode === 'furnish'
+                ? 'Мебель: клик — выбрать предмет, тянуть — двигать. Стены и электрика сейчас не цепляются. Добавить — «Каталог» слева'
+                : mode === 'electric'
+                  ? 'Электрика: клик — выбрать точку, тянуть — двигать. Стены и мебель сейчас не цепляются. Расставить по нормам — панель «Электрика»'
+                  : 'Стройка: клик — стена, дверь, окно или размер. Щелчок по размеру комнаты — ввести точное число. Мебель и электрика не цепляются. Пустое место — сдвиг, колесо — масштаб'
         break
       case 'wall':
         text = draft.length
@@ -359,7 +366,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         break
     }
     onHint(text)
-  }, [tool, selection, draft.length, placing, dimStart, measure?.live, calibA, cornerPts.length, onHint])
+  }, [tool, selection, draft.length, placing, dimStart, measure?.live, calibA, cornerPts.length, onHint, mode])
 
   // ---------- вспомогательные ----------
   const handlePositions = (f: Furniture) => {
@@ -379,11 +386,14 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         const { f, cat } = ordered[i]
         const isElectric = cat?.category === 'electric'
         if (isElectric ? !layers.electric : !layers.furniture) continue
+        // чужой режим: предмет видно, но мышь его не цепляет
+        if (itemMode(f) !== mode) continue
         if (cat?.symbol) {
           if (dist(p, { x: f.x, y: f.y }) < 14 / z) return { kind: 'furniture', id: f.id }
         } else if (pointInPoly(p, obbCorners(f.x, f.y, f.w, f.d, f.rot))) return { kind: 'furniture', id: f.id }
       }
-      for (const op of plan.openings) {
+      // стены, проёмы и размеры — только в режиме стройки
+      for (const op of build ? plan.openings : []) {
         const w = wallMap.get(op.wallId)
         if (!w) continue
         const g = openingGeom(op, w)
@@ -391,8 +401,8 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         const s1 = add(g.center, mul(g.dir, g.hw))
         if (pointSegDist(p, s0, s1) < w.thickness / 2 + t) return { kind: 'opening', id: op.id }
       }
-      for (const w of plan.walls) if (pointSegDist(p, w.a, w.b) < w.thickness / 2 + t) return { kind: 'wall', id: w.id }
-      if (layers.dims) {
+      for (const w of build ? plan.walls : []) if (pointSegDist(p, w.a, w.b) < w.thickness / 2 + t) return { kind: 'wall', id: w.id }
+      if (layers.dims && build) {
         for (const d of plan.dims) {
           const dir = norm(sub(d.b, d.a))
           const n = perp(dir)
@@ -402,7 +412,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       for (const r of rooms) if (pointInPoly(p, r.polygon)) return { kind: 'room', id: r.meta.id }
       return null
     },
-    [ordered, plan.openings, plan.walls, plan.dims, rooms, wallMap, layers],
+    [ordered, plan.openings, plan.walls, plan.dims, rooms, wallMap, layers, mode, build],
   )
 
   const updateDrawingCursor = useCallback(
@@ -627,7 +637,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   const downSelect = (raw: Pt, e: React.PointerEvent) => {
     const z = viewRef.current.zoom
     // щелчок по размеру комнаты — ввести число; двигается стена за одним из углов
-    if (layers.dims && !e.shiftKey && !e.altKey) {
+    if (layers.dims && build && !e.shiftKey && !e.altKey) {
       const lab = sideLabels.find((l) => {
         const d = norm(sub(l.b, l.a))
         const v = sub(raw, l.p)
@@ -692,7 +702,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       return
     }
     const u = plan.underlay
-    if (!hit && u && !u.locked && u.visible && layers.underlay) {
+    if (!hit && build && u && !u.locked && u.visible && layers.underlay) {
       const inside = raw.x >= u.x && raw.y >= u.y && raw.x <= u.x + u.px.w * u.scale && raw.y <= u.y + u.px.h * u.scale
       if (inside) {
         drag.current = { kind: 'underlay', start: raw, plan0: plan }
@@ -726,6 +736,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         const z = viewRef.current.zoom
         const onLabel =
           layers.dims &&
+          build &&
           sideLabels.some((l) => {
             const d = norm(sub(l.b, l.a))
             const v = sub(raw, l.p)
@@ -1169,7 +1180,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         {layers.grid && major > 12 && <rect width={size.w} height={size.h} fill="url(#pl-grid-major)" />}
 
         <g transform={`translate(${view.x} ${view.y}) scale(${zoom})`}>
-          <Scene plan={plan} rooms={rooms} check={check} layers={layers} unit={unit} zoom={zoom} selection={selection?.kind === 'wall' ? null : selection} hover={hover?.kind === 'wall' ? null : hover} badItems={badItems} photos={photos} />
+          <Scene plan={plan} rooms={rooms} check={check} layers={layers} unit={unit} zoom={zoom} selection={selection?.kind === 'wall' ? null : selection} hover={hover?.kind === 'wall' ? null : hover} badItems={badItems} photos={photos} mode={mode} />
 
           {/* направляющие */}
           {guides.map((g, i) => (

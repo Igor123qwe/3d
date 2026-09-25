@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react'
-import type { DimensionLine, Layers, LengthUnit, Opening, Plan, Pt, Room, Selection, Wall } from './types'
-import { CATALOG_MAP, FLOORS } from './catalog'
+import type { DimensionLine, EditMode, Layers, LengthUnit, Opening, Plan, Pt, Room, Selection, Wall } from './types'
+import { CATALOG_MAP, FLOORS, itemMode } from './catalog'
 import { Glyph } from './Glyph'
 import { add, angleDeg, bboxOf, dist, fmtArea, fmtLen, mid, mul, norm, obbCorners, perp, pointInPoly, sub } from './geometry'
 import { openingGeom, zonesOf, type CheckResult } from './checks'
@@ -139,9 +139,11 @@ export interface SceneProps {
   badItems?: Set<string>
   /** виды сверху фотореалистичных моделей: id предмета → data URL */
   photos?: Record<string, string>
+  /** режим правки: предметы чужого режима бледнее — видно, но не в фокусе */
+  mode?: EditMode
 }
 
-export const Scene: React.FC<SceneProps> = ({ plan, rooms, check, layers, unit, zoom, selection = null, hover = null, badItems, photos }) => {
+export const Scene: React.FC<SceneProps> = ({ plan, rooms, check, layers, unit, zoom, selection = null, hover = null, badItems, photos, mode }) => {
   const wallPolys = useMemo(() => plan.walls.map((w) => ({ w, poly: wallPolygon(w, plan.walls) })), [plan.walls])
   const wallMap = useMemo(() => new Map(plan.walls.map((w) => [w.id, w])), [plan.walls])
   const furniture = useMemo(() => sortedFurniture(plan), [plan])
@@ -164,8 +166,11 @@ export const Scene: React.FC<SceneProps> = ({ plan, rooms, check, layers, unit, 
     const name = f.label || x.cat?.name || f.type
     const fs = Math.min(10 / zoom, f.w / Math.max(6, name.length * 0.62))
     const photo = photos?.[f.id]
+    // чужой режим: в стройке мебель и электрика — фоном, в мебели — электрика, в электрике — мебель
+    const own = !mode || itemMode(f) === mode
+    const faded = own ? 1 : mode === 'electric' ? 0.5 : 0.3
     return (
-      <g key={f.id} transform={`translate(${f.x} ${f.y}) rotate(${f.rot})`} opacity={isHover && !isSel ? 0.85 : 1}>
+      <g key={f.id} transform={`translate(${f.x} ${f.y}) rotate(${f.rot})`} opacity={(isHover && !isSel ? 0.85 : 1) * faded}>
         <g transform={f.flip ? 'scale(-1 1)' : undefined}>
           {photo ? (
             <g>

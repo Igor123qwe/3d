@@ -189,6 +189,17 @@ export type Tool =
 
 export type LengthUnit = 'cm' | 'mm' | 'm'
 
+/**
+ * Режим правки, как «строительство» и «покупка» в The Sims: в каждом режиме
+ * мышь цепляет только свои объекты, остальное видно, но не сдвигается
+ * случайно. Стройка — стены, двери, окна, размеры; мебель — предметы;
+ * электрика — точки электрики
+ */
+export type EditMode = 'build' | 'furnish' | 'electric'
+
+/** По какой линии стены считается и задаётся её длина */
+export type WallRef = 'axis' | 'inner' | 'outer'
+
 export interface Layers {
   grid: boolean
   underlay: boolean
