@@ -445,7 +445,7 @@ export interface PxMark {
  * прилипшие к низу ниши, не пускают область в угол, и низ ниши выходит
  * ступенькой 38 + 25 со сдвигом на 10 см: ни одна грань не сходится с
  * подписью, и ниша остаётся как на картинке. Если под подписью лежат две
- * параллельные грани, соединённые короткой поперечной (до 20 см и четверти
+ * параллельные грани, соединённые короткой поперечной (до 22 см и трети
  * числа), сумма сходится с числом, а по отдельности ни одна не сходится, —
  * грани встают на уровень длинной, ступенька уходит. Настоящий уступ
  * (0,64 × 0,13 на кухне) подписан по граням, и каждая сходится со своим
@@ -479,7 +479,7 @@ export function flattenLabelledSteps(polyIn: Pt[], marks: PxMark[], cmPerPx: num
       if (!isAlong(p1, q1) || !isAlong(p2, q2)) continue
       // поперечная — короткая, и обе грани идут в одну сторону
       const jog = Math.abs(across(qj) - across(pj)) * cmPerPx
-      if (Math.abs(along(qj) - along(pj)) >= 0.5 || jog > Math.min(20, 0.25 * m.cm)) continue
+      if (Math.abs(along(qj) - along(pj)) >= 0.5 || jog > Math.min(22, 0.3 * m.cm)) continue
       if (Math.sign(along(q1) - along(p1)) !== Math.sign(along(q2) - along(p2))) continue
       const total = Math.abs(along(q2) - along(p1)) * cmPerPx
       const off = Math.abs(total - m.cm)

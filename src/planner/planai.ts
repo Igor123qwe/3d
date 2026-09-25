@@ -378,12 +378,20 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
   const thick = { ...DEFAULT_RECONSTRUCT, ...wallThicknesses(ai) }
   const raster = o.raster && o.raster.w === px.w && o.raster.h === px.h ? o.raster.d2 : null
   // ступенька под одной подписью — от цифр, прилипших к стене: контур
-  // выпрямляется по числам с картинки до того, как из него встанут стены
+  // выпрямляется по числам с картинки до того, как из него встанут стены.
+  // Подписи вдоль стен от модели — тоже: сторона и место вдоль неё дают
+  // точку на контуре (у пользователя «0,68» с листа не прочиталась, а по
+  // комнате модель её прочитала)
   const pxMarks = (ai.marks ?? []).map((m) => ({ at: { x: m.x * px.w, y: m.y * px.h }, alongX: !m.vertical, cm: m.cm }))
-  const outline = (r: RoomRegion) => (pxMarks.length ? flattenLabelledSteps(regionPoly(r), pxMarks, u.scale) : regionPoly(r))
+  const outline = (r: RoomRegion, j: number) => {
+    const poly = regionPoly(r)
+    const told = (ai.rooms.find((a) => a.name === rooms[j].name)?.walls ?? []).map((l) => ({ at: pointOnOutline(poly, l.side, l.at), alongX: l.side === 'top' || l.side === 'bottom', cm: l.cm }))
+    const all = [...pxMarks, ...told]
+    return all.length ? flattenLabelledSteps(poly, all, u.scale) : poly
+  }
   const rebuilt = bySegments
     ? wallsFromPicture(
-        regions.map((r, j) => ({ name: rooms[j].name, kind: rooms[j].kind, poly: outline(r), wantM2: rooms[j].areaM2 })),
+        regions.map((r, j) => ({ name: rooms[j].name, kind: rooms[j].kind, poly: outline(r, j), wantM2: rooms[j].areaM2 })),
         u,
         raster,
         { interiorCm: thick.interiorCm, exteriorCm: thick.exteriorCm },
