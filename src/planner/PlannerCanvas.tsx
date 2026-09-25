@@ -8,7 +8,7 @@ import { openingGeom, type CheckResult } from './checks'
 import { Glyph } from './Glyph'
 import { ACCENT, Scene, planBounds, ptsAttr, sortedFurniture, wallPolygon } from './Scene'
 import { snapFurniture, snapOpening, snapWallPoint, type Guide } from './snapping'
-import { deleteRun, pushRun, runSection, runSpan, setRoomSide, stretchRun, touchesLocked, wallAtCorner, wallRun, type WallRun } from './walledit'
+import { deleteRun, deleteSection, movedSection, pushRun, runSection, runSpan, setRoomSide, stretchRun, touchesLocked, wallAtCorner, wallRun, type WallRun } from './walledit'
 import { buildRooms } from './rooms'
 import {
   addDim,
@@ -120,6 +120,20 @@ const isEditable = (t: EventTarget | null) => {
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable
 }
 
+/**
+ * Выделенный участок прямой (Alt + щелчок): пока точка щелчка лежит на
+ * выбранной прямой и участок до стыков короче всей прямой
+ */
+const sectionOf = (walls: Wall[], sel: Selection, part: { id: string; at: Pt } | null) => {
+  if (!part || sel?.kind !== 'wall' || sel.id !== part.id) return null
+  const run = wallRun(walls, sel.id)
+  if (!run || pointSegDist(part.at, run.a, run.b) > run.thickness / 2 + 2) return null
+  const s = runSection(walls, run, part.at)
+  return s.hi - s.lo < dist(run.a, run.b) - 0.5 ? s : null
+}
+const UNIT_CM: Record<LengthUnit, number> = { cm: 1, mm: 0.1, m: 100 }
+const UNIT_NAME: Record<LengthUnit, string> = { cm: 'см', mm: 'мм', m: 'м' }
+
 export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) => {
   const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view, onViewChange, onHint, photos, onCalibrate, imageLines, onRoomPick, onCorners, onRefine, onNotice } = props
   const svgRef = useRef<SVGSVGElement>(null)
@@ -135,8 +149,13 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   const [calibA, setCalibA] = useState<Pt | null>(null)
   const [cornerPts, setCornerPts] = useState<Pt[]>([])
   useEffect(() => setCornerPts([]), [tool])
+  useEffect(() => setTyped(''), [tool])
   const [hover, setHover] = useState<Selection>(null)
   const [hoverPart, setHoverPart] = useState<{ id: string; lo: number; hi: number } | null>(null)
+  /** Alt + щелчок по стене: выделен только участок до стыков — точка щелчка, участок считается заново */
+  const [selPart, setSelPart] = useState<{ id: string; at: Pt } | null>(null)
+  /** длина следующей стены, набранная цифрами, пока рисуется стена */
+  const [typed, setTyped] = useState('')
   /** правка размера стороны комнаты: щелчок по подписи «230 см» */
   const [sideEdit, setSideEdit] = useState<{ a: Pt; b: Pt; value: string; end: 'a' | 'b'; at: Pt } | null>(null)
   const [overLabel, setOverLabel] = useState(false)
@@ -154,6 +173,8 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   planRef.current = plan
   const draftRef = useRef(draft)
   draftRef.current = draft
+  const cursorRef = useRef(cursor)
+  cursorRef.current = cursor
 
   const zoom = view.zoom
   const tol = 12 / zoom
@@ -219,7 +240,24 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   const finishDraft = useCallback(() => {
     setDraft([])
     setGuides([])
+    setTyped('')
   }, [])
+
+  /**
+   * Конец следующей стены по набранной длине: от последней точки в сторону
+   * курсора; при ортогональности или почти по оси — строго по оси
+   */
+  const typedEnd = (t: string): Pt | null => {
+    const d = draftRef.current
+    const last = d[d.length - 1]
+    const c = cursorRef.current?.p
+    const v = parseFloat(t.replace(',', '.'))
+    if (!last || !c || !(v > 0) || dist(c, last) < 0.5) return null
+    let dir = norm(sub(c, last))
+    const ax = Math.abs(dir.x) >= Math.abs(dir.y) ? { x: Math.sign(dir.x), y: 0 } : { x: 0, y: Math.sign(dir.y) }
+    if (ortho || dot(dir, ax) > Math.cos((4 * Math.PI) / 180)) dir = ax
+    return add(last, mul(dir, v * UNIT_CM[unit]))
+  }
 
   useImperativeHandle(
     ref,
@@ -267,6 +305,10 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     setHover(null)
   }, [tool, placing])
 
+  useEffect(() => {
+    if (selPart && (selection?.kind !== 'wall' || selection.id !== selPart.id)) setSelPart(null)
+  }, [selection, selPart])
+
   // ---------- подсказки ----------
   useEffect(() => {
     let text = ''
@@ -274,14 +316,14 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       case 'select':
         text =
           selection?.kind === 'wall'
-            ? 'Стена: тяните поперёк — сдвинется вся прямая, примыкающие стены потянутся за ней. Alt + тянуть — только участок до ближайших стыков (ниша, выступ). Кружок на конце — длина. Del — удалить прямую'
+            ? 'Стена: тяните поперёк — сдвинется вся прямая, примыкающие стены потянутся за ней. Стрелки — на 1 см, с Shift — на 10. Alt + щелчок — только участок до стыков: его можно выдвинуть или удалить (Del). Кружок на конце — длина'
             : selection
               ? 'Перетаскивайте объект. Ручка сверху — поворот, уголок — размер. Del — удалить, R — повернуть на 90°, Ctrl+D — дублировать'
               : 'Клик — выбрать объект, стену или комнату. Щелчок по размеру комнаты — ввести точное число. Перетаскивание пустого места — сдвиг, колесо — масштаб'
         break
       case 'wall':
         text = draft.length
-          ? 'Клик — следующая точка. Повторный клик в той же точке, Enter или Esc — завершить. Клик в начало — замкнуть контур'
+          ? 'Клик — следующая точка. Или наберите длину цифрами и Enter — стена этой длины (по оси) в сторону курсора. Повторный клик в той же точке, Enter или Esc — завершить. Клик в начало — замкнуть контур'
           : 'Клик — первая точка стены. Привязка к концам стен, осям и сетке'
         break
       case 'room':
@@ -638,6 +680,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     }
     if (hit?.kind === 'wall') {
       if (!sameSel(hit, selection)) onSelect(hit)
+      setSelPart(e.altKey ? { id: hit.id, at: raw } : null)
       const run = wallRun(plan.walls, hit.id)
       // вся прямая или, с Alt, участок до ближайших стыков
       if (run) drag.current = { kind: 'wall', id: hit.id, plan0: plan, start: raw, run, part: e.altKey ? runSection(plan.walls, run, raw) : undefined, offset: 0 }
@@ -777,7 +820,6 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
             }
           }
         }
-        d.offset = off
         const next = pushRun(d.plan0, d.id, off, d.part)
         // зафиксированную стену правка не трогает — ни сдвигом, ни растяжкой
         if (touchesLocked(d.plan0, next)) {
@@ -785,6 +827,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           d.warned = true
           return
         }
+        d.offset = off
         d.last = next
         history.preview(d.last)
         return
@@ -823,6 +866,13 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         return
       }
     }
+  }
+
+  /** правка не должна тихо ломать комнаты: разомкнулась — сказать сразу */
+  const warnOpened = (before: Plan, after: Plan) => {
+    const n0 = buildRooms(before).rooms.length
+    const n1 = buildRooms(after).rooms.length
+    if (n1 < n0) onNotice?.(`Контур комнаты разомкнулся: комнат было ${n0}, стало ${n1}. Ctrl+Z вернёт как было`)
   }
 
   const onPointerUp = (e: React.PointerEvent<SVGSVGElement>) => {
@@ -866,11 +916,14 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       case 'stretch': {
         history.endPreview()
         setGuides([])
-        // правка не должна тихо ломать комнаты: разомкнулась — сказать сразу
         if (d.last) {
-          const before = buildRooms(d.plan0).rooms.length
-          const after = buildRooms(d.last).rooms.length
-          if (after < before) onNotice?.(`Контур комнаты разомкнулся: комнат было ${before}, стало ${after}. Ctrl+Z вернёт как было`)
+          warnOpened(d.plan0, d.last)
+          // выдвинутый участок — теперь своя прямая: выделение переходит на него
+          if (d.kind === 'wall' && d.part) {
+            const w = movedSection(d.last.walls, d.run, d.part.lo, d.part.hi, d.offset)
+            if (w) onSelect({ kind: 'wall', id: w.id })
+            setSelPart(null)
+          }
         }
         return
       }
@@ -901,6 +954,37 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         e.preventDefault()
         return
       }
+      // длина следующей стены цифрами, пока рисуется стена
+      if (tool === 'wall' && draftRef.current.length && !ctrl && !e.altKey) {
+        if (/^\d$/.test(e.key) || ((e.key === ',' || e.key === '.') && !/[.,]/.test(typed))) {
+          e.preventDefault()
+          if (typed.length < 7) setTyped(typed + e.key)
+          return
+        }
+        if (e.key === 'Backspace' && typed) {
+          e.preventDefault()
+          setTyped(typed.slice(0, -1))
+          return
+        }
+        if (e.key === 'Escape' && typed) {
+          setTyped('')
+          return
+        }
+        if (e.key === 'Enter' && typed) {
+          const p = typedEnd(typed)
+          if (!p) {
+            onNotice?.('Наведите курсор туда, куда вести стену, — длина отложится в эту сторону')
+            return
+          }
+          const d = draftRef.current
+          const last = d[d.length - 1]
+          history.apply((pl) => addWall(pl, last, p, wallThickness))
+          setTyped('')
+          if (d.length >= 2 && eq(p, d[0], 0.75)) finishDraft()
+          else setDraft([...d, p])
+          return
+        }
+      }
       if (e.key === 'Escape') {
         if (sideEdit) setSideEdit(null)
         else if (draftRef.current.length) finishDraft()
@@ -930,12 +1014,21 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         e.preventDefault()
         // комната — следствие контура стен, удалять в ней нечего
         if (selection.kind === 'room') return
-        // стена — прямая целиком: удаляется то, что подсвечено
-        if (selection.kind === 'wall' && touchesLocked(planRef.current, deleteRun(planRef.current, selection.id))) {
-          onNotice?.('Стена зафиксирована — снимите замок, чтобы удалить')
+        // стена: удаляется то, что подсвечено, — прямая целиком или участок (Alt + щелчок)
+        if (selection.kind === 'wall') {
+          const pl0 = planRef.current
+          const part = sectionOf(pl0.walls, selection, selPart)
+          const next = part ? deleteSection(pl0, selection.id, part.lo, part.hi) : deleteRun(pl0, selection.id)
+          if (touchesLocked(pl0, next)) {
+            onNotice?.('Стена зафиксирована — снимите замок, чтобы удалить')
+            return
+          }
+          history.apply(() => next)
+          setSelPart(null)
+          onSelect(null)
           return
         }
-        history.apply((pl) => (selection.kind === 'wall' ? deleteRun(pl, selection.id) : deleteSelection(pl, selection)))
+        history.apply((pl) => deleteSelection(pl, selection))
         onSelect(null)
         return
       }
@@ -950,6 +1043,36 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       if (e.code === 'KeyR' && !ctrl) {
         if (selection?.kind === 'furniture') history.apply((pl) => rotateFurniture(pl, selection.id, e.shiftKey ? -90 : 90))
         else if (tool === 'place') setGhostRot((r) => normDeg(r + 90))
+        return
+      }
+      // стрелки: стена сдвигается поперёк на 1 см, с Shift на 10 — вся прямая или выделенный участок
+      if (e.key.startsWith('Arrow') && selection?.kind === 'wall') {
+        e.preventDefault()
+        const pl0 = planRef.current
+        const run = wallRun(pl0.walls, selection.id)
+        if (!run) return
+        const v = { x: e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0, y: e.key === 'ArrowUp' ? -1 : e.key === 'ArrowDown' ? 1 : 0 }
+        const k = dot(v, run.normal)
+        if (Math.abs(k) < 0.3) {
+          onNotice?.(Math.abs(run.dir.x) >= Math.abs(run.dir.y) ? 'Стена идёт поперёк экрана — её двигают стрелки ↑ ↓' : 'Стена идёт вдоль экрана — её двигают стрелки ← →')
+          return
+        }
+        const off = Math.sign(k) * (e.shiftKey ? 10 : 1)
+        const part = sectionOf(pl0.walls, selection, selPart)
+        const next = pushRun(pl0, selection.id, off, part ?? undefined)
+        if (next === pl0) return
+        if (touchesLocked(pl0, next)) {
+          onNotice?.('Стена зафиксирована (или держится за зафиксированную) — снимите замок, чтобы двигать')
+          return
+        }
+        history.apply(() => next)
+        warnOpened(pl0, next)
+        // выбранный кусок мог склеиться с соседним, а участок — стал своей прямой
+        if (part || !next.walls.some((w) => w.id === selection.id)) {
+          const w = movedSection(next.walls, run, part?.lo ?? 0, part?.hi ?? dist(run.a, run.b), off)
+          if (w) onSelect({ kind: 'wall', id: w.id })
+          setSelPart(null)
+        }
         return
       }
       if (e.key.startsWith('Arrow') && selection?.kind === 'furniture') {
@@ -973,7 +1096,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       window.removeEventListener('keydown', onKey)
       window.removeEventListener('keyup', onKeyUp)
     }
-  }, [tool, selection, history, onSelect, onToolChange, finishDraft, dimStart, measure])
+  }, [tool, selection, selPart, typed, ortho, unit, wallThickness, history, onSelect, onToolChange, onNotice, finishDraft, dimStart, measure])
 
   // ---------- отрисовка ----------
   const drawing = tool !== 'select'
@@ -981,10 +1104,13 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   const minor = 50 * zoom
   const major = 100 * zoom
   const draftWalls = draft.slice(1).map((p, i) => ({ id: `d${i}`, a: draft[i], b: p, thickness: wallThickness }))
-  const rubber = tool === 'wall' && draft.length && cursor ? { a: draft[draft.length - 1], b: cursor.p } : null
+  const typedPt = tool === 'wall' && typed ? typedEnd(typed) : null
+  const rubber = tool === 'wall' && draft.length && cursor ? { a: draft[draft.length - 1], b: typedPt ?? cursor.p } : null
   const selFurn = selection?.kind === 'furniture' ? plan.furniture.find((f) => f.id === selection.id) : undefined
   const selCat = selFurn ? CATALOG_MAP[selFurn.type] : undefined
   const selRun = selection?.kind === 'wall' ? wallRun(plan.walls, selection.id) : null
+  const selSec = selRun ? sectionOf(plan.walls, selection, selPart) : null
+  const [selA, selB] = selRun && selSec ? runSpan(selRun, selSec.lo, selSec.hi) : selRun ? [selRun.a, selRun.b] : [null, null]
   // зафиксированные прямые — по одной на прямую, для значка замка
   const lockedRuns: WallRun[] = []
   for (const w of plan.walls) {
@@ -1200,13 +1326,15 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           {hoverRun && !(selRun && hoverRun.ids.includes(selection!.id)) && (
             hoverPart && hover?.kind === 'wall' && hoverPart.id === hover.id ? runBand(hoverRun, hoverPart.lo, hoverPart.hi, 'rgba(37,99,235,0.35)', 'hover-part') : runBand(hoverRun, 0, dist(hoverRun.a, hoverRun.b), 'rgba(75,85,99,0.55)', 'hover-run')
           )}
-          {/* выбранная прямая: подсветка, стрелки «тянуть поперёк», кружки на концах, длина */}
-          {selRun && (
+          {/* выбранная прямая (или её участок): подсветка, стрелки «тянуть поперёк», кружки на концах, длина */}
+          {selRun && selA && selB && (
             <g>
-              {runBand(selRun, 0, dist(selRun.a, selRun.b), ACCENT, 'sel-run')}
+              {selSec
+                ? [runBand(selRun, 0, dist(selRun.a, selRun.b), 'rgba(37,99,235,0.3)', 'sel-run'), runBand(selRun, selSec.lo, selSec.hi, ACCENT, 'sel-part')]
+                : runBand(selRun, 0, dist(selRun.a, selRun.b), ACCENT, 'sel-run')}
               {(() => {
                 // стрелки — на трети прямой: посередине стоит её длина
-                const m = lerp(selRun.a, selRun.b, dist(selRun.a, selRun.b) * zoom > 160 ? 0.3 : 0.5)
+                const m = lerp(selA, selB, dist(selA, selB) * zoom > 160 ? 0.3 : 0.5)
                 const k = selRun.thickness / 2 + 10 / zoom
                 const arrow = (sgn: number) => {
                   const tip = add(m, mul(selRun.normal, sgn * (k + 8 / zoom)))
@@ -1219,7 +1347,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
               {[selRun.a, selRun.b].map((p, i) => (
                 <circle key={i} cx={p.x} cy={p.y} r={6 / zoom} fill="#fff" stroke={ACCENT} strokeWidth={1.5} {...NS} />
               ))}
-              {lengthLabel(selRun.a, selRun.b, 'sel-wall-len')}
+              {lengthLabel(selA, selB, 'sel-wall-len')}
               {drag.current?.kind === 'wall' && Math.abs(drag.current.offset) >= 0.5 && (
                 <text x={add(lerp(selRun.a, selRun.b, 0.7), mul(selRun.normal, selRun.thickness / 2 + 16 / zoom)).x} y={add(lerp(selRun.a, selRun.b, 0.7), mul(selRun.normal, selRun.thickness / 2 + 16 / zoom)).y} dy={4 / zoom} fontSize={12 / zoom} textAnchor="middle" fill={ACCENT} stroke="#fff" strokeWidth={3 / zoom} paintOrder="stroke" fontFamily="system-ui, sans-serif" fontWeight={700}>
                   сдвиг {fmtLen(Math.abs(drag.current.offset), unit)}
@@ -1229,6 +1357,15 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           )}
         </g>
       </svg>
+      {/* набранная длина следующей стены */}
+      {typed && cursor && tool === 'wall' && draft.length > 0 && (
+        <div className="pl-typed" style={{ left: view.x + cursor.p.x * zoom + 16, top: view.y + cursor.p.y * zoom + 16 }}>
+          <b>
+            {typed} {UNIT_NAME[unit]}
+          </b>
+          <span>{typedPt ? 'Enter — поставить' : 'наведите, куда вести'}</span>
+        </div>
+      )}
       {/* размер стороны комнаты: число и какую стену двигать */}
       {sideEdit &&
         (() => {

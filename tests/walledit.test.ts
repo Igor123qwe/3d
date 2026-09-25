@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { closeGaps, deleteRun, findGaps, guardLocks, normalizeWalls, pushRun, runSection, setAllLocked, setRoomSide, setRunLength, setRunLocked, touchesLocked, wallRun } from '../src/planner/walledit'
+import { closeGaps, deleteRun, deleteSection, findGaps, guardLocks, movedSection, normalizeWalls, pushRun, runSection, setAllLocked, setRoomSide, setRunLength, setRunLocked, touchesLocked, wallRun } from '../src/planner/walledit'
 import { buildRooms } from '../src/planner/rooms'
 import { emptyPlan, type Plan, type Wall } from '../src/planner/types'
 
@@ -94,6 +94,55 @@ describe('правка стен как в The Sims', () => {
     const p = deleteRun(twoRooms(), 'mid')
     expect(roomsOf(p)).toEqual([[800, 400]])
     expect(p.walls).toHaveLength(4)
+  })
+
+  it('выдвинутый участок находится после сдвига — на него переходит выделение; для всей прямой Т-стык в середине не мешает', () => {
+    const p0 = twoRooms()
+    const run = wallRun(p0.walls, 'top1')!
+    const p = pushRun(p0, 'top1', -60, { lo: 0, hi: 400 })
+    const w = movedSection(p.walls, run, 0, 400, -60)!
+    expect(Math.abs(w.a.y - w.b.y)).toBeLessThan(0.01)
+    expect(Math.abs(w.a.y)).toBeCloseTo(60, 5)
+    expect(Math.abs(w.b.x - w.a.x)).toBeCloseTo(400, 5)
+    // вся прямая: в её середине (x = 400) стоит перегородка, берётся кусок верха
+    const q = pushRun(p0, 'top1', -30)
+    const top = movedSection(q.walls, run, 0, 800, -30)!
+    expect(top.a.y).toBeCloseTo(top.b.y, 5)
+  })
+
+  describe('удалить часть стены', () => {
+    it('участок низа до перегородки — левая комната раскрылась, правая цела, правый кусок низа на месте', () => {
+      const p0 = twoRooms()
+      const run = wallRun(p0.walls, 'bottom')!
+      const part = runSection(p0.walls, run, { x: 200, y: 400 })
+      expect(part).toEqual({ lo: 0, hi: 400 })
+      const p = deleteSection(p0, 'bottom', part.lo, part.hi)
+      expect(roomsOf(p)).toEqual([[400, 400]])
+      const low = p.walls.filter((x) => Math.abs(x.a.y - 400) < 0.01 && Math.abs(x.b.y - 400) < 0.01)
+      expect(low).toHaveLength(1)
+      expect(Math.min(low[0].a.x, low[0].b.x)).toBeCloseTo(400, 5)
+      expect(Math.max(low[0].a.x, low[0].b.x)).toBeCloseTo(800, 5)
+    })
+
+    it('дверь на удалённом участке уходит, на оставшемся — стоит где стояла', () => {
+      const p0: Plan = {
+        ...twoRooms(),
+        openings: [
+          { id: 'gone', kind: 'door', wallId: 'bottom', t: 0.25, width: 80, hinge: 'a', side: 1 },
+          { id: 'kept', kind: 'door', wallId: 'bottom', t: 0.75, width: 80, hinge: 'a', side: 1 },
+        ],
+      }
+      const p = deleteSection(p0, 'bottom', 0, 400)
+      expect(p.openings.map((o) => o.id)).toEqual(['kept'])
+      const o = p.openings[0]
+      const host = p.walls.find((x) => x.id === o.wallId)!
+      expect(host.a.x + (host.b.x - host.a.x) * o.t).toBeCloseTo(600, 5)
+    })
+
+    it('зафиксированную стену по частям не удалить', () => {
+      const p0 = setRunLocked(twoRooms(), 'bottom', true)
+      expect(touchesLocked(p0, deleteSection(p0, 'bottom', 0, 400))).toBe(true)
+    })
   })
 
   describe('размер комнаты цифрой', () => {

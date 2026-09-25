@@ -12,7 +12,7 @@
 // длины уходит, наложенные стены сливаются.
 import type { Opening, Plan, Pt, Wall } from './types'
 import { uid } from './types'
-import { add, cross, dist, dot, lerp, mul, norm, perp, sub } from './geometry'
+import { add, cross, dist, dot, lerp, mul, norm, perp, pointSegDist, sub } from './geometry'
 import { cleanupWalls, MIN_WALL_LENGTH } from './ops'
 
 /** конец стены лежит на прямой, если отстоит от неё не дальше, см */
@@ -130,23 +130,11 @@ function reassignOpenings(openings: Opening[], from: Wall, pieces: Wall[]): Open
   })
 }
 
-/**
- * Сдвинуть прямую стену поперёк себя на offset см. Примыкающие стены
- * (в том числе Т-стыки посреди прямой) тянутся за ней. part — только участок
- * [lo, hi] вдоль прямой: он выдвигается, по краям встают перемычки
- */
-export function pushRun(plan: Plan, id: string, offset: number, part?: { lo: number; hi: number }): Plan {
-  const run = wallRun(plan.walls, id)
-  if (!run || Math.abs(offset) < 0.01) return plan
-  const L = dist(run.a, run.b)
-  const shift = mul(run.normal, offset)
-  const lo = part ? Math.max(0, part.lo) : 0
-  const hi = part ? Math.min(L, part.hi) : L
-  const whole = lo <= ON && hi >= L - ON
+/** куски прямой, разрезанные по краям участка [lo, hi]; проёмы переезжают на свои куски */
+function cutRun(plan: Plan, run: WallRun, lo: number, hi: number, whole = false): { walls: Wall[]; openings: Opening[]; pieces: Set<string> } {
   const ids = new Set(run.ids)
-  let walls: Wall[] = []
+  const walls: Wall[] = []
   let openings = plan.openings
-  // куски прямой; у участка они режутся по его краям
   const pieces = new Set<string>()
   for (const w of plan.walls) {
     if (!ids.has(w.id)) {
@@ -162,14 +150,52 @@ export function pushRun(plan: Plan, id: string, offset: number, part?: { lo: num
       continue
     }
     const pts = [w.a, ...cuts.map((c) => add(run.a, mul(run.dir, c))), w.b]
-    const cut = pts.slice(1).map((p, k) => ({ ...w, id: k === 0 ? w.id : uid('w'), a: pts[k], b: p }))
-    openings = reassignOpenings(openings, w, cut)
-    for (const c of cut) pieces.add(c.id)
-    walls.push(...cut)
+    const parts = pts.slice(1).map((p, k) => ({ ...w, id: k === 0 ? w.id : uid('w'), a: pts[k], b: p }))
+    openings = reassignOpenings(openings, w, parts)
+    for (const c of parts) pieces.add(c.id)
+    walls.push(...parts)
   }
+  return { walls, openings, pieces }
+}
+
+/** середина куска внутри участка [lo, hi] прямой */
+const inPart = (w: Wall, run: WallRun, lo: number, hi: number) => {
+  const m = along(lerp(w.a, w.b, 0.5), run.a, run.dir)
+  return m > lo && m < hi
+}
+
+/**
+ * Удалить часть прямой: участок [lo, hi] (вдоль неё от начала). Как ластик
+ * стены в The Sims: остальная прямая остаётся на месте
+ */
+export function deleteSection(plan: Plan, id: string, lo: number, hi: number): Plan {
+  const run = wallRun(plan.walls, id)
+  if (!run || hi - lo < 1) return plan
+  const cut = cutRun(plan, run, lo, hi)
+  const walls = cut.walls.filter((w) => !(cut.pieces.has(w.id) && inPart(w, run, lo, hi)))
+  return normalizeWalls(cleanupWalls({ ...plan, walls, openings: cut.openings }))
+}
+
+/**
+ * Сдвинуть прямую стену поперёк себя на offset см. Примыкающие стены
+ * (в том числе Т-стыки посреди прямой) тянутся за ней. part — только участок
+ * [lo, hi] вдоль прямой: он выдвигается, по краям встают перемычки
+ */
+export function pushRun(plan: Plan, id: string, offset: number, part?: { lo: number; hi: number }): Plan {
+  const run = wallRun(plan.walls, id)
+  if (!run || Math.abs(offset) < 0.01) return plan
+  const L = dist(run.a, run.b)
+  const shift = mul(run.normal, offset)
+  const lo = part ? Math.max(0, part.lo) : 0
+  const hi = part ? Math.min(L, part.hi) : L
+  const whole = lo <= ON && hi >= L - ON
+  const cut = cutRun(plan, run, lo, hi, whole)
+  let walls = cut.walls
+  const openings = cut.openings
+  const pieces = cut.pieces
   // едут куски внутри участка и концы чужих стен, что держатся за него; на
   // самих краях участка концы стоят — там встают перемычки
-  const moving = new Set(walls.filter((w) => pieces.has(w.id) && ((m) => m > lo && m < hi)(along(lerp(w.a, w.b, 0.5), run.a, run.dir))).map((w) => w.id))
+  const moving = new Set(walls.filter((w) => pieces.has(w.id) && inPart(w, run, lo, hi)).map((w) => w.id))
   const ends = attachedEnds(walls, { ...run, ids: [...pieces] }, lo, hi).filter((e) => whole || (e.t > lo + ON && e.t < hi - ON))
   walls = walls.map((w) => {
     if (moving.has(w.id)) return { ...w, a: add(w.a, shift), b: add(w.b, shift) }
@@ -188,6 +214,18 @@ export function pushRun(plan: Plan, id: string, offset: number, part?: { lo: num
     }
   }
   return normalizeWalls({ ...plan, walls, openings })
+}
+
+/**
+ * Где оказался участок [lo, hi] прямой после сдвига на offset: стена, что
+ * проходит через его середину. После сдвига участка выделение переходит
+ * на него — следующий сдвиг двигает уже его
+ */
+export function movedSection(walls: Wall[], run: WallRun, lo: number, hi: number, offset: number): Wall | undefined {
+  const [p, q] = runSpan(run, lo, hi)
+  const m = add(lerp(p, q, 0.5), mul(run.normal, offset))
+  // только вдоль прямой: в середине может стоять Т-стык поперечной стены
+  return walls.find((w) => pointSegDist(m, w.a, w.b) < 0.5 && Math.abs(cross(norm(sub(w.b, w.a)), run.dir)) < 0.01)
 }
 
 /**

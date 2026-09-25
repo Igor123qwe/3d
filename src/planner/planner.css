@@ -1514,3 +1514,28 @@
 .pl-side-edit-note {
   color: #6b7280;
 }
+
+/* длина следующей стены, набранная цифрами */
+.pl-typed {
+  position: absolute;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 8px;
+  background: #fff;
+  border: 1px solid var(--pl-accent, #2563eb);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.15);
+  font-size: 13px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.pl-typed b {
+  color: var(--pl-accent, #2563eb);
+  font-variant-numeric: tabular-nums;
+}
+.pl-typed span {
+  font-size: 11px;
+  color: #6b7280;
+}

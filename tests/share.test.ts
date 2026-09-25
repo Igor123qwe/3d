@@ -66,6 +66,16 @@ describe('нормализация плана из файла', () => {
     expect(p.openings.map((o) => o.id)).toEqual(['o1'])
   })
 
+  it('замок стены переживает загрузку, мусор вместо замка — нет', () => {
+    const p = normalizePlan({
+      walls: [
+        { id: 'w1', a: { x: 0, y: 0 }, b: { x: 100, y: 0 }, thickness: 10, locked: true },
+        { id: 'w2', a: { x: 0, y: 0 }, b: { x: 0, y: 100 }, thickness: 10, locked: 'да' },
+      ] as never,
+    })
+    expect(p.walls.map((w) => !!w.locked)).toEqual([true, false])
+  })
+
   it('нулевые и нечисловые габариты предмета заменяются разумными', () => {
     const p = normalizePlan({ furniture: [{ id: 'f', type: 'box', x: 0, y: 0, w: 0, d: Number.NaN, rot: 'нет' }] as never })
     expect(p.furniture[0].w).toBeGreaterThan(0)

@@ -91,7 +91,10 @@ export function normalizePlan(p: Partial<Plan>): Plan {
     const a = pt(w?.a)
     const b = pt(w?.b)
     if (!a || !b) return null
-    return { id: typeof w.id === 'string' ? w.id : `w${i}`, a, b, thickness: Math.max(1, num(w.thickness, 10)) }
+    const wall: Plan['walls'][number] = { id: typeof w.id === 'string' ? w.id : `w${i}`, a, b, thickness: Math.max(1, num(w.thickness, 10)) }
+    // замок переживает перезагрузку и файл проекта
+    if (w.locked === true) wall.locked = true
+    return wall
   })
   const wallIds = new Set(walls.map((w) => w.id))
   return {
