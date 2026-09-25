@@ -8,7 +8,7 @@ import { openingGeom, type CheckResult } from './checks'
 import { Glyph } from './Glyph'
 import { ACCENT, Scene, planBounds, ptsAttr, sortedFurniture, wallPolygon } from './Scene'
 import { snapFurniture, snapOpening, snapWallPoint, type Guide } from './snapping'
-import { deleteRun, pushRun, runSection, runSpan, stretchRun, wallRun, type WallRun } from './walledit'
+import { deleteRun, pushRun, runSection, runSpan, setRoomSide, stretchRun, touchesLocked, wallAtCorner, wallRun, type WallRun } from './walledit'
 import { buildRooms } from './rooms'
 import {
   addDim,
@@ -105,8 +105,8 @@ type Drag =
   | { kind: 'rotate'; id: string; plan0: Plan }
   | { kind: 'resize'; id: string; plan0: Plan; item0: Furniture }
   | { kind: 'node'; from: Pt; plan0: Plan }
-  | { kind: 'wall'; id: string; plan0: Plan; start: Pt; run: WallRun; part?: { lo: number; hi: number }; offset: number; last?: Plan }
-  | { kind: 'stretch'; id: string; plan0: Plan; end: 'a' | 'b'; from: Pt; dirOut: Pt; delta: number; last?: Plan }
+  | { kind: 'wall'; id: string; plan0: Plan; start: Pt; run: WallRun; part?: { lo: number; hi: number }; offset: number; last?: Plan; warned?: boolean }
+  | { kind: 'stretch'; id: string; plan0: Plan; end: 'a' | 'b'; from: Pt; dirOut: Pt; delta: number; last?: Plan; warned?: boolean }
   | { kind: 'opening'; id: string; plan0: Plan }
   | { kind: 'dim'; id: string; plan0: Plan; dim0: DimensionLine }
   | { kind: 'underlay'; start: Pt; plan0: Plan }
@@ -137,6 +137,9 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   useEffect(() => setCornerPts([]), [tool])
   const [hover, setHover] = useState<Selection>(null)
   const [hoverPart, setHoverPart] = useState<{ id: string; lo: number; hi: number } | null>(null)
+  /** правка размера стороны комнаты: щелчок по подписи «230 см» */
+  const [sideEdit, setSideEdit] = useState<{ a: Pt; b: Pt; value: string; end: 'a' | 'b'; at: Pt } | null>(null)
+  const [overLabel, setOverLabel] = useState(false)
   const [ghost, setGhost] = useState<{ x: number; y: number; rot: number } | null>(null)
   const [ghostRot, setGhostRot] = useState(0)
   const [openingGhost, setOpeningGhost] = useState<Opening | null>(null)
@@ -157,6 +160,22 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   const grid = plan.settings.grid
   const wallMap = useMemo(() => new Map(plan.walls.map((w) => [w.id, w])), [plan.walls])
   const ordered = useMemo(() => sortedFurniture(plan), [plan])
+  // подписи сторон комнат — там же, где их рисует Scene: по щелчку их можно править
+  const sideLabels = useMemo(
+    () =>
+      rooms.flatMap((r) =>
+        r.inner.flatMap((a, i) => {
+          const b = r.inner[(i + 1) % r.inner.length]
+          const L = dist(a, b)
+          if (L < 30) return []
+          const n = perp(norm(sub(b, a)))
+          const m = lerp(a, b, 0.5)
+          const s = pointInPoly(add(m, mul(n, 4)), r.inner) ? 1 : -1
+          return [{ a, b, L, p: add(m, mul(n, s * (9 / zoom))) }]
+        }),
+      ),
+    [rooms, zoom],
+  )
 
   // ---------- размеры ----------
   useEffect(() => {
@@ -258,7 +277,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
             ? 'Стена: тяните поперёк — сдвинется вся прямая, примыкающие стены потянутся за ней. Alt + тянуть — только участок до ближайших стыков (ниша, выступ). Кружок на конце — длина. Del — удалить прямую'
             : selection
               ? 'Перетаскивайте объект. Ручка сверху — поворот, уголок — размер. Del — удалить, R — повернуть на 90°, Ctrl+D — дублировать'
-              : 'Клик — выбрать объект, стену или комнату. Перетаскивание пустого места — сдвиг, колесо — масштаб'
+              : 'Клик — выбрать объект, стену или комнату. Щелчок по размеру комнаты — ввести точное число. Перетаскивание пустого места — сдвиг, колесо — масштаб'
         break
       case 'wall':
         text = draft.length
@@ -527,8 +546,56 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     drag.current = { kind: 'maybe', sx: e.clientX, sy: e.clientY, view0: viewRef.current }
   }
 
+  /** стена за углом стороны комнаты (end — a или b) */
+  const cornerWall = (a: Pt, b: Pt, end: 'a' | 'b') => {
+    const d = norm(sub(b, a))
+    return wallAtCorner(planRef.current.walls, end === 'b' ? b : a, end === 'b' ? d : mul(d, -1))
+  }
+  /** По умолчанию двигается стена покороче (задевает меньше чертежа) и не зафиксированная */
+  const sideDefaultEnd = (a: Pt, b: Pt): 'a' | 'b' => {
+    const score = (end: 'a' | 'b') => {
+      const w = cornerWall(a, b, end)
+      if (!w) return Infinity
+      const run = wallRun(planRef.current.walls, w.id)
+      return (w.locked ? 1e6 : 0) + (run ? dist(run.a, run.b) : 0)
+    }
+    return score('a') < score('b') ? 'a' : 'b'
+  }
+  const applySide = () => {
+    if (!sideEdit) return
+    const v = Number(sideEdit.value.replace(',', '.'))
+    const before = planRef.current
+    const next = setRoomSide(before, sideEdit.a, sideEdit.b, v, sideEdit.end)
+    if (touchesLocked(before, next)) {
+      onNotice?.('Эта правка задевает зафиксированную стену — снимите замок (кнопка «Замок» слева или в свойствах стены)')
+      return
+    }
+    if (next === before && Math.abs(v - dist(sideEdit.a, sideEdit.b)) >= 0.5) {
+      onNotice?.('За этим углом не нашлось стены поперёк — потяните стену мышью')
+      return
+    }
+    if (next !== before) {
+      history.apply(() => next)
+      const lost = buildRooms(before).rooms.length - buildRooms(next).rooms.length
+      if (lost > 0) onNotice?.('Контур комнаты разомкнулся — Ctrl+Z вернёт как было')
+    }
+    setSideEdit(null)
+  }
+
   const downSelect = (raw: Pt, e: React.PointerEvent) => {
     const z = viewRef.current.zoom
+    // щелчок по размеру комнаты — ввести число; двигается стена за одним из углов
+    if (layers.dims && !e.shiftKey && !e.altKey) {
+      const lab = sideLabels.find((l) => {
+        const d = norm(sub(l.b, l.a))
+        const v = sub(raw, l.p)
+        return Math.abs(dot(v, d)) <= 22 / z && Math.abs(dot(v, perp(d))) <= 8 / z
+      })
+      if (lab) {
+        setSideEdit({ a: lab.a, b: lab.b, value: String(Math.round(lab.L)), end: sideDefaultEnd(lab.a, lab.b), at: lab.p })
+        return
+      }
+    }
     if (selection?.kind === 'furniture') {
       const f = plan.furniture.find((x) => x.id === selection.id)
       const cat = f ? CATALOG_MAP[f.type] : undefined
@@ -612,6 +679,16 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       if (tool === 'select') {
         const h = hitTest(raw)
         setHover((prev) => (sameSel(prev, h) ? prev : h))
+        // над подписью размера комнаты — курсор-рука: по ней можно щёлкнуть и ввести число
+        const z = viewRef.current.zoom
+        const onLabel =
+          layers.dims &&
+          sideLabels.some((l) => {
+            const d = norm(sub(l.b, l.a))
+            const v = sub(raw, l.p)
+            return Math.abs(dot(v, d)) <= 22 / z && Math.abs(dot(v, perp(d))) <= 8 / z
+          })
+        setOverLabel((prev) => (prev === onLabel ? prev : onLabel))
         // с Alt над стеной подсвечивается участок, который выдвинется
         if (h?.kind === 'wall' && e.altKey) {
           const run = wallRun(plan.walls, h.id)
@@ -678,7 +755,9 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       case 'node': {
         const s = snapWallPoint(raw, d.plan0.walls, { grid, tol, ortho: false, exclude: (p) => eq(p, d.from, 0.75), lines: imageLines })
         setGuides(s.guides)
-        history.preview(moveNodes(d.plan0, [{ from: d.from, to: s.p }]))
+        const next = moveNodes(d.plan0, [{ from: d.from, to: s.p }])
+        if (touchesLocked(d.plan0, next)) return
+        history.preview(next)
         return
       }
       case 'wall': {
@@ -699,14 +778,27 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           }
         }
         d.offset = off
-        d.last = pushRun(d.plan0, d.id, off, d.part)
+        const next = pushRun(d.plan0, d.id, off, d.part)
+        // зафиксированную стену правка не трогает — ни сдвигом, ни растяжкой
+        if (touchesLocked(d.plan0, next)) {
+          if (!d.warned) onNotice?.('Стена зафиксирована (или держится за зафиксированную) — снимите замок, чтобы двигать')
+          d.warned = true
+          return
+        }
+        d.last = next
         history.preview(d.last)
         return
       }
       case 'stretch': {
         const want = dot(sub(raw, d.from), d.dirOut)
         d.delta = e.shiftKey ? want : roundTo(want, grid || 1)
-        d.last = stretchRun(d.plan0, d.id, d.end, d.delta)
+        const next = stretchRun(d.plan0, d.id, d.end, d.delta)
+        if (touchesLocked(d.plan0, next)) {
+          if (!d.warned) onNotice?.('Стена зафиксирована (или держится за зафиксированную) — снимите замок, чтобы менять длину')
+          d.warned = true
+          return
+        }
+        d.last = next
         history.preview(d.last)
         return
       }
@@ -810,7 +902,8 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         return
       }
       if (e.key === 'Escape') {
-        if (draftRef.current.length) finishDraft()
+        if (sideEdit) setSideEdit(null)
+        else if (draftRef.current.length) finishDraft()
         else if (dimStart) setDimStart(null)
         else if (measure) setMeasure(null)
         else if (cornerPts.length) setCornerPts([])
@@ -838,6 +931,10 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         // комната — следствие контура стен, удалять в ней нечего
         if (selection.kind === 'room') return
         // стена — прямая целиком: удаляется то, что подсвечено
+        if (selection.kind === 'wall' && touchesLocked(planRef.current, deleteRun(planRef.current, selection.id))) {
+          onNotice?.('Стена зафиксирована — снимите замок, чтобы удалить')
+          return
+        }
         history.apply((pl) => (selection.kind === 'wall' ? deleteRun(pl, selection.id) : deleteSelection(pl, selection)))
         onSelect(null)
         return
@@ -880,7 +977,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
 
   // ---------- отрисовка ----------
   const drawing = tool !== 'select'
-  const cursorStyle = panning ? 'grabbing' : drawing ? 'crosshair' : hover?.kind === 'furniture' || hover?.kind === 'opening' ? 'move' : hover?.kind === 'wall' ? 'pointer' : 'default'
+  const cursorStyle = panning ? 'grabbing' : drawing ? 'crosshair' : overLabel && tool === 'select' ? 'pointer' : hover?.kind === 'furniture' || hover?.kind === 'opening' ? 'move' : hover?.kind === 'wall' ? 'pointer' : 'default'
   const minor = 50 * zoom
   const major = 100 * zoom
   const draftWalls = draft.slice(1).map((p, i) => ({ id: `d${i}`, a: draft[i], b: p, thickness: wallThickness }))
@@ -888,6 +985,13 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   const selFurn = selection?.kind === 'furniture' ? plan.furniture.find((f) => f.id === selection.id) : undefined
   const selCat = selFurn ? CATALOG_MAP[selFurn.type] : undefined
   const selRun = selection?.kind === 'wall' ? wallRun(plan.walls, selection.id) : null
+  // зафиксированные прямые — по одной на прямую, для значка замка
+  const lockedRuns: WallRun[] = []
+  for (const w of plan.walls) {
+    if (!w.locked || lockedRuns.some((r) => r.ids.includes(w.id))) continue
+    const r = wallRun(plan.walls, w.id)
+    if (r && dist(r.a, r.b) * zoom > 30) lockedRuns.push(r)
+  }
   const hoverRun = hover?.kind === 'wall' ? wallRun(plan.walls, hover.id) : null
   /** полоса прямой [lo, hi] во всю толщину — подсветка поверх стен */
   const runBand = (run: WallRun, lo: number, hi: number, fill: string, key: string) => {
@@ -1079,6 +1183,19 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
               )
             })()}
 
+          {/* замки на зафиксированных стенах */}
+          {lockedRuns.map((r) => {
+            const m = lerp(r.a, r.b, 0.5)
+            return (
+              <g key={`lock-${r.ids[0]}`} transform={`translate(${m.x} ${m.y}) scale(${1 / zoom})`} pointerEvents="none">
+                <circle r={9} fill="#fff" stroke="#6b7280" strokeWidth={1} />
+                <g transform="translate(-6 -6.5) scale(0.5)" fill="none" stroke="#374151" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="5" y="11" width="14" height="9" rx="2" />
+                  <path d="M8 11V8a4 4 0 0 1 8 0v3" />
+                </g>
+              </g>
+            )
+          })}
           {/* стена под курсором: вся прямая или, с Alt, участок до стыков */}
           {hoverRun && !(selRun && hoverRun.ids.includes(selection!.id)) && (
             hoverPart && hover?.kind === 'wall' && hoverPart.id === hover.id ? runBand(hoverRun, hoverPart.lo, hoverPart.hi, 'rgba(37,99,235,0.35)', 'hover-part') : runBand(hoverRun, 0, dist(hoverRun.a, hoverRun.b), 'rgba(75,85,99,0.55)', 'hover-run')
@@ -1112,6 +1229,50 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           )}
         </g>
       </svg>
+      {/* размер стороны комнаты: число и какую стену двигать */}
+      {sideEdit &&
+        (() => {
+          const horizontal = Math.abs(sideEdit.b.x - sideEdit.a.x) >= Math.abs(sideEdit.b.y - sideEdit.a.y)
+          const first: 'a' | 'b' = horizontal ? (sideEdit.a.x <= sideEdit.b.x ? 'a' : 'b') : sideEdit.a.y <= sideEdit.b.y ? 'a' : 'b'
+          const ends: ('a' | 'b')[] = [first, first === 'a' ? 'b' : 'a']
+          const names = horizontal ? ['◀ левую', 'правую ▶'] : ['▲ верхнюю', 'нижнюю ▼']
+          return (
+            <div className="pl-side-edit" style={{ left: view.x + sideEdit.at.x * zoom, top: view.y + sideEdit.at.y * zoom }} onPointerDown={(e) => e.stopPropagation()}>
+              <div className="pl-side-edit-row">
+                <input
+                  autoFocus
+                  inputMode="decimal"
+                  value={sideEdit.value}
+                  onChange={(e) => setSideEdit({ ...sideEdit, value: e.target.value })}
+                  onKeyDown={(e) => {
+                    e.stopPropagation()
+                    if (e.key === 'Enter') applySide()
+                    if (e.key === 'Escape') setSideEdit(null)
+                  }}
+                />
+                <span>см</span>
+                <button className="pl-btn primary" onClick={applySide}>
+                  OK
+                </button>
+                <button className="pl-btn" onClick={() => setSideEdit(null)} title="Отмена (Esc)">
+                  ✕
+                </button>
+              </div>
+              <div className="pl-side-edit-row">
+                <span className="pl-side-edit-note">двигать</span>
+                {ends.map((end, k) => {
+                  const w = cornerWall(sideEdit.a, sideEdit.b, end)
+                  return (
+                    <button key={end} className={`pl-btn ${sideEdit.end === end ? 'active' : ''}`} disabled={!w || !!w.locked} title={!w ? 'за этим углом нет стены' : w.locked ? 'стена зафиксирована' : ''} onClick={() => setSideEdit({ ...sideEdit, end })}>
+                      {names[k]}
+                      {w?.locked ? ' 🔒' : ''}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )
+        })()}
     </div>
   )
 })

@@ -10,6 +10,8 @@ export interface Wall {
   a: Pt
   b: Pt
   thickness: number
+  /** зафиксирована: двигать, растягивать и удалять нельзя, пока не снят замок */
+  locked?: boolean
 }
 
 export type OpeningKind = 'door' | 'window' | 'doorway'

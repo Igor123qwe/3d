@@ -1474,3 +1474,43 @@
 .pl-note-warn b {
   color: #92400e;
 }
+
+/* размер стороны комнаты: поле у подписи «230 см» */
+.pl-side-edit {
+  position: absolute;
+  transform: translate(-50%, -110%);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid var(--pl-border, #d1d5db);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
+  font-size: 13px;
+}
+.pl-side-edit-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.pl-side-edit input {
+  width: 72px;
+  padding: 4px 6px;
+  font: inherit;
+  border: 1px solid var(--pl-border, #d1d5db);
+  border-radius: 6px;
+}
+.pl-side-edit .pl-btn {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+.pl-side-edit .pl-btn.active {
+  background: var(--pl-accent, #2563eb);
+  border-color: var(--pl-accent, #2563eb);
+  color: #fff;
+}
+.pl-side-edit-note {
+  color: #6b7280;
+}

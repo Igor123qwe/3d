@@ -53,6 +53,8 @@ export type IconName =
   | 'wand'
   | 'corners'
   | 'refine'
+  | 'lock'
+  | 'unlock'
 
 const PATHS: Record<IconName, React.ReactNode> = {
   select: <path d="M5 3l14 8-6 2-3 6z" />,
@@ -276,6 +278,18 @@ const PATHS: Record<IconName, React.ReactNode> = {
     <>
       <rect x="7" y="2" width="10" height="20" rx="2" />
       <path d="M11 18h2" />
+    </>
+  ),
+  lock: (
+    <>
+      <rect x="5" y="11" width="14" height="9" rx="2" />
+      <path d="M8 11V8a4 4 0 0 1 8 0v3" />
+    </>
+  ),
+  unlock: (
+    <>
+      <rect x="5" y="11" width="14" height="9" rx="2" />
+      <path d="M8 11V8a4 4 0 0 1 7.5-2" />
     </>
   ),
   trash: (

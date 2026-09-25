@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { deleteRun, normalizeWalls, pushRun, runSection, setRunLength, wallRun } from '../src/planner/walledit'
+import { deleteRun, guardLocks, normalizeWalls, pushRun, runSection, setAllLocked, setRoomSide, setRunLength, setRunLocked, touchesLocked, wallRun } from '../src/planner/walledit'
 import { buildRooms } from '../src/planner/rooms'
 import { emptyPlan, type Plan, type Wall } from '../src/planner/types'
 
@@ -94,5 +94,55 @@ describe('правка стен как в The Sims', () => {
     const p = deleteRun(twoRooms(), 'mid')
     expect(roomsOf(p)).toEqual([[800, 400]])
     expect(p.walls).toHaveLength(4)
+  })
+
+  describe('размер комнаты цифрой', () => {
+    // левая комната в чистоте: от 5 до 395 по x (стены 10 см)
+    const a = { x: 5, y: 5 }
+    const b = { x: 395, y: 5 }
+
+    it('сторона 390 → 400: двигается перегородка за правым углом, соседняя комната уже', () => {
+      const p = setRoomSide(twoRooms(), a, b, 400, 'b')
+      expect(roomsOf(p)).toEqual([
+        [390, 400],
+        [410, 400],
+      ])
+    })
+
+    it('или наружная стена за левым углом — соседняя комната не тронута', () => {
+      const p = setRoomSide(twoRooms(), a, b, 400, 'a')
+      expect(roomsOf(p)).toEqual([
+        [400, 400],
+        [410, 400],
+      ])
+      expect(p.walls.find((x) => x.id === 'left')!.a.x).toBeCloseTo(-10, 5)
+    })
+  })
+
+  describe('замок', () => {
+    it('зафиксированную перегородку правка не двигает: guardLocks возвращает план как был', () => {
+      const p0 = setRunLocked(twoRooms(), 'mid', true)
+      const moved = setRoomSide(p0, { x: 5, y: 5 }, { x: 395, y: 5 }, 400, 'b')
+      expect(touchesLocked(p0, moved)).toBe(true)
+      expect(guardLocks(p0, moved)).toBe(p0)
+      // другая стена свободна: левая наружная едет
+      const other = setRoomSide(p0, { x: 5, y: 5 }, { x: 395, y: 5 }, 400, 'a')
+      expect(touchesLocked(p0, other)).toBe(false)
+    })
+
+    it('растянуть зафиксированную стену тоже нельзя: верх держит зафиксированные бока', () => {
+      const p0 = setRunLocked(twoRooms(), 'left', true)
+      expect(touchesLocked(p0, pushRun(p0, 'top1', -30))).toBe(true)
+    })
+
+    it('«зафиксировать все» — никакая стена не двигается, склейка зафиксированных не трогает', () => {
+      const p0 = setAllLocked(twoRooms(), true)
+      expect(touchesLocked(p0, pushRun(p0, 'mid', 20))).toBe(true)
+      expect(touchesLocked(p0, deleteRun(p0, 'mid'))).toBe(true)
+      // куски верха без стыка у зафиксированных стен не склеиваются
+      const q = normalizeWalls(setAllLocked({ ...emptyPlan(), walls: [w('a', 0, 0, 300, 0), w('b', 300, 0, 500, 0)] }, true))
+      expect(q.walls).toHaveLength(2)
+      expect(setAllLocked(p0, false).walls.every((x) => !x.locked)).toBe(true)
+    })
   })
 })

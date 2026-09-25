@@ -45,7 +45,7 @@ import type { Guide } from './snapping'
 import { aiStatus, askLayout, askNumbers, askRoomLabel, askSpot, cropForVision, lookupProductViaServer, numberSheet, recognizePlan, type AiCost, type AiStatus, type NumbersResult } from './ai'
 import { applyAiPlan, convertAiPlan, fitResultToLabels, marksFromReads, roomLabelInBox, type ConvertResult } from './planai'
 import { evenWalls, rectifyWalls } from './rectify'
-import { deleteRun, setRunLength, setRunThickness, wallRun } from './walledit'
+import { deleteRun, guardLocks, setAllLocked, setRunLength, setRunLocked, setRunThickness, touchesLocked, wallRun } from './walledit'
 import { pointOnSide } from './reconstruct'
 import { pointOnOutline } from './picture'
 import type { LabelDispute } from './segment'
@@ -1862,6 +1862,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     if (isMobile()) setPanelOpen(false)
   }
 
+  const allWallsLocked = plan.walls.length > 0 && plan.walls.every((w) => w.locked)
   const totalArea = rooms.reduce((s, r) => s + r.area, 0)
   const toggleLayer = (k: keyof Layers) => setLayers((l) => ({ ...l, [k]: !l[k] }))
 
@@ -2015,16 +2016,23 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       // стена — прямая целиком: длина и толщина у всей прямой
       const run = wallRun(plan.walls, w.id)
       const L = run ? dist(run.a, run.b) : dist(w.a, w.b)
+      const locked = !!w.locked
+      // правка, что задела зафиксированную стену, не применяется — и об этом сказано
+      const guarded = (f: (p: Plan) => Plan) => {
+        const next = f(plan)
+        if (touchesLocked(plan, next)) setToast('Правка задевает зафиксированную стену — снимите замок')
+        else history.apply(() => guardLocks(plan, next))
+      }
       return (
         <div>
           <div className="pl-props-title">Стена</div>
           <label className="pl-field">
             <span>Длина, см</span>
-            <NumberField value={Math.round(L)} min={MIN_WALL_LENGTH} step={5} onCommit={(v) => history.apply((p) => setRunLength(p, w.id, v))} />
+            <NumberField value={Math.round(L)} min={MIN_WALL_LENGTH} step={5} onCommit={(v) => guarded((p) => setRunLength(p, w.id, v))} />
           </label>
           <label className="pl-field">
             <span>Толщина, см</span>
-            <select value={w.thickness} onChange={(e) => history.apply((p) => setRunThickness(p, w.id, Number(e.target.value)))}>
+            <select value={w.thickness} disabled={locked} onChange={(e) => guarded((p) => setRunThickness(p, w.id, Number(e.target.value)))}>
               {WALL_THICKNESSES.map((t) => (
                 <option key={t} value={t}>
                   {t}
@@ -2054,9 +2062,20 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             ))}
           </div>
           <button
+            className={`pl-btn ${locked ? 'active' : ''}`}
+            onClick={() => history.apply((p) => setRunLocked(p, w.id, !locked))}
+            title="Зафиксированную стену нельзя сдвинуть, растянуть или удалить, пока не снят замок"
+          >
+            <Icon name={locked ? 'lock' : 'unlock'} size={16} /> {locked ? 'Стена зафиксирована — снять замок' : 'Зафиксировать стену'}
+          </button>
+          <button
             className="pl-btn danger"
             onClick={() => {
               // стена — прямая целиком: удаляется то, что подсвечено
+              if (touchesLocked(plan, deleteRun(plan, w.id))) {
+                setToast('Стена зафиксирована — снимите замок, чтобы удалить')
+                return
+              }
               history.apply((p) => deleteRun(p, w.id))
               setSelection(null)
             }}
@@ -3017,6 +3036,20 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           <span className="pl-tool-name">Мебель</span>
         </button>
         <span className="pl-tools-gap" />
+        <button
+          className={`pl-tool small ${allWallsLocked ? 'active' : ''}`}
+          onClick={() => {
+            history.apply((p) => setAllLocked(p, !allWallsLocked))
+            setToast(allWallsLocked ? 'Стены снова можно двигать' : 'Все стены зафиксированы: двигать можно мебель, двери и окна. Снять — той же кнопкой «Замок»')
+          }}
+          disabled={!plan.walls.length}
+          title="Зафиксировать все стены: настроили размеры — больше их случайно не сдвинуть"
+        >
+          <span className="pl-tool-icon">
+            <Icon name={allWallsLocked ? 'lock' : 'unlock'} size={20} />
+          </span>
+          <span className="pl-tool-name">Замок</span>
+        </button>
         <button className={`pl-tool small ${ortho ? 'active' : ''}`} onClick={() => setOrtho((o) => !o)} title="Рисовать стены только под 0/45/90°">
           <span className="pl-tool-icon">
             <Icon name="ortho" size={20} />

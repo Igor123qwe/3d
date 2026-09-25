@@ -208,6 +208,8 @@ export function normalizeWalls(plan: Plan): Plan {
       const n = perp(d)
       for (let j = i + 1; j < walls.length; j++) {
         const w2 = walls[j]
+        // зафиксированная стена не склеивается: её концы не должны уехать
+        if (w1.locked || w2.locked) continue
         if (!collinear(w2, w1.a, d, n, 0.75)) continue
         const t = [0, along(w1.b, w1.a, d), along(w2.a, w1.a, d), along(w2.b, w1.a, d)]
         const lo1 = Math.min(t[0], t[1])
@@ -297,4 +299,79 @@ export function setRunThickness(plan: Plan, id: string, thickness: number): Plan
   if (!run) return plan
   const ids = new Set(run.ids)
   return normalizeWalls({ ...plan, walls: plan.walls.map((w) => (ids.has(w.id) ? { ...w, thickness } : w)) })
+}
+
+// ---------- замок ----------
+
+/**
+ * Правка задела зафиксированную стену: сдвинула, растянула, изменила
+ * толщину или убрала её. Такая правка не применяется
+ */
+export function touchesLocked(before: Plan, after: Plan): boolean {
+  if (before === after) return false
+  const next = new Map(after.walls.map((w) => [w.id, w]))
+  return before.walls.some((w) => {
+    if (!w.locked) return false
+    const v = next.get(w.id)
+    return !v || dist(v.a, w.a) > 0.01 || dist(v.b, w.b) > 0.01 || v.thickness !== w.thickness
+  })
+}
+
+/** Правка, но не в обход замка: задела зафиксированную стену — план как был */
+export function guardLocks(before: Plan, after: Plan): Plan {
+  return touchesLocked(before, after) ? before : after
+}
+
+/** Зафиксировать или освободить прямую стену целиком */
+export function setRunLocked(plan: Plan, id: string, locked: boolean): Plan {
+  const run = wallRun(plan.walls, id)
+  if (!run) return plan
+  const ids = new Set(run.ids)
+  return { ...plan, walls: plan.walls.map((w) => (ids.has(w.id) ? { ...w, locked: locked || undefined } : w)) }
+}
+
+/** Зафиксировать или освободить все стены разом */
+export function setAllLocked(plan: Plan, locked: boolean): Plan {
+  return { ...plan, walls: plan.walls.map((w) => ({ ...w, locked: locked || undefined })) }
+}
+
+// ---------- размер комнаты цифрой ----------
+
+/**
+ * Стена за углом комнаты: поперёк стороны, её грань проходит через угол, а
+ * сама она лежит дальше угла по направлению out
+ */
+export function wallAtCorner(walls: Wall[], corner: Pt, out: Pt): Wall | null {
+  let best: { w: Wall; err: number } | null = null
+  for (const w of walls) {
+    const L = dist(w.a, w.b)
+    if (L < 1) continue
+    const v = norm(sub(w.b, w.a))
+    if (Math.abs(dot(v, out)) > 0.1) continue
+    // ось стены — на полтолщины дальше угла
+    const err = Math.abs(dot(sub(w.a, corner), out) - w.thickness / 2)
+    if (err > Math.max(2, w.thickness / 4)) continue
+    const t = dot(sub(corner, w.a), v)
+    if (t < -w.thickness || t > L + w.thickness) continue
+    if (!best || err < best.err) best = { w, err }
+  }
+  return best?.w ?? null
+}
+
+/**
+ * Сторона комнаты a→b (по внутренним граням) — ровно length см: сдвигается
+ * стена за углом end, целиком, поперёк себя; соседние стены тянутся за ней.
+ * Как в Planner 5D и RoomSketcher — щелчок по размеру и число, — но
+ * двигается именно та стена, что нужна, а не вся длинная прямая
+ */
+export function setRoomSide(plan: Plan, a: Pt, b: Pt, length: number, end: 'a' | 'b'): Plan {
+  const L = dist(a, b)
+  if (!Number.isFinite(length) || length < 1 || L < 1 || Math.abs(length - L) < 0.01) return plan
+  const d = norm(sub(b, a))
+  const out = end === 'b' ? d : mul(d, -1)
+  const w = wallAtCorner(plan.walls, end === 'b' ? b : a, out)
+  if (!w) return plan
+  const run = wallRun(plan.walls, w.id)
+  if (!run) return plan
+  return pushRun(plan, w.id, (length - L) * dot(out, run.normal))
 }
