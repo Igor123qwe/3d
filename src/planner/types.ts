@@ -79,11 +79,44 @@ export type ElectricKind =
   | 'curtain-motor'
   | 'panel'
 
+/**
+ * Что питает розетка: от этого её линия в щите, автомат, сечение кабеля и
+ * мощность. general — розетка общего назначения, counter — над столешницей,
+ * остальное — техника на своей линии
+ */
+export type Feed =
+  | 'general'
+  | 'counter'
+  | 'tv'
+  | 'fridge'
+  | 'dishwasher'
+  | 'oven'
+  | 'cooktop'
+  | 'hood'
+  | 'washer'
+  | 'boiler'
+  | 'ac'
+  | 'floor-heating'
+
 /** Точка электрики: вид прибора, высота установки над полом и причина размещения */
 export interface ElectricPoint {
   kind: ElectricKind
   why: string
   height: number
+  /** что питает розетка; нет — розетка общего назначения */
+  feeds?: Feed
+  /** мощность потребителя, Вт; нет — по виду и назначению */
+  power?: number
+}
+
+/** Исходные данные проекта электрики */
+export interface ElectricSettings {
+  /** выделенная мощность на квартиру, кВт — от неё вводной автомат */
+  allottedKw: number
+  /** плита: электрическая — силовая линия 32 А; газовая — розетки не ближе 50 см */
+  stove: 'electric' | 'gas'
+  /** высота потолка, см: трасса идёт по потолку, в 15 см от него */
+  ceiling: number
 }
 
 /** Товар из магазина, поставленный в план по ссылке */
@@ -159,6 +192,8 @@ export interface Plan {
   dims: DimensionLine[]
   settings: PlanSettings
   underlay?: Underlay
+  /** исходные данные проекта электрики */
+  electric?: ElectricSettings
 }
 
 /** Комната, найденная по замкнутому контуру стен */

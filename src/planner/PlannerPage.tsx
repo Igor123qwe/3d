@@ -8,7 +8,7 @@ import { PlannerCanvas, type CanvasHandle, type View } from './PlannerCanvas'
 import { Scene, planBounds } from './Scene'
 import { Glyph } from './Glyph'
 import { TEMPLATES } from './templates'
-import { downloadJson, downloadPng, downloadSvg, normalizePlan, readPlanFile } from './exporters'
+import { downloadCsv, downloadJson, downloadPng, downloadSvg, normalizePlan, readPlanFile } from './exporters'
 import type { Area } from './ops'
 import {
   addOpening,
@@ -54,17 +54,9 @@ import type { AiBox, AiMark, AiPlan, AiRoomLabel } from './aicontract'
 import { checkAiPlan, sizeFromText } from './aicontract'
 import { furnish, type FurnishOptions } from './furnish'
 import { FurnishDialog } from './FurnishDialog'
-import {
-  DEFAULT_AUTO,
-  ELECTRIC_NAMES,
-  MOUNT_HEIGHT,
-  autoElectrics,
-  cableEstimate,
-  catalogTypeOf,
-  electricSpec,
-  type AutoElectricOptions,
-} from './electrics'
-import type { ElectricKind, ProductRef } from './types'
+import { DEFAULT_AUTO, DEFAULT_ELECTRIC, ELECTRIC_NAMES, FEED_HEIGHT, FEED_NAMES, MOUNT_HEIGHT, autoElectrics, catalogTypeOf, type AutoElectricOptions } from './electrics'
+import { designCsv, designElectrics, feedOf, powerOf } from './electricplan'
+import type { ElectricKind, ElectricSettings, Feed, ProductRef } from './types'
 import { fetchProduct, formatPrice, typeForProduct, type ProductInfo } from './products'
 import { modelKey } from './polyhaven'
 import { Icon, type IconName } from './icons'
@@ -317,7 +309,10 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const [aiBusy, setAiBusy] = useState('')
   /** что и сколько стоил последний вызов — чтобы расходы не были сюрпризом */
   const [aiLast, setAiLast] = useState('')
-  const [auto, setAuto] = useState<AutoElectricOptions>(DEFAULT_AUTO)
+  const [auto, setAuto] = useState<AutoElectricOptions>({ ...DEFAULT_AUTO, panel: true })
+  /** вкладка проекта электрики и подсвеченная группа щита */
+  const [elTab, setElTab] = useState<'panel' | 'bom' | 'norms' | 'add'>('panel')
+  const [hlCircuit, setHlCircuit] = useState<string | null>(null)
   const [productUrl, setProductUrl] = useState('')
   const [product, setProduct] = useState<ProductInfo | null>(null)
   const [productState, setProductState] = useState<'idle' | 'loading' | 'error'>('idle')
@@ -1846,15 +1841,17 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   }
 
   const electricItems = plan.furniture.filter((f) => f.electric)
-  const spec = useMemo(() => electricSpec(plan, rooms), [plan, rooms])
-  const cable = useMemo(() => cableEstimate(plan, rooms), [plan, rooms])
+  const electricSettings = plan.electric ?? DEFAULT_ELECTRIC
+  // проект электрики: группы, трассы, ведомость и нормы — заново на каждую правку
+  const design = useMemo(() => designElectrics(plan, rooms, electricSettings), [plan, rooms, electricSettings])
+  const setElectric = (patch: Partial<ElectricSettings>) => history.apply((p) => ({ ...p, electric: { ...(p.electric ?? DEFAULT_ELECTRIC), ...patch } }))
 
   const runAutoElectrics = () => {
     if (!rooms.length) {
       setToast('Сначала нарисуйте стены: электрика раскладывается по комнатам')
       return
     }
-    const items = autoElectrics(plan, rooms, auto)
+    const items = autoElectrics(plan, rooms, auto, electricSettings)
     if (!items.length) {
       setToast('Нечего ставить: включите хотя бы одно правило')
       return
@@ -1864,7 +1861,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     history.apply((p) => ({ ...p, furniture: [...p.furniture.filter((f) => !f.electric), ...items] }))
     setSelection(null)
     setLayers((l) => ({ ...l, electric: true }))
-    setToast(`Расставлено точек: ${items.length}`)
+    setModeRaw('electric')
+    setElTab('panel')
+    setToast(`Расставлено точек: ${items.length}. Группы щита, кабель и нормы — в панели «Электрика»`)
   }
 
   const clearElectrics = () => {
@@ -2003,11 +2002,61 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
               </div>
             </div>
           )}
-          {f.electric && (
-            <div className="pl-hint-box">
-              ⚡ {ELECTRIC_NAMES[f.electric.kind]}, высота {f.electric.height} см. Причина: {f.electric.why}.
-            </div>
-          )}
+          {f.electric &&
+            (() => {
+              const e = f.electric
+              const updE = (patch: Partial<typeof e>) => upd({ electric: { ...e, ...patch } })
+              const c = design.circuits.find((x) => x.points.some((pt) => pt.id === f.id))
+              const outlet = e.kind === 'outlet' || e.kind === 'smart-outlet'
+              return (
+                <div className="pl-block">
+                  <div className="pl-props-title">⚡ {ELECTRIC_NAMES[e.kind]}</div>
+                  <label className="pl-field">
+                    <span>Высота от пола, см</span>
+                    <NumberField value={e.height} min={0} max={400} step={5} onCommit={(v) => updE({ height: v })} />
+                  </label>
+                  {outlet && (
+                    <label className="pl-field">
+                      <span>Назначение</span>
+                      <select
+                        value={feedOf(f) ?? 'general'}
+                        onChange={(ev) => {
+                          const feeds = ev.target.value as Feed
+                          updE({ feeds: feeds === 'general' ? undefined : feeds, height: FEED_HEIGHT[feeds], power: undefined })
+                        }}
+                      >
+                        {(Object.keys(FEED_NAMES) as Feed[]).filter((k) => k !== 'floor-heating').map((k) => (
+                          <option key={k} value={k}>
+                            {FEED_NAMES[k]}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  {(outlet || e.kind === 'thermostat') && (
+                    <label className="pl-field">
+                      <span>Мощность, Вт</span>
+                      <NumberField value={powerOf(f)} min={0} max={20000} step={100} onCommit={(v) => updE({ power: v })} />
+                    </label>
+                  )}
+                  {c ? (
+                    <div className="pl-hint-box">
+                      <span className="pl-dot" style={{ background: c.color }} /> Группа <b>{c.id}</b> «{c.name}»: {c.device === 'автомат' ? `автомат ${c.breaker}` : `дифавтомат ${c.breaker}, ${c.rcdMa} мА`}, кабель ВВГнг(А)-LS {c.cable}, {c.currentA} А, {c.lengthM} м.
+                    </div>
+                  ) : (
+                    e.kind !== 'panel' && e.kind !== 'leak-sensor' && <div className="pl-note">Не в группе.</div>
+                  )}
+                  <div className="pl-note">Причина: {e.why}</div>
+                  {design.issues
+                    .filter((x) => x.pointId === f.id)
+                    .map((x, k) => (
+                      <div key={k} className={`pl-hint-box ${x.level === 'error' ? 'pl-note-warn' : ''}`}>
+                        {x.level === 'error' ? '⛔' : '⚠️'} {x.text}
+                      </div>
+                    ))}
+                </div>
+              )
+            })()}
           {f.note && <div className="pl-hint-box">✨ {f.note}</div>}
           {cat?.hint && <div className="pl-hint-box">💡 {cat.hint}</div>}
           <div className="pl-block">
@@ -2729,101 +2778,249 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     </div>
   )
 
-  const renderElectric = () => (
-    <div>
-      <div className="pl-props-title">Автоматическая расстановка</div>
-      <div className="pl-note">
-        Точки раскладываются по правилам: розетки у изголовья кровати и дивана, над столешницей и у техники; выключатели — у дверей со стороны ручки;
-        свет — по комнатам. В санузле розетки только для техники.
-      </div>
-      {(
-        [
-          ['outlets', 'Розетки'],
-          ['switches', 'Выключатели'],
-          ['lights', 'Свет'],
-          ['smart', 'Умный дом: умные выключатели, мастер-сценарии, тёплый пол'],
-          ['curtains', 'Электрокарнизы на окна'],
-          ['motion', 'Датчики движения в коридоре и санузле'],
-          ['leak', 'Датчики протечки'],
-          ['panel', 'Щит умного дома'],
-        ] as [keyof AutoElectricOptions, string][]
-      ).map(([k, name]) => (
-        <label key={k} className="pl-field">
-          <span>{name}</span>
-          <input type="checkbox" checked={auto[k]} onChange={() => setAuto((a) => ({ ...a, [k]: !a[k] }))} />
-        </label>
-      ))}
-      <div className="pl-row">
-        <button className="pl-btn active" onClick={runAutoElectrics}>
-          ⚡ Расставить
-        </button>
-        <button className="pl-btn danger" onClick={clearElectrics} disabled={!electricItems.length}>
-          Убрать всю
-        </button>
-      </div>
-
-      <div className="pl-block">
-        <div className="pl-props-title">Поставить вручную</div>
-        {[...new Set(ELECTRIC_MENU.map((m) => m.group))].map((group) => (
-          <div key={group}>
-            <div className="pl-note">{group}</div>
-            <div className="pl-chips">
-              {ELECTRIC_MENU.filter((m) => m.group === group).map((m) => (
-                <button
-                  key={m.kind}
-                  className={`pl-chip ${placing?.electric?.kind === m.kind ? 'active' : ''}`}
-                  onClick={() => pickElectric(m.kind, m.why)}
-                  title={`${m.why}, высота ${MOUNT_HEIGHT[m.kind]} см`}
-                >
-                  {ELECTRIC_NAMES[m.kind]}
-                </button>
-              ))}
-            </div>
+  const renderElectric = () => {
+    const d = design
+    const errors = d.issues.filter((x) => x.level === 'error').length
+    return (
+      <div>
+        <div className="pl-props-title">Проект электрики</div>
+        <div className="pl-stats">
+          <div>
+            <b>{electricItems.length}</b>
+            <span>точек</span>
           </div>
-        ))}
-      </div>
+          <div>
+            <b>{d.circuits.length}</b>
+            <span>групп в щите</span>
+          </div>
+          <div>
+            <b>{d.cable.reduce((s2, c) => s2 + c.meters, 0)} м</b>
+            <span>кабеля</span>
+          </div>
+          <div className={d.demandKw > electricSettings.allottedKw ? 'bad' : ''}>
+            <b>
+              {d.demandKw} / {electricSettings.allottedKw}
+            </b>
+            <span>кВт расчёт / выделено</span>
+          </div>
+        </div>
 
-      <div className="pl-block">
-        <div className="pl-props-title">Ведомость</div>
-        {spec.length === 0 ? (
-          <div className="pl-note">Пока пусто. Нажмите «Расставить» или выберите прибор выше.</div>
-        ) : (
-          <>
-            <table className="pl-spec">
-              <tbody>
-                {spec.map((row) => (
-                  <tr key={row.kind}>
-                    <td>{row.name}</td>
-                    <td className="num">{row.count}</td>
-                    <td className="num">{row.height} см</td>
-                    <td className="where">{row.where.join(', ')}</td>
-                  </tr>
+        <details className="pl-block pl-el-setup" open={!electricItems.length}>
+          <summary>Исходные данные и расстановка по нормам</summary>
+          <label className="pl-field">
+            <span>Выделенная мощность</span>
+            <select value={electricSettings.allottedKw} onChange={(e) => setElectric({ allottedKw: Number(e.target.value) })}>
+              {[3, 5, 7, 10, 11, 15].map((k) => (
+                <option key={k} value={k}>
+                  {k} кВт
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="pl-field">
+            <span>Плита</span>
+            <select value={electricSettings.stove} onChange={(e) => setElectric({ stove: e.target.value as ElectricSettings['stove'] })}>
+              <option value="electric">электрическая — силовая линия 32 А</option>
+              <option value="gas">газовая — розетки не ближе 50 см</option>
+            </select>
+          </label>
+          <label className="pl-field">
+            <span>Высота потолка, см</span>
+            <NumberField value={electricSettings.ceiling} min={220} max={400} step={5} onCommit={(v) => setElectric({ ceiling: v })} />
+          </label>
+          {(
+            [
+              ['outlets', 'Розетки: у мебели и техники, по норме — 1 на 4 м периметра, на кухне не меньше 4'],
+              ['switches', 'Выключатели у дверей со стороны ручки, у санузла — снаружи'],
+              ['lights', 'Свет по комнатам'],
+              ['panel', 'Щит в прихожей'],
+              ['ac', 'Кондиционеры у окон жилых комнат'],
+              ['boiler', 'Водонагреватель в санузле'],
+              ['smart', 'Умный дом: умные выключатели, мастер-сценарии, тёплый пол'],
+              ['curtains', 'Электрокарнизы на окна'],
+              ['motion', 'Датчики движения в коридоре и санузле'],
+              ['leak', 'Датчики протечки'],
+            ] as [keyof AutoElectricOptions, string][]
+          ).map(([k, name]) => (
+            <label key={k} className="pl-field">
+              <span>{name}</span>
+              <input type="checkbox" checked={!!auto[k]} onChange={() => setAuto((a) => ({ ...a, [k]: !a[k] }))} />
+            </label>
+          ))}
+          <div className="pl-row">
+            <button className="pl-btn active" onClick={runAutoElectrics}>
+              ⚡ Спроектировать по нормам
+            </button>
+            <button className="pl-btn danger" onClick={clearElectrics} disabled={!electricItems.length}>
+              Убрать всю
+            </button>
+          </div>
+          <div className="pl-note">Все точки садятся на стены лицом в комнату, мимо проёмов, зон ванны (60 см), газовой плиты (50 см) и мойки. Техника — на своих линиях.</div>
+        </details>
+
+        <div className="pl-segment pl-el-tabs">
+          <button className={elTab === 'panel' ? 'active' : ''} onClick={() => setElTab('panel')}>
+            Щит
+          </button>
+          <button className={elTab === 'bom' ? 'active' : ''} onClick={() => setElTab('bom')}>
+            Материалы
+          </button>
+          <button className={elTab === 'norms' ? 'active' : ''} onClick={() => setElTab('norms')}>
+            Нормы{d.issues.length ? ` · ${d.issues.length}` : ''}
+          </button>
+          <button className={elTab === 'add' ? 'active' : ''} onClick={() => setElTab('add')}>
+            Поставить
+          </button>
+        </div>
+
+        {elTab === 'panel' && (
+          <div className="pl-block">
+            {!d.circuits.length ? (
+              <div className="pl-note">Пока пусто. «Спроектировать по нормам» разложит точки и соберёт щит.</div>
+            ) : (
+              <>
+                <div className="pl-el-input">
+                  <b>Ввод</b> автомат 2P C{d.input.ratingA} · реле напряжения {d.input.relayA} А · УЗО противопожарное 100 мА
+                  <div className="pl-note">
+                    Pуст {d.installedKw} кВт, расчётная {d.demandKw} кВт (группы не работают все разом). Щит {d.panel.placed ? `стоит: ${d.panel.room ?? ''}` : `не поставлен — трассы от предложенного места в «${d.panel.room ?? 'прихожей'}»`}, на {d.modules.box} модулей (занято {d.modules.used}).
+                  </div>
+                </div>
+                <table className="pl-spec pl-circuits">
+                  <thead>
+                    <tr>
+                      <th />
+                      <th>Группа</th>
+                      <th>Защита</th>
+                      <th className="num">А</th>
+                      <th className="num">м</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {d.circuits.map((c) => (
+                      <tr
+                        key={c.id}
+                        className={`${hlCircuit === c.id ? 'active' : ''} ${c.currentA > c.ratingA ? 'bad' : ''}`}
+                        onClick={() => setHlCircuit((h) => (h === c.id ? null : c.id))}
+                        title="Показать группу на плане"
+                      >
+                        <td>
+                          <span className="pl-dot" style={{ background: c.color }} />
+                        </td>
+                        <td>
+                          <b>{c.id}</b> {c.name}
+                          <div className="pl-note">
+                            {c.points.length} точ. · {(c.installedW / 1000).toFixed(1)} кВт · ВВГнг(А)-LS {c.cable}
+                          </div>
+                        </td>
+                        <td>{c.device === 'автомат' ? `автомат ${c.breaker}` : `диф ${c.breaker}, ${c.rcdMa} мА`}</td>
+                        <td className="num">{c.currentA}</td>
+                        <td className="num">{c.lengthM}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div className="pl-note">Трассы — по потолку, в 15 см от него, с изломами под прямым углом; к каждой точке кабель спускается по стене вертикально. Длина — с запасом 10 % и на разделку. Щелчок по группе — показать её на плане.</div>
+              </>
+            )}
+          </div>
+        )}
+
+        {elTab === 'bom' && (
+          <div className="pl-block">
+            {!d.bom.length ? (
+              <div className="pl-note">Пока пусто.</div>
+            ) : (
+              <>
+                {[...new Set(d.bom.map((b) => b.group))].map((g) => (
+                  <div key={g}>
+                    <div className="pl-note">{g}</div>
+                    <table className="pl-spec">
+                      <tbody>
+                        {d.bom
+                          .filter((b) => b.group === g)
+                          .map((b) => (
+                            <tr key={b.name}>
+                              <td>
+                                {b.name}
+                                {b.note && <div className="pl-note">{b.note}</div>}
+                              </td>
+                              <td className="num">
+                                {b.qty} {b.unit}
+                              </td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
                 ))}
-              </tbody>
-            </table>
-            <div className="pl-stats">
+                <button className="pl-btn" onClick={() => downloadCsv(`${plan.name || 'план'} электрика`, designCsv(d))}>
+                  ⬇ Скачать щит и ведомость (CSV)
+                </button>
+              </>
+            )}
+          </div>
+        )}
+
+        {elTab === 'norms' && (
+          <div className="pl-block">
+            {!d.issues.length ? (
+              <div className="pl-note">{electricItems.length ? 'Замечаний нет.' : 'Пока нечего проверять.'}</div>
+            ) : (
               <div>
-                <b>{spec.reduce((s2, r) => s2 + r.count, 0)}</b>
-                <span>точек всего</span>
+                {d.issues.map((x, k) => (
+                  <button
+                    key={k}
+                    className={`pl-issue ${x.level}`}
+                    onClick={() => {
+                      if (x.pointId) onSelect({ kind: 'furniture', id: x.pointId })
+                      else if (x.roomId) onSelect({ kind: 'room', id: x.roomId })
+                    }}
+                  >
+                    <span>{x.level === 'error' ? '⛔' : x.level === 'warn' ? '⚠️' : 'ℹ️'}</span>
+                    <span>{x.text}</span>
+                  </button>
+                ))}
               </div>
-              <div>
-                <b>≈{cable.meters} м</b>
-                <span>кабеля</span>
+            )}
+            {errors > 0 && <div className="pl-note">⛔ — нарушение нормы или перегрузка: исправьте до монтажа.</div>}
+          </div>
+        )}
+
+        {elTab === 'add' && (
+          <div className="pl-block">
+            {[...new Set(ELECTRIC_MENU.map((m) => m.group))].map((group) => (
+              <div key={group}>
+                <div className="pl-note">{group}</div>
+                <div className="pl-chips">
+                  {ELECTRIC_MENU.filter((m) => m.group === group).map((m) => (
+                    <button key={m.kind} className={`pl-chip ${placing?.electric?.kind === m.kind ? 'active' : ''}`} onClick={() => pickElectric(m.kind, m.why)} title={`${m.why}, высота ${MOUNT_HEIGHT[m.kind]} см`}>
+                      {ELECTRIC_NAMES[m.kind]}
+                    </button>
+                  ))}
+                </div>
               </div>
-              <div>
-                <b>{cable.groups}</b>
-                <span>групп в щите</span>
-              </div>
-            </div>
-            <div className="pl-note">Длина кабеля оценена по прокладке вдоль стен от щита с запасом. Точный расчёт делают по трассам.</div>
-          </>
+            ))}
+            <div className="pl-note">Поставленная точка попадает в свою группу сама. Назначение розетки (техника на своей линии), высоту и мощность — в свойствах точки.</div>
+          </div>
         )}
       </div>
-    </div>
-  )
+    )
+  }
 
   const renderChecks = () => (
     <div>
+      {design.issues.length > 0 && (
+        <button
+          className={`pl-issue ${design.issues.some((x) => x.level === 'error') ? 'error' : 'warn'}`}
+          onClick={() => {
+            switchMode('electric')
+            setElTab('norms')
+          }}
+        >
+          <span>⚡</span>
+          <span>Электрика: замечаний по нормам — {design.issues.length}. Открыть</span>
+        </button>
+      )}
       {wallGaps.length > 0 && (
         <div className="pl-block">
           <div className="pl-note">
@@ -3269,6 +3466,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           onNotice={setToast}
           mode={mode}
           wallRef={wallRef}
+          electricDesign={mode === 'electric' && layers.electric ? design : null}
+          hlCircuit={hlCircuit}
         />
       )}
 

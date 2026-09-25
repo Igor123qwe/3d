@@ -17,6 +17,11 @@ export function downloadJson(plan: Plan): void {
   downloadBlob(`${safeName(plan.name)}.plan.json`, new Blob([JSON.stringify(plan, null, 2)], { type: 'application/json' }))
 }
 
+/** таблица для Excel: имя файла — из названия плана */
+export function downloadCsv(name: string, csv: string): void {
+  downloadBlob(`${safeName(name)}.csv`, new Blob([csv], { type: 'text/csv;charset=utf-8' }))
+}
+
 export function downloadSvg(name: string, svgMarkup: string): void {
   downloadBlob(`${safeName(name)}.svg`, new Blob([svgMarkup], { type: 'image/svg+xml' }))
 }

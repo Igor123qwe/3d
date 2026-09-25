@@ -1641,3 +1641,47 @@
   border-color: var(--pl-accent);
   color: var(--pl-accent);
 }
+
+/* проект электрики: группы щита, ввод, вкладки */
+.pl-el-setup summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+.pl-el-tabs {
+  margin-top: 10px;
+}
+.pl-el-input {
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.pl-circuits th {
+  font-size: 11px;
+  color: var(--pl-muted);
+  text-align: left;
+  font-weight: 600;
+}
+.pl-circuits tr {
+  cursor: pointer;
+}
+.pl-circuits tr.active td {
+  background: var(--pl-accent-soft);
+}
+.pl-circuits tr.bad td {
+  color: #b91c1c;
+}
+.pl-circuits td {
+  vertical-align: top;
+  font-size: 12.5px;
+}
+.pl-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+.pl-stats .bad b {
+  color: #b91c1c;
+}

@@ -11,6 +11,7 @@ import { snapFurniture, snapOpening, snapWallPoint, type Guide } from './snappin
 import { deleteRun, deleteSection, movedSection, pushRun, refLength, runSection, runSpan, setRoomSide, stretchRun, touchesLocked, wallAtCorner, wallRun, type WallRun } from './walledit'
 import { buildRooms } from './rooms'
 import { addDimRef, dimSnap, squareDim } from './dims'
+import type { ElectricDesign } from './electricplan'
 import {
   addFurniture,
   addOpening,
@@ -98,6 +99,10 @@ export interface CanvasProps {
   mode?: EditMode
   /** по какой линии стены подписывать её длину */
   wallRef?: WallRef
+  /** проект электрики: трассы групп и высоты точек — в режиме электрики */
+  electricDesign?: ElectricDesign | null
+  /** подсвеченная группа щита */
+  hlCircuit?: string | null
 }
 
 type Drag =
@@ -139,7 +144,7 @@ const UNIT_CM: Record<LengthUnit, number> = { cm: 1, mm: 0.1, m: 100 }
 const UNIT_NAME: Record<LengthUnit, string> = { cm: 'см', mm: 'мм', m: 'м' }
 
 export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) => {
-  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view, onViewChange, onHint, photos, onCalibrate, imageLines, onRoomPick, onCorners, onRefine, onNotice, mode = 'build', wallRef = 'axis' } = props
+  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view, onViewChange, onHint, photos, onCalibrate, imageLines, onRoomPick, onCorners, onRefine, onNotice, mode = 'build', wallRef = 'axis', electricDesign, hlCircuit } = props
   const build = mode === 'build'
   const svgRef = useRef<SVGSVGElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -1205,6 +1210,41 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
 
         <g transform={`translate(${view.x} ${view.y}) scale(${zoom})`}>
           <Scene plan={plan} rooms={rooms} check={check} layers={layers} unit={unit} zoom={zoom} selection={selection?.kind === 'wall' ? null : selection} hover={hover?.kind === 'wall' ? null : hover} badItems={badItems} photos={photos} mode={mode} />
+          {/* проект электрики: трассы групп от щита, номера групп, высоты точек */}
+          {electricDesign && (
+            <g pointerEvents="none" fontFamily="system-ui, sans-serif">
+              {electricDesign.circuits.map((c) => {
+                const dim = hlCircuit && hlCircuit !== c.id
+                // номер группы — в конце трассы: у щита их слишком много
+                const first = c.route[c.route.length - 1]
+                return (
+                  <g key={c.id} opacity={dim ? 0.15 : 0.9}>
+                    <polyline points={ptsAttr(c.route)} fill="none" stroke={c.color} strokeWidth={hlCircuit === c.id ? 3 : 1.6} strokeDasharray="6 4" strokeLinejoin="round" {...NS} />
+                    {first && (
+                      <text x={first.x} y={first.y} dx={6 / zoom} dy={-6 / zoom} fontSize={10 / zoom} fontWeight={700} fill={c.color} stroke="#fff" strokeWidth={3 / zoom} paintOrder="stroke">
+                        {c.id}
+                      </text>
+                    )}
+                  </g>
+                )
+              })}
+              {plan.furniture
+                .filter((f) => f.electric && f.electric.kind !== 'light' && f.electric.kind !== 'spot' && f.electric.kind !== 'leak-sensor')
+                .map((f) => (
+                  <text key={`h-${f.id}`} x={f.x} y={f.y} dx={7 / zoom} dy={12 / zoom} fontSize={8.5 / zoom} fill="#374151" stroke="#fff" strokeWidth={2.5 / zoom} paintOrder="stroke">
+                    {f.electric!.height}
+                  </text>
+                ))}
+              {!electricDesign.panel.placed && electricDesign.circuits.length > 0 && (
+                <g>
+                  <rect x={electricDesign.panel.p.x - 12} y={electricDesign.panel.p.y - 8} width={24} height={16} fill="rgba(255,255,255,0.8)" stroke="#111827" strokeWidth={1.2} strokeDasharray="3 2" {...NS} />
+                  <text x={electricDesign.panel.p.x} y={electricDesign.panel.p.y - 12} fontSize={10 / zoom} textAnchor="middle" fill="#111827" stroke="#fff" strokeWidth={3 / zoom} paintOrder="stroke">
+                    щит (предложено)
+                  </text>
+                </g>
+              )}
+            </g>
+          )}
 
           {/* направляющие */}
           {guides.map((g, i) => (
