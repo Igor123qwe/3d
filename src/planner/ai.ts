@@ -155,19 +155,22 @@ export async function numberSheet(src: string, boxes: SheetBox[], refW: number, 
   const tagW = 44
   const gap = 8
   const cells = boxes.map((b) => {
-    const pad = Math.max(2, 0.45 * textPx) * s
-    const x1 = Math.max(0, b.x1 * s - pad)
-    const y1 = Math.max(0, b.y1 * s - pad)
-    const x2 = Math.min(img.width, (b.x2 + 1) * s + pad)
-    const y2 = Math.min(img.height, (b.y2 + 1) * s + pad)
+    // вдоль строки поле шире: знак, прилипший к стене, в рамку не попадает, а на листе нужен
+    const across = Math.max(2, 0.45 * textPx) * s
+    const along = Math.max(3, 0.8 * textPx) * s
+    const [padX, padY] = b.vertical ? [across, along] : [along, across]
+    const x1 = Math.max(0, b.x1 * s - padX)
+    const y1 = Math.max(0, b.y1 * s - padY)
+    const x2 = Math.min(img.width, (b.x2 + 1) * s + padX)
+    const y2 = Math.min(img.height, (b.y2 + 1) * s + padY)
     const w = Math.max(1, x2 - x1)
     const h = Math.max(1, y2 - y1)
     // поперёк строки — lineH точек на листе
     const k = Math.min(8, Math.max(0.5, lineH / (b.vertical ? w : h)))
-    const along = (b.vertical ? h : w) * k
-    const across = (b.vertical ? w : h) * k
-    const contentW = b.vertical ? 2 * along + gap : along
-    return { b, x1, y1, w, h, k, along, across, width: tagW + gap + contentW + 2 * gap, height: across + 2 * gap }
+    const long = (b.vertical ? h : w) * k
+    const short = (b.vertical ? w : h) * k
+    const contentW = b.vertical ? 2 * long + gap : long
+    return { b, x1, y1, w, h, k, along: long, across: short, width: tagW + gap + contentW + 2 * gap, height: short + 2 * gap }
   })
   // раскладка по строкам листа
   const at: { x: number; y: number }[] = []

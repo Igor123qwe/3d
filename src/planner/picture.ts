@@ -433,6 +433,99 @@ export interface Outline {
   box: { x1: number; y1: number; x2: number; y2: number }
 }
 
+/** число с картинки в пикселях: где стоит, вдоль какой оси строка, сколько сантиметров */
+export interface PxMark {
+  at: Pt
+  alongX: boolean
+  cm: number
+}
+
+/**
+ * Ступенька под одной подписью — от цифр, а не от стены. Цифры «0,68»,
+ * прилипшие к низу ниши, не пускают область в угол, и низ ниши выходит
+ * ступенькой 38 + 25 со сдвигом на 10 см: ни одна грань не сходится с
+ * подписью, и ниша остаётся как на картинке. Если под подписью лежат две
+ * параллельные грани, соединённые короткой поперечной (до 20 см и четверти
+ * числа), сумма сходится с числом, а по отдельности ни одна не сходится, —
+ * грани встают на уровень длинной, ступенька уходит. Настоящий уступ
+ * (0,64 × 0,13 на кухне) подписан по граням, и каждая сходится со своим
+ * числом: его это не трогает. cmPerPx — масштаб картинки
+ */
+export function flattenLabelledSteps(polyIn: Pt[], marks: PxMark[], cmPerPx: number): Pt[] {
+  let poly = polyIn
+  for (const m of marks) {
+    const n = poly.length
+    if (n < 6) break
+    const tol = Math.max(6, 0.12 * m.cm)
+    const maxD = 45 / cmPerPx
+    const along = (p: Pt) => (m.alongX ? p.x : p.y)
+    const across = (p: Pt) => (m.alongX ? p.y : p.x)
+    const isAlong = (p: Pt, q: Pt) => Math.abs(across(p) - across(q)) < 0.5 && Math.abs(along(p) - along(q)) >= 1
+    const nearLine = (p: Pt, q: Pt) => {
+      const lo = Math.min(along(p), along(q))
+      const hi = Math.max(along(p), along(q))
+      const a = along(m.at)
+      return a >= lo - maxD / 3 && a <= hi + maxD / 3 && Math.abs(across(m.at) - across(p)) <= maxD
+    }
+    const cm = (p: Pt, q: Pt) => Math.abs(along(q) - along(p)) * cmPerPx
+    const edge = (i: number) => [poly[i % n], poly[(i + 1) % n]] as const
+    // число уже легло на одну грань — ступеньки тут нет
+    if (poly.some((_, i) => { const [p, q] = edge(i); return isAlong(p, q) && nearLine(p, q) && Math.abs(cm(p, q) - m.cm) <= tol })) continue
+    let best: { i: number; off: number } | null = null
+    for (let i = 0; i < n; i++) {
+      const [p1, q1] = edge(i)
+      const [pj, qj] = edge(i + 1)
+      const [p2, q2] = edge(i + 2)
+      if (!isAlong(p1, q1) || !isAlong(p2, q2)) continue
+      // поперечная — короткая, и обе грани идут в одну сторону
+      const jog = Math.abs(across(qj) - across(pj)) * cmPerPx
+      if (Math.abs(along(qj) - along(pj)) >= 0.5 || jog > Math.min(20, 0.25 * m.cm)) continue
+      if (Math.sign(along(q1) - along(p1)) !== Math.sign(along(q2) - along(p2))) continue
+      const total = Math.abs(along(q2) - along(p1)) * cmPerPx
+      const off = Math.abs(total - m.cm)
+      if (off > tol) continue
+      const lo = Math.min(along(p1), along(q2))
+      const hi = Math.max(along(p1), along(q2))
+      const a = along(m.at)
+      if (a < lo - maxD / 3 || a > hi + maxD / 3) continue
+      if (Math.min(Math.abs(across(m.at) - across(p1)), Math.abs(across(m.at) - across(p2))) > maxD) continue
+      if (!best || off < best.off) best = { i, off }
+    }
+    if (!best) continue
+    const [p1, q1] = edge(best.i)
+    const [p2, q2] = edge(best.i + 2)
+    const level = cm(p1, q1) >= cm(p2, q2) ? across(p1) : across(p2)
+    const set = (p: Pt): Pt => (m.alongX ? { x: p.x, y: level } : { x: level, y: p.y })
+    const moved = new Map<number, Pt>()
+    for (const k of [best.i, best.i + 1, best.i + 2, best.i + 3]) moved.set(k % n, set(poly[k % n]))
+    poly = tidyOrthogonal(poly.map((p, k) => moved.get(k) ?? p))
+  }
+  return poly
+}
+
+/** убрать совпавшие точки и точки посреди прямой */
+function tidyOrthogonal(polyIn: Pt[]): Pt[] {
+  let poly = polyIn.filter((p, i) => {
+    const q = polyIn[(i + 1) % polyIn.length]
+    return Math.abs(p.x - q.x) >= 0.5 || Math.abs(p.y - q.y) >= 0.5
+  })
+  let changed = true
+  while (changed && poly.length > 4) {
+    changed = false
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[(i + poly.length - 1) % poly.length]
+      const b = poly[i]
+      const c = poly[(i + 1) % poly.length]
+      if ((Math.abs(a.x - b.x) < 0.5 && Math.abs(b.x - c.x) < 0.5) || (Math.abs(a.y - b.y) < 0.5 && Math.abs(b.y - c.y) < 0.5)) {
+        poly = poly.filter((_, k) => k !== i)
+        changed = true
+        break
+      }
+    }
+  }
+  return poly
+}
+
 /**
  * Контуры всех областей: дорастить до стен, обвести, выпрямить. minEdge —
  * мельче этого ступеньки считаются неровностью линий, а не выступом стены.

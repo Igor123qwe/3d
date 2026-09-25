@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Plan, Pt, Underlay, Wall } from '../src/planner/types'
-import { cutBumps, detectOpenings, fillDents, growRegions, pointOnOutline, simplifyOrthogonal, traceOutline, wallsFromPicture } from '../src/planner/picture'
+import { cutBumps, detectOpenings, fillDents, flattenLabelledSteps, growRegions, pointOnOutline, simplifyOrthogonal, traceOutline, wallsFromPicture } from '../src/planner/picture'
 import { buildRooms } from '../src/planner/rooms'
 import { polyArea } from '../src/planner/geometry'
 
@@ -313,5 +313,40 @@ describe('двери и окна по картинке', () => {
     expect(found).toHaveLength(1)
     expect(found[0].rooms).toEqual([0])
     expect(Math.abs(found[0].from - 60) + Math.abs(found[0].to - 131)).toBeLessThan(4)
+  })
+})
+
+describe('ступенька под одной подписью', () => {
+  // прихожая с нишей справа сверху; низ ниши — ступенькой 25 + 38 со сдвигом 10 (1 px = 1 см)
+  const niche: Pt[] = [
+    { x: 0, y: 0 },
+    { x: 360, y: 0 },
+    { x: 360, y: 100 },
+    { x: 335, y: 100 },
+    { x: 335, y: 110 },
+    { x: 297, y: 110 },
+    { x: 297, y: 390 },
+    { x: 0, y: 390 },
+  ]
+
+  it('«0,68» над ступенькой 25 + 38: низ ниши встаёт на уровень длинной части', () => {
+    const got = flattenLabelledSteps(niche, [{ at: { x: 330, y: 95 }, alongX: true, cm: 68 }], 1)
+    expect(got).toEqual([
+      { x: 0, y: 0 },
+      { x: 360, y: 0 },
+      { x: 360, y: 110 },
+      { x: 297, y: 110 },
+      { x: 297, y: 390 },
+      { x: 0, y: 390 },
+    ])
+  })
+
+  it('настоящий уступ с числом у каждой грани, чужое число и число вдали — не трогаются', () => {
+    // «0,25» у верхней ступени — сходится с одной гранью: уступ настоящий
+    expect(flattenLabelledSteps(niche, [{ at: { x: 348, y: 95 }, alongX: true, cm: 25 }], 1)).toBe(niche)
+    // «1,20» — ни с гранью, ни с суммой не сходится
+    expect(flattenLabelledSteps(niche, [{ at: { x: 330, y: 95 }, alongX: true, cm: 120 }], 1)).toBe(niche)
+    // «0,63» посреди комнаты, далеко от низа ниши
+    expect(flattenLabelledSteps(niche, [{ at: { x: 330, y: 250 }, alongX: true, cm: 63 }], 1)).toBe(niche)
   })
 })

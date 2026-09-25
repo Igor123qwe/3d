@@ -22,7 +22,7 @@ import { MIN_WALL_LENGTH, WALL_THICKNESSES } from './ops'
 import { buildRooms } from './rooms'
 import { bboxOf, closestOnSeg, dist, lerp, norm, pointInPoly, sub } from './geometry'
 import { canRebuildFrom, DEFAULT_RECONSTRUCT, pointOnSide, reconstructFromRooms, scaleSamplesFromRooms, type AreaFit } from './reconstruct'
-import { detectOpenings, pointOnOutline, wallsFromPicture } from './picture'
+import { detectOpenings, flattenLabelledSteps, pointOnOutline, wallsFromPicture } from './picture'
 import { fitToLabels, type PlacedLabel, type SizeFix, type WallLabelsReport } from './fitlabels'
 import { evenWalls } from './rectify'
 import type { RoomRegion } from './raster'
@@ -377,9 +377,13 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
   // двигают. Иначе чертёж собирается по числам из рамок модели
   const thick = { ...DEFAULT_RECONSTRUCT, ...wallThicknesses(ai) }
   const raster = o.raster && o.raster.w === px.w && o.raster.h === px.h ? o.raster.d2 : null
+  // ступенька под одной подписью — от цифр, прилипших к стене: контур
+  // выпрямляется по числам с картинки до того, как из него встанут стены
+  const pxMarks = (ai.marks ?? []).map((m) => ({ at: { x: m.x * px.w, y: m.y * px.h }, alongX: !m.vertical, cm: m.cm }))
+  const outline = (r: RoomRegion) => (pxMarks.length ? flattenLabelledSteps(regionPoly(r), pxMarks, u.scale) : regionPoly(r))
   const rebuilt = bySegments
     ? wallsFromPicture(
-        regions.map((r, j) => ({ name: rooms[j].name, kind: rooms[j].kind, poly: regionPoly(r), wantM2: rooms[j].areaM2 })),
+        regions.map((r, j) => ({ name: rooms[j].name, kind: rooms[j].kind, poly: outline(r), wantM2: rooms[j].areaM2 })),
         u,
         raster,
         { interiorCm: thick.interiorCm, exteriorCm: thick.exteriorCm },

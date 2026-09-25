@@ -607,7 +607,7 @@ describe('цифра, прилипшая к стене', () => {
       expect(tall.y2).toBeGreaterThanOrEqual(70)
     })
 
-    it('номер над площадью и ряд квадратиков штриховки — не подписи; две подписи впритык — две рамки', () => {
+    it('номер над площадью — по строке, не пятном в две; ряд квадратиков штриховки — не подпись; две подписи впритык — две рамки', () => {
       const { ink, wall, box, glyph } = make()
       // «00» над чертой и «000» под ней: пятно в две строки
       glyph(20, 20)
@@ -627,7 +627,9 @@ describe('цифра, прилипшая к стене', () => {
       glyph(120, 68, true)
       for (const x of [118, 126, 134]) glyph(x, 77)
       const got = labelBoxes({ ink, w: W, h: H }, { ink: wall, w: W, h: H }, 10)
-      expect(got.filter((b) => b.x2 < 60)).toEqual([])
+      // черта дроби — длинная прямая и стирается: номер и площадь — по строке
+      // (площадь «13,9» размером не считается по виду числа)
+      expect(got.filter((b) => b.x2 < 60).every((b) => b.y2 - b.y1 + 1 <= 12)).toBe(true)
       expect(got.filter((b) => b.x1 >= 70 && b.x2 < 160 && b.y2 < 40)).toEqual([])
       const pair = got.filter((b) => b.y1 >= 55)
       expect(pair).toHaveLength(2)

@@ -645,6 +645,16 @@ export function labelBoxes(marks: Bin, frame: Bin, text: number): TextBox[] {
   const edge = maxFilter(strong, w, h, Math.max(1, Math.round(0.15 * text)))
   const rest = new Uint8Array(w * h)
   for (let i = 0; i < rest.length; i++) rest[i] = marks.ink[i] && !edge[i] ? 1 : 0
+  // Длинная прямая — не подпись: у знака штрих не длиннее строки. Выносная
+  // черта размера, тонкая стена в одну линию у края кадра, рамка шкафа
+  // иначе слипаются с числом, что стоит на них («0,68» на низу ниши), в
+  // пятно не по размеру подписи, и число теряется
+  const long = new Uint8Array(w * h)
+  for (let d = 0; d < 2; d++)
+    eachRun(rest, w, h, d, (pts) => {
+      if (pts.length >= 2 * text) for (const i of pts) long[i] = 1
+    })
+  for (let i = 0; i < rest.length; i++) if (long[i]) rest[i] = 0
   // утолщение на треть строки: знаки одной подписи смыкаются, соседние подписи — нет
   const r = Math.max(1, Math.round(0.3 * text))
   const blobs = inkBlobs(rest, w, h, r)
@@ -722,9 +732,11 @@ function asLabel(b: InkBlob, text: number): TextBox | null {
   const bh = b.y2 - b.y1 + 1
   const lo = Math.min(bw, bh)
   const hi = Math.max(bw, bh)
-  if (!b.size || lo < 0.6 * text || lo > 1.9 * text || hi < 1.3 * text || hi > 6 * text) return null
+  // от двух знаков: у «2,70» на стенке у двери «2» уходит вместе со стенкой, остаётся «70»
+  if (!b.size || lo < 0.6 * text || lo > 1.9 * text || hi < 1.2 * text || hi > 6 * text) return null
   const fill = b.size / (bw * bh)
-  if (fill < 0.12 || fill > 0.75) return null
+  // жирные цифры на уменьшенной копии залиты на три четверти и больше; сплошная колонна — целиком
+  if (fill < 0.12 || fill > 0.85) return null
   return { x1: b.x1 + b.ox, y1: b.y1 + b.oy, x2: b.x2 + b.ox, y2: b.y2 + b.oy, glyphs: Math.max(2, Math.round(hi / (0.7 * text))), vertical: bh > bw }
 }
 

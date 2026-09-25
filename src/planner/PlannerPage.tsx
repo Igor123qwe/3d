@@ -1692,7 +1692,16 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       if (r.note) lines.push(`Модель: ${r.note}`)
       lines.push(q.verdict === 'ok' ? 'Проверьте чертёж поверх фото и подтвердите масштаб.' : 'Результат требует проверки: смотрите разделы выше и уточните спорные места.')
       // сырой ответ модели и отчёт — в консоль и по кнопке в буфер: без них не разобрать, что пошло не так
-      const debugReport = { model: cost.model, tried: cost.tried, answer: read, marks, report: r }
+      // размеры по одному и что из них легло на стены — чтобы по отчёту было видно, на каком шаге теряются числа
+      const debugReport = {
+        model: cost.model,
+        tried: cost.tried,
+        answer: read,
+        marks,
+        numbers: byMarks ? { boxes: byMarks.boxes, sizes: byMarks.sizes, model: byMarks.ai.model } : null,
+        fitted: { sizes: fitted.report.sizesFitted, wallLabels: fitted.report.wallLabels },
+        report: r,
+      }
       console.info('[ИИ] распознавание плана', debugReport)
       setAsk({
         title: 'Распознано',
