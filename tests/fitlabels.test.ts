@@ -201,6 +201,17 @@ describe('размеры по подписям', () => {
       expect(res.walls).toBe(walls)
     })
 
+    it('короткое число, чья грань сужена цифрами у стены, тянет её, если она одна на стороне', () => {
+      // ниша в чистоте 70 × 100; модель: «1,00» внизу без места — ниша на картинке уже на 30 %
+      const res = fitToLabels(walls, [{ name: '1', axes: [], inner, walls: [{ side: 'bottom', at: 0.5, cm: 100 }] }])
+      expect(res.wallLabels.unmatched).toEqual([])
+      const fx = (id: string, s: number) => at(res, id).a.x + (s * at(res, id).thickness) / 2
+      expect(fx('nr', -1) - fx('r', -1)).toBeCloseTo(100, 0)
+      // расходится больше чем на 45 % — ошибка чтения, не тянется
+      const far = fitToLabels(walls, [{ name: '1', axes: [], inner, walls: [{ side: 'bottom', at: 0.5, cm: 150 }] }])
+      expect(far.wallLabels.unmatched).toEqual([{ name: '1', side: 'bottom', cm: 150 }])
+    })
+
     it('число во всю сторону заменяет ширину от модели, а подпись модели на ту же грань не идёт', () => {
       const res = fitToLabels(
         walls,

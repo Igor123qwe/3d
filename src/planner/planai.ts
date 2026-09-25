@@ -385,7 +385,8 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
   const pxMarks = (ai.marks ?? []).map((m) => ({ at: { x: m.x * px.w, y: m.y * px.h }, alongX: !m.vertical, cm: m.cm }))
   const outline = (r: RoomRegion, j: number) => {
     const poly = regionPoly(r)
-    const told = (ai.rooms.find((a) => a.name === rooms[j].name)?.walls ?? []).map((l) => ({ at: pointOnOutline(poly, l.side, l.at), alongX: l.side === 'top' || l.side === 'bottom', cm: l.cm }))
+    // место от модели неточно: ступенька по её подписи — только единственная в контуре
+    const told = (ai.rooms.find((a) => a.name === rooms[j].name)?.walls ?? []).map((l) => ({ at: pointOnOutline(poly, l.side, l.at), alongX: l.side === 'top' || l.side === 'bottom', cm: l.cm, loose: true }))
     const all = [...pxMarks, ...told]
     return all.length ? flattenLabelledSteps(poly, all, u.scale) : poly
   }

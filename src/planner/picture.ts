@@ -438,6 +438,8 @@ export interface PxMark {
   at: Pt
   alongX: boolean
   cm: number
+  /** место неточно (подпись модели: сторона и доля вдоль неё) — годится только ступенька, единственная в контуре */
+  loose?: boolean
 }
 
 /**
@@ -470,8 +472,9 @@ export function flattenLabelledSteps(polyIn: Pt[], marks: PxMark[], cmPerPx: num
     const cm = (p: Pt, q: Pt) => Math.abs(along(q) - along(p)) * cmPerPx
     const edge = (i: number) => [poly[i % n], poly[(i + 1) % n]] as const
     // число уже легло на одну грань — ступеньки тут нет
-    if (poly.some((_, i) => { const [p, q] = edge(i); return isAlong(p, q) && nearLine(p, q) && Math.abs(cm(p, q) - m.cm) <= tol })) continue
+    if (poly.some((_, i) => { const [p, q] = edge(i); return isAlong(p, q) && (m.loose || nearLine(p, q)) && Math.abs(cm(p, q) - m.cm) <= tol })) continue
     let best: { i: number; off: number } | null = null
+    let found = 0
     for (let i = 0; i < n; i++) {
       const [p1, q1] = edge(i)
       const [pj, qj] = edge(i + 1)
@@ -487,11 +490,13 @@ export function flattenLabelledSteps(polyIn: Pt[], marks: PxMark[], cmPerPx: num
       const lo = Math.min(along(p1), along(q2))
       const hi = Math.max(along(p1), along(q2))
       const a = along(m.at)
-      if (a < lo - maxD / 3 || a > hi + maxD / 3) continue
-      if (Math.min(Math.abs(across(m.at) - across(p1)), Math.abs(across(m.at) - across(p2))) > maxD) continue
+      if (!m.loose && (a < lo - maxD / 3 || a > hi + maxD / 3)) continue
+      if (!m.loose && Math.min(Math.abs(across(m.at) - across(p1)), Math.abs(across(m.at) - across(p2))) > maxD) continue
+      found++
       if (!best || off < best.off) best = { i, off }
     }
-    if (!best) continue
+    // без точного места — только если такая ступенька в контуре одна
+    if (!best || (m.loose && found !== 1)) continue
     const [p1, q1] = edge(best.i)
     const [p2, q2] = edge(best.i + 2)
     const level = cm(p1, q1) >= cm(p2, q2) ? across(p1) : across(p2)
