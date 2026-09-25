@@ -3,7 +3,7 @@
 // Ключа здесь нет и быть не может: браузер ходит на свой же /api, а роутер
 // зовёт сервер. Если ИИ не подключён, каждая функция честно говорит об этом,
 // и приложение продолжает работать на прежних локальных алгоритмах.
-import type { AiPlacement, AiPlan, AiRoomLabel, AiSpot } from './aicontract'
+import type { AiNumberRead, AiPlacement, AiPlan, AiRoomLabel, AiSpot } from './aicontract'
 import type { ProductInfo } from './products'
 import type { Pt } from './types'
 
@@ -124,6 +124,109 @@ export interface RoomLabelResult {
 /** Прочитать подписи комнаты по её увеличенному куску плана */
 export const askRoomLabel = (image: string, hint?: string, signal?: AbortSignal, escalate = 0): Promise<RoomLabelResult> =>
   post<RoomLabelResult>('plan', { image, room: true, hint, escalate }, signal)
+
+// ---------- размеры по одному: лист вырезок ----------
+export interface NumbersResult {
+  numbers: AiNumberRead[]
+  ai: AiCost
+}
+
+/** рамка подписи на картинке шириной refW: стоит ли строка боком */
+export interface SheetBox {
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+  vertical: boolean
+}
+
+/**
+ * Лист для чтения размеров: каждая подпись вырезана из фото, увеличена до
+ * строки в полсотни точек и стоит в своей клетке с красным номером слева.
+ * Мелкое повёрнутое «0,26» на целом плане дешёвая модель пропускает, а
+ * крупное и прямое прочитает любая. Подпись боком кладётся в двух поворотах:
+ * на плане её пишут и снизу вверх, и сверху вниз, — одна из двух будет прямой.
+ * textPx — высота мелких цифр в тех же точках, что и рамки
+ */
+export async function numberSheet(src: string, boxes: SheetBox[], refW: number, textPx: number, sheetW = 1100): Promise<string> {
+  const img = await loadImage(src)
+  const s = img.width / refW
+  const lineH = 60
+  const tagW = 44
+  const gap = 8
+  const cells = boxes.map((b) => {
+    const pad = Math.max(2, 0.45 * textPx) * s
+    const x1 = Math.max(0, b.x1 * s - pad)
+    const y1 = Math.max(0, b.y1 * s - pad)
+    const x2 = Math.min(img.width, (b.x2 + 1) * s + pad)
+    const y2 = Math.min(img.height, (b.y2 + 1) * s + pad)
+    const w = Math.max(1, x2 - x1)
+    const h = Math.max(1, y2 - y1)
+    // поперёк строки — lineH точек на листе
+    const k = Math.min(8, Math.max(0.5, lineH / (b.vertical ? w : h)))
+    const along = (b.vertical ? h : w) * k
+    const across = (b.vertical ? w : h) * k
+    const contentW = b.vertical ? 2 * along + gap : along
+    return { b, x1, y1, w, h, k, along, across, width: tagW + gap + contentW + 2 * gap, height: across + 2 * gap }
+  })
+  // раскладка по строкам листа
+  const at: { x: number; y: number }[] = []
+  let x = gap
+  let y = gap
+  let rowH = 0
+  for (const c of cells) {
+    if (x + c.width > sheetW && x > gap) {
+      x = gap
+      y += rowH + gap
+      rowH = 0
+    }
+    at.push({ x, y })
+    x += c.width + gap
+    rowH = Math.max(rowH, c.height)
+  }
+  const canvas = document.createElement('canvas')
+  canvas.width = sheetW
+  canvas.height = Math.max(1, Math.round(y + rowH + gap))
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return src
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
+  ctx.imageSmoothingQuality = 'high'
+  cells.forEach((c, i) => {
+    const p = at[i]
+    ctx.strokeStyle = '#bbbbbb'
+    ctx.lineWidth = 1
+    ctx.strokeRect(p.x + 0.5, p.y + 0.5, c.width - 1, c.height - 1)
+    ctx.fillStyle = '#d00000'
+    ctx.fillRect(p.x + 1, p.y + 1, tagW, c.height - 2)
+    ctx.fillStyle = '#ffffff'
+    ctx.font = 'bold 22px sans-serif'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(String(i + 1), p.x + 1 + tagW / 2, p.y + c.height / 2)
+    const left = p.x + tagW + 2 * gap
+    const top = p.y + gap
+    if (!c.b.vertical) {
+      ctx.drawImage(img, c.x1, c.y1, c.w, c.h, left, top, c.along, c.across)
+      return
+    }
+    // боком: повернуть на четверть оборота в обе стороны
+    for (const [n, turn] of [[0, Math.PI / 2], [1, -Math.PI / 2]] as const) {
+      const cx = left + n * (c.along + gap) + c.along / 2
+      const cy = top + c.across / 2
+      ctx.save()
+      ctx.translate(cx, cy)
+      ctx.rotate(turn)
+      ctx.drawImage(img, c.x1, c.y1, c.w, c.h, -c.across / 2, -c.along / 2, c.across, c.along)
+      ctx.restore()
+    }
+  })
+  return canvas.toDataURL('image/png')
+}
+
+/** Прочитать лист вырезок: что написано в каждой клетке по номеру */
+export const askNumbers = (image: string, count: number, signal?: AbortSignal, escalate = 0): Promise<NumbersResult> =>
+  post<NumbersResult>('plan', { image, numbers: true, count, escalate }, signal)
 
 // ---------- вопрос про одно место на плане ----------
 export interface SpotResult {

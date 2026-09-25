@@ -14,7 +14,8 @@
 // 3. Если модель прочитала комнаты с размерами, чертёж строится заново по
 //    числам (reconstruct.ts), а стены с картинки остаются запасным путём:
 //    берётся тот вариант, где замкнулось больше комнат.
-import type { AiBox, AiDimension, AiPlan, AiRoom } from './aicontract'
+import type { AiBox, AiDimension, AiMark, AiPlan, AiRoom } from './aicontract'
+import { sizeFromText } from './aicontract'
 import type { Opening, Plan, Pt, RoomMeta, Underlay, Wall } from './types'
 import { uid } from './types'
 import { MIN_WALL_LENGTH, WALL_THICKNESSES } from './ops'
@@ -22,7 +23,7 @@ import { buildRooms } from './rooms'
 import { bboxOf, closestOnSeg, dist, lerp, norm, pointInPoly, sub } from './geometry'
 import { canRebuildFrom, DEFAULT_RECONSTRUCT, pointOnSide, reconstructFromRooms, scaleSamplesFromRooms, type AreaFit } from './reconstruct'
 import { detectOpenings, pointOnOutline, wallsFromPicture } from './picture'
-import { fitToLabels, type SizeFix, type WallLabelsReport } from './fitlabels'
+import { fitToLabels, type PlacedLabel, type SizeFix, type WallLabelsReport } from './fitlabels'
 import { evenWalls } from './rectify'
 import type { RoomRegion } from './raster'
 import { regionPoly, roomsFromRegions, type LabelDispute } from './segment'
@@ -256,6 +257,8 @@ export interface ConvertResult {
   rooms: RoomMeta[]
   underlay: Underlay
   report: ConvertReport
+  /** числа, прочитанные с картинки по месту, — в координатах чертежа: по ним стены подгоняются под подписи */
+  marks?: PlacedLabel[]
 }
 
 /**
@@ -396,6 +399,7 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
   const pts = walls.flatMap((w) => [w.a, w.b])
   const wBox = pts.length ? bboxOf(pts) : null
   let shifted = false
+  let shift = { x: 0, y: 0 }
   if (wBox) {
     const cx = (wBox.minX + wBox.maxX) / 2
     const cy = (wBox.minY + wBox.maxY) / 2
@@ -403,6 +407,7 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
       const dx = (uRect.minX + uRect.maxX) / 2 - cx
       const dy = (uRect.minY + uRect.maxY) / 2 - cy
       walls = walls.map((w) => ({ ...w, a: { x: w.a.x + dx, y: w.a.y + dy }, b: { x: w.b.x + dx, y: w.b.y + dy } }))
+      shift = { x: dx, y: dy }
       if (byNumbers && rebuilt) {
         for (const r of rebuilt.rooms) {
           r.anchor = { x: r.anchor.x + dx, y: r.anchor.y + dy }
@@ -552,11 +557,18 @@ export function convertAiPlan(ai: AiPlan, underlay: Underlay, options: ConvertOp
     openingsExpected: fromPicture + fromModel + dropped,
   })
 
+  // числа с картинки — туда же, где встал чертёж
+  const marks = (ai.marks ?? []).map((m): PlacedLabel => {
+    const p = toPlanPt(u, { x: m.x * px.w, y: m.y * px.h })
+    return { at: { x: p.x + shift.x, y: p.y + shift.y }, alongX: !m.vertical, cm: m.cm }
+  })
+
   return {
     walls,
     openings,
     rooms: metas,
     underlay: u,
+    ...(marks.length ? { marks } : {}),
     report: {
       scale: fit,
       method,
@@ -614,6 +626,18 @@ export function floorFor(name: string, kind?: string): RoomMeta['floor'] {
 }
 
 /**
+ * Числа, прочитанные с листа вырезок, — к местам своих подписей: середина
+ * рамки в долях картинки и направление строки. Что не размер («13,9», «5ж»,
+ * квадратики штриховки), отбрасывается. px — размер картинки, где лежат рамки
+ */
+export function marksFromReads(boxes: { x1: number; y1: number; x2: number; y2: number; vertical: boolean }[], reads: (string | null)[], px: { w: number; h: number }): AiMark[] {
+  return boxes.flatMap((b, i) => {
+    const cm = sizeFromText(reads[i])
+    return cm === null ? [] : [{ x: (b.x1 + b.x2 + 1) / 2 / px.w, y: (b.y1 + b.y2 + 1) / 2 / px.h, vertical: b.vertical, cm }]
+  })
+}
+
+/**
  * Размеры по подписям — последним шагом, после выпрямления снимка. Форма
  * комнат — с картинки, а подпись — обмер: грани стен сдвигаются так, чтобы
  * ширина, глубина и размеры вдоль стен сошлись с числами плана. Подпись,
@@ -630,7 +654,7 @@ export function fitResultToLabels(res: ConvertResult, labels: AiRoom[]): Convert
     if (!label || !room) return []
     return [{ name: m.name, axes: room.polygon, inner: room.inner, widthCm: label.widthCm, depthCm: label.depthCm, areaM2: label.areaM2, walls: label.walls }]
   })
-  const fitted = fitToLabels(res.walls, labelled)
+  const fitted = fitToLabels(res.walls, labelled, res.marks)
   const noted = { ...res, report: { ...res.report, wallLabels: fitted.wallLabels } }
   if (!fitted.fixes.length) return noted
   const rooms = res.rooms.map((m) => ({ ...m, anchor: fitted.map(m.anchor) }))

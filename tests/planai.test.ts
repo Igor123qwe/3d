@@ -7,6 +7,7 @@ import {
   convertAiPlan,
   dedupeWalls,
   floorFor,
+  marksFromReads,
   robustMedian,
   roundThickness,
   scaleFromDimensions,
@@ -454,5 +455,24 @@ describe('проём в стене Г-образной комнаты', () => {
     const wall = r.walls.find((w) => w.id === r.openings[0].wallId)!
     expect(Math.abs(wall.a.x - wall.b.x)).toBeLessThan(1)
     expect(r.report.quality.openings).toEqual({ expected: 1, placed: 1 })
+  })
+})
+
+describe('размеры по одному', () => {
+  it('прочитанное с листа — к середине своей рамки; не размеры отброшены', () => {
+    const boxes = [
+      { x1: 90, y1: 10, x2: 109, y2: 19, vertical: false },
+      { x1: 10, y1: 40, x2: 19, y2: 79, vertical: true },
+      { x1: 50, y1: 50, x2: 69, y2: 59, vertical: false },
+    ]
+    expect(marksFromReads(boxes, ['3,72', '4,08', '13,9'], { w: 200, h: 100 })).toEqual([
+      { x: 0.5, y: 0.15, vertical: false, cm: 372 },
+      { x: 0.075, y: 0.6, vertical: true, cm: 408 },
+    ])
+  })
+
+  it('числа проходят через сборку чертежа в координаты плана', () => {
+    const res = convertAiPlan(boxPlan({ marks: [{ x: 0.5, y: 0.2, vertical: false, cm: 780 }] }), underlay(1), { keepScale: true })
+    expect(res.marks).toEqual([{ at: { x: 500, y: 160 }, alongX: true, cm: 780 }])
   })
 })

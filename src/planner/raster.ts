@@ -609,6 +609,125 @@ export function textMask(bin: Bin, frame: Bin, text: number): Uint8Array {
   return mask
 }
 
+/** подпись на картинке: рамка в пикселях и стоит ли строка боком */
+export interface TextBox {
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+  /** знаков в строке */
+  glyphs: number
+  /** строка стоит боком (размер вдоль вертикальной стены): знаки друг над другом */
+  vertical: boolean
+}
+
+/**
+ * Подписи целиком, чтобы прочитать каждое число отдельно и знать, где оно
+ * стоит. Ищутся по всем меткам: очистка стирает отдельно стоящую мелочь, а
+ * с ней и «3,72» посреди стены. На мелкой картинке знаки слипаются друг с
+ * другом и со стеной, поэтому по отдельным знакам подпись не собрать: всё,
+ * что не прямая стеновая линия, чуть утолщается, и пятно высотой в строку и
+ * длиной в два–шесть знаков — подпись. Строка боком (размер вдоль
+ * вертикальной стены) выше, чем шире. Номер над площадью («5ж / 13,9») —
+ * пятно в две строки — и длинный ряд квадратиков штриховки подписью не
+ * считаются
+ */
+export function labelBoxes(marks: Bin, frame: Bin, text: number): TextBox[] {
+  const { w, h } = marks
+  const minRun = Math.round(1.15 * text) + 2
+  const strong = new Uint8Array(w * h)
+  for (let d = 0; d < 2; d++)
+    eachRun(frame.ink, w, h, d, (pts) => {
+      if (pts.length >= minRun) for (const i of pts) strong[i] = 1
+    })
+  // край стены на метках на пиксель-другой шире стеновой линии: этот ободок
+  // после утолщения слепил бы подпись со стеной
+  const edge = maxFilter(strong, w, h, Math.max(1, Math.round(0.15 * text)))
+  const rest = new Uint8Array(w * h)
+  for (let i = 0; i < rest.length; i++) rest[i] = marks.ink[i] && !edge[i] ? 1 : 0
+  // утолщение на треть строки: знаки одной подписи смыкаются, соседние подписи — нет
+  const r = Math.max(1, Math.round(0.3 * text))
+  const blobs = inkBlobs(rest, w, h, r)
+  const out: TextBox[] = []
+  for (const b of blobs) {
+    const box = asLabel(b, text)
+    // Две подписи впритык («0,64» боком над «0,13») сливаются в одно пятно:
+    // его точки разбираются ещё раз с утолщением в пиксель. Пятно, что
+    // распалось на подписи разного направления или было велико для одной, —
+    // это несколько подписей
+    const tooBig = !box && Math.min(b.x2 - b.x1, b.y2 - b.y1) + 1 >= 0.6 * text && Math.max(b.x2 - b.x1, b.y2 - b.y1) + 1 <= 8 * text
+    if (r > 1 && (box || tooBig)) {
+      const parts = inkBlobs(b.ink, b.w, b.h, 1)
+        .map((p) => asLabel(p, text))
+        .filter((p): p is TextBox => !!p)
+        .map((p) => ({ ...p, x1: p.x1 + b.ox, y1: p.y1 + b.oy, x2: p.x2 + b.ox, y2: p.y2 + b.oy }))
+      if (tooBig || (parts.length >= 2 && parts.some((p) => p.vertical !== parts[0].vertical))) {
+        out.push(...parts)
+        continue
+      }
+    }
+    if (box) out.push(box)
+  }
+  return out
+}
+
+/** пятно чернил после утолщения: рамка по настоящим точкам и сами точки в окне рамки */
+interface InkBlob {
+  /** рамка в координатах окна */
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+  /** окно: сдвиг и размер */
+  ox: number
+  oy: number
+  w: number
+  h: number
+  ink: Uint8Array
+  size: number
+}
+
+function inkBlobs(ink0: Uint8Array, w: number, h: number, r: number): InkBlob[] {
+  const fat = maxFilter(ink0, w, h, r)
+  const { labels, list } = components({ ink: fat, w, h })
+  return list.map((c, k) => {
+    const ox = c.x1
+    const oy = c.y1
+    const bw = c.x2 - c.x1 + 1
+    const bh = c.y2 - c.y1 + 1
+    const ink = new Uint8Array(bw * bh)
+    let size = 0
+    let x1 = bw
+    let y1 = bh
+    let x2 = -1
+    let y2 = -1
+    for (let y = 0; y < bh; y++)
+      for (let x = 0; x < bw; x++) {
+        const i = (oy + y) * w + ox + x
+        if (!ink0[i] || labels[i] !== k + 1) continue
+        ink[y * bw + x] = 1
+        size++
+        if (x < x1) x1 = x
+        if (y < y1) y1 = y
+        if (x > x2) x2 = x
+        if (y > y2) y2 = y
+      }
+    return { x1, y1, x2: Math.max(x1, x2), y2: Math.max(y1, y2), ox, oy, w: bw, h: bh, ink, size }
+  })
+}
+
+/** пятно — подпись: высотой в строку, длиной в два–шесть знаков, не сплошь залито. Рамка — в координатах, где лежит окно пятна */
+function asLabel(b: InkBlob, text: number): TextBox | null {
+  const bw = b.x2 - b.x1 + 1
+  const bh = b.y2 - b.y1 + 1
+  const lo = Math.min(bw, bh)
+  const hi = Math.max(bw, bh)
+  if (!b.size || lo < 0.6 * text || lo > 1.9 * text || hi < 1.3 * text || hi > 6 * text) return null
+  const fill = b.size / (bw * bh)
+  if (fill < 0.12 || fill > 0.75) return null
+  return { x1: b.x1 + b.ox, y1: b.y1 + b.oy, x2: b.x2 + b.ox, y2: b.y2 + b.oy, glyphs: Math.max(2, Math.round(hi / (0.7 * text))), vertical: bh > bw }
+}
+
 export interface CleanResult {
   /** очищенная картинка: белая бумага, чёрные линии */
   gray: Uint8Array

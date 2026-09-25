@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { checkAiLayout, checkAiPlan, checkAiProduct, checkAiRoomLabel, extractJson } from '../src/planner/aicontract'
+import { checkAiLayout, checkAiNumbers, checkAiPlan, checkAiProduct, checkAiRoomLabel, extractJson, sizeFromText } from '../src/planner/aicontract'
 
 const wall = { x1: 0.1, y1: 0.1, x2: 0.9, y2: 0.1, thickness_cm: 25 }
 
@@ -170,5 +170,29 @@ describe('ответ по фрагменту комнаты', () => {
       { side: 'right', at: 0.5, cm: 38 },
       { side: 'left', at: 0.84, cm: 137 },
     ])
+  })
+})
+
+describe('размеры с листа вырезок', () => {
+  it('надпись → сантиметры: метры с двумя знаками, миллиметры, сантиметры; площадь и номер — не размер', () => {
+    expect(sizeFromText('3,72')).toBe(372)
+    expect(sizeFromText('0.26')).toBe(26)
+    expect(sizeFromText(' 1, 29 ')).toBe(129)
+    expect(sizeFromText('3720')).toBe(372)
+    expect(sizeFromText('372')).toBe(372)
+    expect(sizeFromText('0,13 м')).toBe(13)
+    expect(sizeFromText('13,9')).toBeNull()
+    expect(sizeFromText('5ж')).toBeNull()
+    expect(sizeFromText('□□□')).toBeNull()
+    expect(sizeFromText(null)).toBeNull()
+  })
+
+  it('ответ по листу: номер клетки и что в ней, пустое — null', () => {
+    expect(checkAiNumbers({ items: [{ n: 1, text: '3,72' }, { n: 2, text: null }, { n: '3', text: 0.26 }, { text: 'без номера' }] })).toEqual([
+      { n: 1, text: '3,72' },
+      { n: 2, text: null },
+      { n: 3, text: '0.26' },
+    ])
+    expect(() => checkAiNumbers({ note: 'не вижу' })).toThrow()
   })
 })

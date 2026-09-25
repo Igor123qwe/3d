@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applyH, binarize, boxBlur, cleanRaster, components, despeckle, distanceToInk, dominantAngle, flattenBackground, floodRoom, groundRoomBox, homography, keepWallStrokes, orderCorners, removeBlobs, segmentRooms, strokeWidth, hatchedStrips, keepLongRuns, textHeight, dropSpurs, withoutLooseText, textMask, type RoomRegion } from '../src/planner/raster'
+import { applyH, binarize, boxBlur, cleanRaster, components, despeckle, distanceToInk, dominantAngle, flattenBackground, floodRoom, groundRoomBox, homography, keepWallStrokes, orderCorners, removeBlobs, segmentRooms, strokeWidth, hatchedStrips, keepLongRuns, textHeight, dropSpurs, withoutLooseText, textMask, labelBoxes, type RoomRegion } from '../src/planner/raster'
 
 /** серый лист w × h с рисовалкой прямоугольников */
 function sheet(w: number, h: number, bg = 255) {
@@ -562,5 +562,77 @@ describe('цифра, прилипшая к стене', () => {
     expect(out.ink[24 * W + 35]).toBe(0)
     expect(out.ink[45 * W + 25]).toBe(1)
     expect(out.ink[30 * W + 11]).toBe(1)
+  })
+
+  describe('подписи рамками для чтения по одному', () => {
+    const W = 200
+    const H = 120
+    const make = () => {
+      const ink = new Uint8Array(W * H)
+      const wall = new Uint8Array(W * H)
+      const box = (x0: number, y0: number, x1: number, y1: number, isWall = false) => {
+        for (let y = y0; y <= y1; y++)
+          for (let x = x0; x <= x1; x++) {
+            ink[y * W + x] = 1
+            if (isWall) wall[y * W + x] = 1
+          }
+      }
+      // знак «0» высотой 10: контур 6 × 10 (боком — 10 × 6)
+      const glyph = (x0: number, y0: number, turned = false) => {
+        const [gw, gh] = turned ? [10, 6] : [6, 10]
+        box(x0, y0, x0 + gw - 1, y0)
+        box(x0, y0 + gh - 1, x0 + gw - 1, y0 + gh - 1)
+        box(x0, y0, x0, y0 + gh - 1)
+        box(x0 + gw - 1, y0, x0 + gw - 1, y0 + gh - 1)
+      }
+      return { ink, wall, box, glyph }
+    }
+
+    it('строка из знаков — одна рамка; строка боком — рамка стоймя; знак, прилипший к стене, — в подписи', () => {
+      const { ink, wall, box, glyph } = make()
+      // стена сверху во всю ширину и стена справа во всю высоту
+      box(0, 0, W - 1, 7, true)
+      box(W - 8, 0, W - 1, H - 1, true)
+      // «000» под верхней стеной: касается её
+      for (const x of [40, 48, 56]) glyph(x, 8)
+      // «000» боком у правой стены, посреди высоты
+      for (const y of [50, 58, 66]) glyph(W - 20, y, true)
+      const got = labelBoxes({ ink, w: W, h: H }, { ink: wall, w: W, h: H }, 10)
+      expect(got).toHaveLength(2)
+      const flat = got.find((b) => !b.vertical)!
+      expect(flat.x1).toBeLessThanOrEqual(41)
+      expect(flat.x2).toBeGreaterThanOrEqual(60)
+      const tall = got.find((b) => b.vertical)!
+      expect(tall.y1).toBeLessThanOrEqual(51)
+      expect(tall.y2).toBeGreaterThanOrEqual(70)
+    })
+
+    it('номер над площадью и ряд квадратиков штриховки — не подписи; две подписи впритык — две рамки', () => {
+      const { ink, wall, box, glyph } = make()
+      // «00» над чертой и «000» под ней: пятно в две строки
+      glyph(20, 20)
+      glyph(28, 20)
+      box(18, 32, 46, 32)
+      for (const x of [20, 28, 36]) glyph(x, 35)
+      // ряд из восьми квадратиков 8 × 8
+      for (let k = 0; k < 8; k++) {
+        const x0 = 70 + k * 11
+        box(x0, 20, x0 + 7, 20)
+        box(x0, 27, x0 + 7, 27)
+        box(x0, 20, x0, 27)
+        box(x0 + 7, 20, x0 + 7, 27)
+      }
+      // «00» боком и сразу под ним «000» прямо (как 0,64 над 0,13)
+      glyph(120, 60, true)
+      glyph(120, 68, true)
+      for (const x of [118, 126, 134]) glyph(x, 77)
+      const got = labelBoxes({ ink, w: W, h: H }, { ink: wall, w: W, h: H }, 10)
+      expect(got.filter((b) => b.x2 < 60)).toEqual([])
+      expect(got.filter((b) => b.x1 >= 70 && b.x2 < 160 && b.y2 < 40)).toEqual([])
+      const pair = got.filter((b) => b.y1 >= 55)
+      expect(pair).toHaveLength(2)
+      expect(pair.some((b) => b.vertical)).toBe(true)
+      expect(pair.some((b) => !b.vertical)).toBe(true)
+    })
   })
 })

@@ -81,11 +81,21 @@ export interface AiDimension {
   cm: number
 }
 
+/** число, прочитанное с картинки по месту: середина подписи (доли картинки), стоит ли строка боком, сколько */
+export interface AiMark {
+  x: number
+  y: number
+  vertical: boolean
+  cm: number
+}
+
 export interface AiPlan {
   walls: AiWall[]
   openings: AiOpening[]
   rooms: AiRoom[]
   dimensions: AiDimension[]
+  /** размеры, прочитанные по одному с вырезок: место знаем сами, модель только читает цифры */
+  marks?: AiMark[]
   note?: string
 }
 
@@ -132,6 +142,44 @@ const inRange = (v: unknown, lo: number, hi: number): number | null => {
 }
 
 const list = (v: unknown, cap: number): unknown[] => (Array.isArray(v) ? v.slice(0, cap) : [])
+
+/** что написано в вырезке номер n листа (null — не число или не прочиталось) */
+export interface AiNumberRead {
+  n: number
+  text: string | null
+}
+
+/** Проверить ответ по листу вырезок: по строке на вырезку */
+export function checkAiNumbers(data: unknown): AiNumberRead[] {
+  if (!data || typeof data !== 'object') throw new Error('не объект')
+  const d = data as Record<string, unknown>
+  const items = d.items ?? d.numbers
+  if (!Array.isArray(items)) throw new Error('items: ожидается список')
+  const out: AiNumberRead[] = []
+  for (const raw of list(items, 200)) {
+    const o = (raw ?? {}) as Record<string, unknown>
+    const n = Number(o.n ?? o.id ?? o.index)
+    if (!Number.isInteger(n) || n < 1) continue
+    const t = o.text ?? o.value
+    out.push({ n, text: typeof t === 'string' || typeof t === 'number' ? String(t).trim().slice(0, 24) || null : null })
+  }
+  return out
+}
+
+/**
+ * Размер из надписи на плане, в сантиметрах. «3,72» и «0,26» — метры с двумя
+ * знаками (так пишут БТИ), «3720» — миллиметры, «372» — сантиметры. Площадь
+ * «13,9», номер «5ж» и прочее — не размер: null
+ */
+export function sizeFromText(text: string | null | undefined): number | null {
+  if (!text) return null
+  const t = text.replace(/\s+/g, '').replace(/(мм|см|м)\.?$/i, '')
+  let cm: number | null = null
+  if (/^\d{1,2}[.,]\d{2}$/.test(t)) cm = Math.round(Number(t.replace(',', '.')) * 100)
+  else if (/^\d{4,5}$/.test(t)) cm = Math.round(Number(t) / 10)
+  else if (/^\d{3}$/.test(t)) cm = Number(t)
+  return cm !== null && cm >= 5 && cm <= 3000 ? cm : null
+}
 
 /** Что модель увидела на обведённом участке плана */
 export interface AiSpot {

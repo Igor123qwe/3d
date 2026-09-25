@@ -40,16 +40,16 @@ import { getTelegramWebApp } from '../telegram'
 import { guessType, modelRefFromAsset, modelRefFromUrl, phAssets, phCategories, phDimsCm, phInfo, phPage, type PhAsset } from './polyhaven'
 import { decodePlan, parseHash, planShareUrl } from './share'
 import { DEFAULT_TRACE, calibrate, detectWalls, grayscaleOf, joinCorners, loadUnderlayImage, makeUnderlay, mergeCollinear, nameFromFile, planFromImage, toPixel, toPlan, tracePlan, type LoadedImage, type TraceOptions } from './underlay'
-import { applyH, cleanRaster, distanceToInk, dominantAngle, floodRoom, grayToImage, groundRoomBox, hatchedStrips, perspectiveQuad, rectTarget, rotateImage, segmentRooms, segmentRoomsAuto, textHeight, warpToRect, withoutLooseText, type CleanResult, type RoomRegion } from './raster'
+import { applyH, cleanRaster, distanceToInk, dominantAngle, floodRoom, grayToImage, groundRoomBox, hatchedStrips, labelBoxes, perspectiveQuad, rectTarget, rotateImage, segmentRooms, segmentRoomsAuto, textHeight, warpToRect, withoutLooseText, type CleanResult, type RoomRegion, type TextBox } from './raster'
 import type { Guide } from './snapping'
-import { aiStatus, askLayout, askRoomLabel, askSpot, cropForVision, lookupProductViaServer, recognizePlan, type AiStatus } from './ai'
-import { applyAiPlan, convertAiPlan, fitResultToLabels, type ConvertResult } from './planai'
+import { aiStatus, askLayout, askNumbers, askRoomLabel, askSpot, cropForVision, lookupProductViaServer, numberSheet, recognizePlan, type AiCost, type AiStatus, type NumbersResult } from './ai'
+import { applyAiPlan, convertAiPlan, fitResultToLabels, marksFromReads, type ConvertResult } from './planai'
 import { evenWalls, rectifyWalls } from './rectify'
 import { pointOnSide } from './reconstruct'
 import { pointOnOutline } from './picture'
 import type { LabelDispute } from './segment'
-import type { AiBox, AiPlan } from './aicontract'
-import { checkAiPlan } from './aicontract'
+import type { AiBox, AiMark, AiPlan } from './aicontract'
+import { checkAiPlan, sizeFromText } from './aicontract'
 import { applyLayout, catalogForRoom, layoutSummary, vetLayout } from './autolayout'
 import {
   DEFAULT_AUTO,
@@ -88,6 +88,8 @@ interface Raster {
   d2: Float32Array | null
   wallD2: Float32Array | null
   pocketD2: Float32Array | null
+  /** подписи рамками — считаются, только когда их читать */
+  texts?: TextBox[]
 }
 
 /** высота мелких цифр, на которой выверен разбор, и выше какой картинку уменьшаем */
@@ -876,6 +878,24 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         const k = u.px.w / wu.px.w
         return regions.map((g) => ({ ...g, x1: g.x1 * k, y1: g.y1 * k, x2: g.x2 * k, y2: g.y2 * k, cx: g.cx * k, cy: g.cy * k, areaPx: g.areaPx * k * k, poly: g.poly?.map((p) => ({ x: p.x * k, y: p.y * k })) }))
       },
+      /** подписи, найденные на рабочей копии: рамки в пикселях подложки */
+      texts: async () => {
+        const u = plan.underlay
+        if (!u) return []
+        const { r, wu } = await ensureWork(u)
+        const k = u.px.w / wu.px.w
+        const text = textHeight(r.clean.marks)
+        if (!r.texts) r.texts = text ? labelBoxes(r.clean.marks, r.clean.walls, text) : []
+        return r.texts.map((g) => ({ ...g, x1: g.x1 * k, y1: g.y1 * k, x2: (g.x2 + 1) * k, y2: (g.y2 + 1) * k }))
+      },
+      /** лист вырезок, который уходит модели при «Распознать с ИИ» */
+      numberSheet: async () => {
+        const u = plan.underlay
+        if (!u) return null
+        const { regions, wu, r } = await regionsOf(u)
+        const pick = labelsToRead(r, regions)
+        return pick ? { image: await numberSheet(u.original ?? u.src, pick.boxes, wu.px.w, pick.text), count: pick.boxes.length } : null
+      },
       segmentRooms,
       segmentRoomsAuto,
       /**
@@ -884,13 +904,26 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
        * вручную эталона, а геометрию и оценку качества считает тот же код, что
        * и кнопка «Распознать с ИИ».
        */
-      runWithLabels: async (labels: unknown, opts: { apply?: boolean; asPicture?: boolean } = {}) => {
+      runWithLabels: async (labels: unknown, opts: { apply?: boolean; asPicture?: boolean; texts?: { x: number; y: number; text: string }[] } = {}) => {
         const u0 = plan.underlay
         if (!u0) return null
         const u = u0
         const straight = await planStraighten(u)
         const ai = checkAiPlan(labels)
         const { regions, wu, r: raster } = await regionsOf(u)
+        // Размеры по одному: лист «читается» по эталону — в каждой рамке то
+        // число, чья точка в эталоне попала в рамку. Так набор проверяет
+        // поиск подписей, привязку к стенам и подгонку без модели
+        let marksRead: { boxes: number; sizes: number } | null = null
+        if (opts.texts) {
+          const pick = labelsToRead(raster, regions)
+          if (pick) {
+            const m = 0.5 * pick.text
+            const reads = pick.boxes.map((b) => opts.texts!.find((t) => t.x * wu.px.w >= b.x1 - m && t.x * wu.px.w <= b.x2 + 1 + m && t.y * wu.px.h >= b.y1 - m && t.y * wu.px.h <= b.y2 + 1 + m)?.text ?? null)
+            ai.marks = marksFromReads(pick.boxes, reads, wu.px)
+            marksRead = { boxes: pick.boxes.length, sizes: ai.marks.length }
+          }
+        }
         const ground = (box: AiBox, closeCm: number) => {
           const closePx = Math.min(80, Math.max(3, Math.round(closeCm / wu.scale)))
           const g = groundRoomBox(raster.d2!, wu.px.w, wu.px.h, box, closePx)
@@ -906,6 +939,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         }
         return {
           report: result.report,
+          marksRead,
           regions: regions.length,
           walls: result.walls.map((w) => [Math.round(w.a.x), Math.round(w.a.y), Math.round(w.b.x), Math.round(w.b.y), w.thickness]),
           // проёмы с комнатами по обе стороны стены: по ним набор сверяет двери и окна с эталоном
@@ -924,6 +958,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             corners: r.polygon.length,
             at: { x: Math.round(r.meta.anchor.x), y: Math.round(r.meta.anchor.y) },
             box: { x1: Math.round(Math.min(...r.inner.map((p) => p.x))), y1: Math.round(Math.min(...r.inner.map((p) => p.y))), x2: Math.round(Math.max(...r.inner.map((p) => p.x))), y2: Math.round(Math.max(...r.inner.map((p) => p.y))) },
+            // длины граней в чистоте: по ним набор проверяет ниши и уступы
+            edges: r.inner.map((p, i) => Math.round(Math.hypot(r.inner[(i + 1) % r.inner.length].x - p.x, r.inner[(i + 1) % r.inner.length].y - p.y))),
             widthCm: Math.max(...r.inner.map((p) => p.x)) - Math.min(...r.inner.map((p) => p.x)),
             depthCm: Math.max(...r.inner.map((p) => p.y)) - Math.min(...r.inner.map((p) => p.y)),
           })),
@@ -932,6 +968,57 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plan.underlay])
+
+  /**
+   * Подписи, которые стоит прочитать по одному: внутри найденных комнат и у
+   * их стен, сверху вниз и слева направо. Квадратики штриховки за наружной
+   * стеной и мусор на полях скриншота сюда не попадают
+   */
+  const labelsToRead = (r: Raster, regions: RoomRegion[]): { boxes: TextBox[]; text: number } | null => {
+    const text = textHeight(r.clean.marks)
+    if (!text) return null
+    if (!r.texts) r.texts = labelBoxes(r.clean.marks, r.clean.walls, text)
+    const near = 1.5 * text
+    const boxes = r.texts
+      .filter((b) => {
+        const cx = (b.x1 + b.x2) / 2
+        const cy = (b.y1 + b.y2) / 2
+        return regions.some((g) => cx >= g.x1 - near && cx <= g.x2 + near && cy >= g.y1 - near && cy <= g.y2 + near)
+      })
+      .sort((a, b) => a.y1 - b.y1 || a.x1 - b.x1)
+      .slice(0, 60)
+    return boxes.length >= 2 ? { boxes, text } : null
+  }
+
+  /**
+   * Размеры по одному. Подписи уже найдены на картинке рамками — модели
+   * остаётся прочитать числа на листе вырезок, крупных и прямых. Где стоит
+   * число и какую стену меряет, видно по месту: сторону и место вдоль стены
+   * модель больше не угадывает. Лист, который дешёвая модель вернула почти
+   * пустым, уходит следующей: неполный ответ — не ошибка для цепочки, но и
+   * не ответ
+   */
+  const readMarks = async (photo: string, r: Raster, wu: Underlay, regions: RoomRegion[]): Promise<{ marks: AiMark[]; ai: AiCost; boxes: number; sizes: number } | null> => {
+    const pick = labelsToRead(r, regions)
+    if (!pick) return null
+    const { boxes, text } = pick
+    const sheet = await numberSheet(photo, boxes, wu.px.w, text)
+    const readsOf = (ans: NumbersResult) => boxes.map((_, i) => ans.numbers.find((x) => x.n === i + 1)?.text ?? null)
+    const sizes = (reads: (string | null)[]) => reads.filter((t) => sizeFromText(t) !== null).length
+    const first = await askNumbers(sheet, boxes.length)
+    let reads = readsOf(first)
+    let ai: AiCost = first.ai
+    if (sizes(reads) < Math.ceil(boxes.length / 4)) {
+      const again = await askNumbers(sheet, boxes.length, undefined, 1).catch(() => null)
+      if (again) {
+        // в отчёт — модель, чьи числа взяты; цена — за оба прохода
+        const better = sizes(readsOf(again)) > sizes(reads)
+        if (better) reads = readsOf(again)
+        ai = { ...(better ? again.ai : first.ai), costRub: first.ai.costRub + again.ai.costRub, tried: [...(first.ai.tried ?? []), ...(again.ai.tried ?? [])] }
+      }
+    }
+    return { marks: marksFromReads(boxes, reads, wu.px), ai, boxes: boxes.length, sizes: sizes(reads) }
+  }
 
   /**
    * Прочитать подписи комнат по их фрагментам: каждая область с картинки
@@ -1180,6 +1267,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       walls,
       openings: res.openings.filter((o) => ids.has(o.wallId)),
       rooms: res.rooms.map((m) => ({ ...m, anchor: map(m.anchor) })),
+      ...(res.marks ? { marks: res.marks.map((m) => ({ ...m, at: map(m.at) })) } : {}),
       underlay: to,
     }
   }
@@ -1449,9 +1537,18 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           }
         : undefined
       const rasterInfo = d2 ? { d2, w: wu.px.w, h: wu.px.h } : null
-      const convert = (p: AiPlan) => fromWork(convertAiPlan(p, wu, { keepScale: calibrated, ground, regions, raster: rasterInfo }), u)
+      // размеры, прочитанные по одному, идут в каждый вариант ответа модели
+      let marks: AiMark[] = []
+      const convert = (p: AiPlan) => fromWork(convertAiPlan(marks.length ? { ...p, marks } : p, wu, { keepScale: calibrated, ground, regions, raster: rasterInfo }), u)
       // подписи модель читает по исходному фото: очистка стирает цифры вместе с засечками
       const photo = u.original ?? u.src
+      // размеры по одному — параллельно с подписями комнат
+      const marksAsk = work && regions.length >= 2
+        ? readMarks(photo, work.r, wu, regions).catch((e) => {
+            console.info('[ИИ] размеры по одному не прочитались', (e as Error).message)
+            return null
+          })
+        : Promise.resolve(null)
       // Комнаты уже найдены по картинке — значит модели можно показывать их по
       // одной, крупно. Мелкие цифры на общем снимке она путает («0.82» читает
       // как «3.84»), а на увеличенном фрагменте одной комнаты — нет
@@ -1460,6 +1557,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       const notRooms = byRooms?.notRooms.length ?? 0
       if (byRooms && notRooms) regions = regions.filter((g) => !byRooms.notRooms.includes(g))
       let { plan: read, ai: cost } = byRooms ?? (await recognizePlan(photo))
+      const byMarks = await marksAsk
+      if (byMarks) {
+        marks = byMarks.marks
+        cost = { ...cost, costRub: cost.costRub + byMarks.ai.costRub, tried: [...(cost.tried ?? []), ...(byMarks.ai.tried ?? [])] }
+      }
       // масштаб не трогаем, если пользователь уже откалибровал подложку руками
       let result = convert(read)
       let attempts = 1
@@ -1554,7 +1656,12 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       }
       // подписи вдоль стен: без них ниши, уступы и коридор остаются как на картинке
       const wl = fitted.report.wallLabels
-      if (wl) {
+      // размеры по одному: сколько подписей нашлось, сколько прочитано, сколько легло на стены
+      if (byMarks) {
+        const on = wl?.placed?.matched ?? 0
+        lines.push(`Размеры по одному: на картинке ${byMarks.boxes} подписей, числами прочитано ${byMarks.sizes}, легли на стены ${on}${byMarks.ai.model ? ` (${byMarks.ai.model})` : ''}.`)
+      }
+      if (wl && (wl.read || !wl.placed?.matched)) {
         const cm = (v: number) => fmtNum(v / 100)
         lines.push(
           !wl.read
@@ -1585,7 +1692,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       if (r.note) lines.push(`Модель: ${r.note}`)
       lines.push(q.verdict === 'ok' ? 'Проверьте чертёж поверх фото и подтвердите масштаб.' : 'Результат требует проверки: смотрите разделы выше и уточните спорные места.')
       // сырой ответ модели и отчёт — в консоль и по кнопке в буфер: без них не разобрать, что пошло не так
-      const debugReport = { model: cost.model, tried: cost.tried, answer: read, report: r }
+      const debugReport = { model: cost.model, tried: cost.tried, answer: read, marks, report: r }
       console.info('[ИИ] распознавание плана', debugReport)
       setAsk({
         title: 'Распознано',

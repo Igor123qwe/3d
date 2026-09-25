@@ -7,7 +7,7 @@
 // Это единственная задача, где нужна модель подороже, поэтому цепочка идёт от
 // дешёвой к сильной: сильная включается, только если дешёвая вернула ерунду.
 import { askJson, aiConfig, clientIp, fail, json, rateLimit, readJsonBody } from './_lib'
-import { checkAiPlan, checkAiRoomLabel, checkAiSpot } from '../src/planner/aicontract'
+import { checkAiNumbers, checkAiPlan, checkAiRoomLabel, checkAiSpot } from '../src/planner/aicontract'
 
 export const config = { runtime: 'edge' }
 
@@ -64,15 +64,23 @@ const ROOM_PROMPT = `Тебе прислали увеличенный кусок
 - Если на куске не помещение, а штриховка стены, вентиляционная шахта, колонна или кладка (ряды мелких квадратиков, частая штриховка), верни {"not_room":true,"note":"что это"}.
 - Если подписи нечитаемы, верни то, что уверенно прочитала, и напиши об этом в note. Пустые поля лучше выдуманных.`
 
+const NUMBERS_PROMPT = `Тебе прислали лист вырезок с плана квартиры. Каждая вырезка стоит в своей клетке, слева от неё — красная метка с номером клетки. В вырезке обычно одно число — размер стены: «3,72», «0,68», «1,29», «4.26». Бывает и не число: квадратики штриховки, буква, номер комнаты, обрывок линии.
+
+Если в клетке две картинки — это одна и та же надпись, повёрнутая в разные стороны: перепиши её по той, где цифры стоят прямо.
+
+Перепиши, что написано в каждой клетке, ровно как написано: цифры и запятую или точку между ними. Не переводи в сантиметры, не исправляй и не додумывай. Если в клетке не число или его нельзя прочитать уверенно — text null.
+
+Верни ТОЛЬКО JSON: {"items":[{"n":1,"text":"3,72"},{"n":2,"text":null},{"n":3,"text":"0,26"}]} — по строке на каждую клетку, по порядку номеров.`
+
 export default async function handler(req: Request): Promise<Response> {
   if (req.method !== 'POST') return fail('нужен POST', 405)
   const cfg = aiConfig()
   if (!cfg) return fail('ИИ не подключён: на сервере нет ключа ROUTERAI_API_KEY', 503)
   const ip = clientIp(req)
 
-  let body: { image?: string; hint?: string; escalate?: number; spot?: boolean; room?: boolean }
+  let body: { image?: string; hint?: string; escalate?: number; spot?: boolean; room?: boolean; numbers?: boolean; count?: number }
   try {
-    body = await readJsonBody<{ image?: string; hint?: string; escalate?: number; spot?: boolean; room?: boolean }>(req, IMAGE_LIMIT)
+    body = await readJsonBody<{ image?: string; hint?: string; escalate?: number; spot?: boolean; room?: boolean; numbers?: boolean; count?: number }>(req, IMAGE_LIMIT)
   } catch (e) {
     return fail((e as Error).message, 413)
   }
@@ -83,7 +91,7 @@ export default async function handler(req: Request): Promise<Response> {
   // или спорное место — маленькие вызовы дешёвой моделью, и их на один план
   // уходит по числу комнат: свой лимит, иначе чтение по фрагментам упирается
   // в потолок уже на первом плане
-  const small = !!body.room || !!body.spot
+  const small = !!body.room || !!body.spot || !!body.numbers
   const limit = small ? { limit: 200, windowMs: 10 * 60_000, bucket: 'plan-part' } : { limit: 10, windowMs: 10 * 60_000, bucket: 'plan' }
   if (!rateLimit(ip, limit)) return fail(small ? 'слишком часто: не больше 200 фрагментов за 10 минут' : 'слишком часто: не больше 10 планов за 10 минут', 429)
 
@@ -108,6 +116,31 @@ export default async function handler(req: Request): Promise<Response> {
         ],
       })
       return json({ room: answer.value, ai: { model: answer.model, costRub: answer.costRub, tried: answer.tried } })
+    } catch (e) {
+      return fail((e as Error).message, 502)
+    }
+  }
+
+  // размеры по одному: лист вырезок, место каждой подписи клиент знает сам
+  if (body.numbers) {
+    const count = Math.max(1, Math.min(200, Math.round(Number(body.count) || 0)))
+    try {
+      const answer = await askJson(cfg, {
+        task: 'plan',
+        startAt: Math.max(0, Math.min(3, Number(body.escalate) || 0)),
+        check: checkAiNumbers,
+        messages: [
+          { role: 'system', content: NUMBERS_PROMPT },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: `На листе ${count} клеток, номера от 1 до ${count}. Перепиши, что написано в каждой.` },
+              { type: 'image_url', image_url: { url: image } },
+            ],
+          },
+        ],
+      })
+      return json({ numbers: answer.value, ai: { model: answer.model, costRub: answer.costRub, tried: answer.tried } })
     } catch (e) {
       return fail((e as Error).message, 502)
     }

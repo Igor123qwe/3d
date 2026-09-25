@@ -5,7 +5,7 @@
 // обмер, картинка — эскиз: грани стен сдвигаются так, чтобы ширина, глубина
 // и размеры вдоль стен сошлись с числами, а форма осталась с картинки.
 import type { Pt, Wall } from './types'
-import { polyArea } from './geometry'
+import { pointInPoly, polyArea } from './geometry'
 
 /** требование к оси: расстояние между двумя осями стен должно стать want */
 export interface AxisSpan {
@@ -229,6 +229,69 @@ function edgeCandidates(inner: Pt[], label: WallLabel, relaxed = false): { lo: n
   return out
 }
 
+/** число, прочитанное прямо с картинки: где стоит на плане и вдоль какой оси лежит строка */
+export interface PlacedLabel {
+  at: Pt
+  /** строка лежит вдоль x — меряет горизонтальную стену */
+  alongX: boolean
+  cm: number
+}
+
+/**
+ * Числа с картинки — к граням. Число стоит внутри комнаты у стены, которую
+ * меряет, и лежит вдоль неё: ищется параллельная грань контура напротив
+ * числа, чья длина сходится с ним. Сторону и место вдоль стены угадывать не
+ * нужно — они видны по картинке. Сначала самые уверенные пары: одно число —
+ * одна грань
+ */
+function placeLabels(rooms: LabelledRoom[], placed: PlacedLabel[]): { room: number; edge: number; lo: number; hi: number; label: PlacedLabel }[] {
+  const cands: { room: number; edge: number; lo: number; hi: number; k: number; score: number }[] = []
+  placed.forEach((label, k) => {
+    const own = rooms.map((r) => r.inner.length >= 3 && pointInPoly(label.at, r.inner))
+    const anyOwn = own.some(Boolean)
+    rooms.forEach((r, j) => {
+      if (r.inner.length < 3 || (anyOwn && !own[j])) return
+      r.inner.forEach((p, i) => {
+        const q = r.inner[(i + 1) % r.inner.length]
+        const isH = Math.abs(p.y - q.y) < 0.5 && Math.abs(p.x - q.x) >= 1
+        const isV = Math.abs(p.x - q.x) < 0.5 && Math.abs(p.y - q.y) >= 1
+        if (label.alongX ? !isH : !isV) return
+        const lo = label.alongX ? Math.min(p.x, q.x) : Math.min(p.y, q.y)
+        const hi = label.alongX ? Math.max(p.x, q.x) : Math.max(p.y, q.y)
+        const along = label.alongX ? label.at.x : label.at.y
+        // число стоит напротив грани, а не где-то за её концом
+        if (along < lo - 15 || along > hi + 15) return
+        const d = Math.abs(label.alongX ? label.at.y - p.y : label.at.x - p.x)
+        // «4,26» в 4ж написано на четверть комнаты от стены; у стены без
+        // своей комнаты (число поверх линии) — только вплотную
+        if (d > (anyOwn ? Math.max(60, 0.3 * label.cm) : 40)) return
+        // между числом и гранью — сама комната, а не соседний выступ
+        if (anyOwn) {
+          const foot = label.alongX ? { x: Math.min(hi, Math.max(lo, along)), y: p.y } : { x: p.x, y: Math.min(hi, Math.max(lo, along)) }
+          if (!pointInPoly({ x: (foot.x + label.at.x) / 2, y: (foot.y + label.at.y) / 2 }, r.inner)) return
+        }
+        // длина сходится; у числа вплотную к грани — с запасом на ступеньку, распознанную не на месте
+        const len = hi - lo
+        const tol = d <= 45 ? Math.max(20, 0.2 * label.cm) : Math.max(8, 0.1 * label.cm)
+        if (Math.abs(len - label.cm) > tol) return
+        cands.push({ room: j, edge: i, lo, hi, k, score: d / 100 + Math.abs(len - label.cm) / Math.max(30, label.cm) })
+      })
+    })
+  })
+  cands.sort((a, b) => a.score - b.score)
+  const usedLabel = new Set<number>()
+  const usedEdge = new Set<string>()
+  const out: { room: number; edge: number; lo: number; hi: number; label: PlacedLabel }[] = []
+  for (const c of cands) {
+    const key = `${c.room}:${c.edge}`
+    if (usedLabel.has(c.k) || usedEdge.has(key)) continue
+    usedLabel.add(c.k)
+    usedEdge.add(key)
+    out.push({ room: c.room, edge: c.edge, lo: c.lo, hi: c.hi, label: placed[c.k] })
+  }
+  return out
+}
+
 /**
  * Подогнать стены под подписи. Узлы резинки — грани стен, а не оси: толщина
  * стены — тоже отрезок, и если подписи требуют («4,08 = 2,58 + стена + 1,37»),
@@ -242,18 +305,41 @@ function edgeCandidates(inner: Pt[], label: WallLabel, relaxed = false): { lo: n
 export interface WallLabelsReport {
   read: number
   unmatched: { name: string; side: WallLabel['side']; cm: number }[]
+  /** числа, прочитанные с картинки по одному: сколько и сколько из них легло на грани */
+  placed?: { read: number; matched: number }
 }
 
-export function fitToLabels(walls: Wall[], rooms: LabelledRoom[]): { walls: Wall[]; map: (p: Pt) => Pt; fixes: SizeFix[]; wallLabels: WallLabelsReport } {
+export function fitToLabels(walls: Wall[], rooms: LabelledRoom[], placed: PlacedLabel[] = []): { walls: Wall[]; map: (p: Pt) => Pt; fixes: SizeFix[]; wallLabels: WallLabelsReport } {
   const xs: AxisSpan[] = []
   const ys: AxisSpan[] = []
   const fixes: SizeFix[] = []
-  const wallLabels: WallLabelsReport = { read: 0, unmatched: [] }
+  const onEdges = placeLabels(rooms, placed)
+  const wallLabels: WallLabelsReport = { read: 0, unmatched: [], ...(placed.length ? { placed: { read: placed.length, matched: onEdges.length } } : {}) }
   // где мерить подпись вдоль стены после подгонки
   const edges = new Map<SizeFix, { lo: number; hi: number; alongX: boolean }>()
   const fits = (have: number, want: number) => Math.abs(have - want) <= Math.max(12, 0.06 * want)
-  for (const r of rooms) {
+  for (const [j, r] of rooms.entries()) {
     if (r.inner.length < 3) continue
+    // Числа с картинки — первыми: где они стоят, видно точно. Грань, что
+    // уже получила число, подписи модели не достаётся, а число во всю
+    // сторону комнаты заменяет прочитанную моделью ширину или глубину
+    const usedEdge = new Set<number>()
+    let placedW = false
+    let placedD = false
+    {
+      const b = bbox(r.inner)
+      for (const e of onEdges) {
+        if (e.room !== j) continue
+        usedEdge.add(e.edge)
+        const alongX = e.label.alongX
+        ;(alongX ? xs : ys).push({ lo: e.lo, hi: e.hi, want: e.label.cm })
+        const fix: SizeFix = { name: r.name, axis: 'wall', fromCm: Math.round(e.hi - e.lo), toCm: e.label.cm }
+        fixes.push(fix)
+        edges.set(fix, { lo: e.lo, hi: e.hi, alongX })
+        if (alongX && Math.abs(e.lo - b.x1) <= 3 && Math.abs(e.hi - b.x2) <= 3) placedW = true
+        if (!alongX && Math.abs(e.lo - b.y1) <= 3 && Math.abs(e.hi - b.y2) <= 3) placedD = true
+      }
+    }
     const f = bbox(r.inner)
     const haveW = f.x2 - f.x1
     const haveD = f.y2 - f.y1
@@ -279,11 +365,15 @@ export function fitToLabels(walls: Wall[], rooms: LabelledRoom[]): { walls: Wall
         guessed = 'width'
       }
     }
-    if (widthCm && fits(haveW, widthCm)) {
+    if (placedW) {
+      // ширина уже задана числом с картинки
+    } else if (widthCm && fits(haveW, widthCm)) {
       xs.push({ lo: f.x1, hi: f.x2, want: widthCm, weight: guessed === 'width' ? 0.5 : 1 })
       fixes.push({ name: r.name, axis: 'width', fromCm: Math.round(haveW), toCm: widthCm })
     } else if (boxy) xs.push({ lo: f.x1, hi: f.x2, want: haveW, weight: 0.2 })
-    if (depthCm && fits(haveD, depthCm)) {
+    if (placedD) {
+      // глубина уже задана числом с картинки
+    } else if (depthCm && fits(haveD, depthCm)) {
       ys.push({ lo: f.y1, hi: f.y2, want: depthCm, weight: guessed === 'depth' ? 0.5 : 1 })
       fixes.push({ name: r.name, axis: 'depth', fromCm: Math.round(haveD), toCm: depthCm })
     } else if (boxy) ys.push({ lo: f.y1, hi: f.y2, want: haveD, weight: 0.2 })
@@ -291,7 +381,6 @@ export function fitToLabels(walls: Wall[], rooms: LabelledRoom[]): { walls: Wall
     // выступа не должна забрать грань закутка, которой ближе подпись 0,73
     const pairs = (r.walls ?? []).flatMap((label, k) => edgeCandidates(r.inner, label).map((e) => ({ ...e, k, label })))
     pairs.sort((p, q) => p.score - q.score)
-    const usedEdge = new Set<number>()
     const usedLabel = new Set<number>()
     // вторым заходом — подписи, что стоят точно у своей грани, но разошлись с ней по длине
     const loose = (r.walls ?? []).flatMap((label, k) => edgeCandidates(r.inner, label, true).map((e) => ({ ...e, k, label, score: e.score + 1 })))
@@ -309,7 +398,9 @@ export function fitToLabels(walls: Wall[], rooms: LabelledRoom[]): { walls: Wall
     }
     wallLabels.read += (r.walls ?? []).length
     ;(r.walls ?? []).forEach((label, k) => {
-      if (!usedLabel.has(k)) wallLabels.unmatched.push({ name: r.name, side: label.side, cm: label.cm })
+      // то же число уже легло с картинки — не потеряно
+      const dup = onEdges.some((e) => e.room === j && Math.abs(e.label.cm - label.cm) <= 2)
+      if (!usedLabel.has(k) && !dup) wallLabels.unmatched.push({ name: r.name, side: label.side, cm: label.cm })
     })
   }
   const same = (p: Pt) => p

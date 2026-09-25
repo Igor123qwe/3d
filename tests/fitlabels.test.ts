@@ -153,6 +153,66 @@ describe('размеры по подписям', () => {
     expect(none.fixes.some((f) => f.axis === 'depth')).toBe(false)
   })
 
+  describe('числа, прочитанные с картинки по месту', () => {
+    const w = (id: string, ax: number, ay: number, bx: number, by: number): Wall => ({ id, a: { x: ax, y: ay }, b: { x: bx, y: by }, thickness: 10 })
+    // комната 360 × 390 в чистоте с нишей справа сверху: ниша по картинке 105 × 65,
+    // на плане 1,29 × 0,68 (как у входа в прихожую)
+    const walls = [w('t', 0, 0, 370, 0), w('l', 0, 0, 0, 400), w('b', 0, 400, 300, 400), w('r', 300, 110, 300, 400), w('nb', 300, 110, 370, 110), w('nr', 370, 0, 370, 110)]
+    const inner = [
+      { x: 5, y: 5 },
+      { x: 365, y: 5 },
+      { x: 365, y: 105 },
+      { x: 295, y: 105 },
+      { x: 295, y: 395 },
+      { x: 5, y: 395 },
+    ]
+    const at = (res: ReturnType<typeof fitToLabels>, id: string) => res.walls.find((x) => x.id === id)!
+
+    it('встают на грань, у которой стоят, без стороны и места от модели', () => {
+      const res = fitToLabels(
+        walls,
+        [{ name: '1', axes: [], inner }],
+        [
+          // «1,29» боком у правой стены ниши, «0,68» над низом ниши
+          { at: { x: 350, y: 55 }, alongX: false, cm: 119 },
+          { at: { x: 330, y: 95 }, alongX: true, cm: 68 },
+        ],
+      )
+      expect(res.wallLabels.placed).toEqual({ read: 2, matched: 2 })
+      const face = (id: string, s: number) => at(res, id).a.y + (s * at(res, id).thickness) / 2
+      expect(face('nb', -1) - face('t', 1)).toBeCloseTo(119, 0)
+      const fx = (id: string, s: number) => at(res, id).a.x + (s * at(res, id).thickness) / 2
+      // ниша — от грани комнаты (продолжение правой стены) до стены ниши
+      expect(fx('nr', -1) - fx('r', -1)).toBeCloseTo(68, 0)
+    })
+
+    it('число не той длины или за концом грани стены не двигает', () => {
+      const res = fitToLabels(
+        walls,
+        [{ name: '1', axes: [], inner }],
+        [
+          // у низа ниши (65 в чистоте) — 1,50: ошибка чтения
+          { at: { x: 330, y: 95 }, alongX: true, cm: 150 },
+          // у левой стены, но выше комнаты — не её число
+          { at: { x: 20, y: -80 }, alongX: false, cm: 390 },
+        ],
+      )
+      expect(res.wallLabels.placed).toEqual({ read: 2, matched: 0 })
+      expect(res.walls).toBe(walls)
+    })
+
+    it('число во всю сторону заменяет ширину от модели, а подпись модели на ту же грань не идёт', () => {
+      const res = fitToLabels(
+        walls,
+        [{ name: '1', axes: [], inner, depthCm: 380, walls: [{ side: 'left', at: 0.5, cm: 380 }] }],
+        [{ at: { x: 30, y: 200 }, alongX: false, cm: 392 }],
+      )
+      expect(at(res, 'b').a.y - at(res, 't').a.y - 10).toBeCloseTo(392, 0)
+      // подпись модели 380 — то же место, но другое число: грань занята, в «не нашли» она попадает
+      expect(res.wallLabels.unmatched).toEqual([{ name: '1', side: 'left', cm: 380 }])
+    })
+  })
+
   it('подпись, что расходится с картинкой сильнее 6 %, — ошибка чтения: стены не двигаются', () => {
     const res = fitToLabels(walls, [room('4ж', 0, 410, 310), room('2', 410, 762, 342)])
     expect(res.fixes).toEqual([])

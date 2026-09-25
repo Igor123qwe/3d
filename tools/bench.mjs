@@ -63,7 +63,8 @@ async function runPlan(page, plan) {
     await page.click(`.pl-stepper button:has-text("${step}")`)
     await page.waitForTimeout(1200)
   }
-  const out = await page.evaluate((labels) => window.__plannerDebug.runWithLabels(labels), plan.ref.labels)
+  // texts — числа, прочитанные по одному с листа вырезок: эталон «читает» лист без модели
+  const out = await page.evaluate(([labels, texts]) => window.__plannerDebug.runWithLabels(labels, texts ? { texts } : {}), [plan.ref.labels, plan.ref.texts ?? null])
   if (!out) throw new Error(`${plan.name}: подложка не загрузилась`)
   return { ...score(plan.ref, out), ms: Date.now() - t0, raw: out }
 }
@@ -108,6 +109,14 @@ function score(ref, out) {
       const fill = (got.areaM2 * 1e4) / Math.max(1, got.widthCm * got.depthCm)
       const bad = w.shape === 'rect' ? fill < (w.shapeFill ?? 0.97) : fill > (w.shapeFill ?? 0.95)
       if (bad) shapeOff.push({ name: w.name, fill: +fill.toFixed(2), want: w.shape === 'rect' ? 'прямоугольная' : 'с вырезом' })
+    }
+    // Грани, подписанные на плане: ниша 1,29 × 0,68, уступ 0,26 — у комнаты
+    // должна быть грань такой длины. Ширина и глубина этого не видят: ниша
+    // 103 × 38 вместо 1,29 × 0,68 рамку прихожей не меняет
+    for (const cm of w.edges ?? []) {
+      const tolE = w.edgeTolCm ?? 3
+      const near = (got.edges ?? []).reduce((m, e) => Math.min(m, Math.abs(e - cm)), Infinity)
+      sizeOff.push({ name: `${w.name} грань ${cm}`, deltaCm: Number.isFinite(near) ? Math.round(near) : 999, tol: tolE, bad: !(near <= tolE) })
     }
     // мелкие уступы площадь почти не меняют (выступ 0,64 × 0,13 — 0,08 м²): их видно по числу углов
     if (w.minCorners && (got.corners ?? 0) < w.minCorners) shapeOff.push({ name: w.name, fill: got.corners ?? 0, want: `не меньше ${w.minCorners} углов — пропал уступ` })
