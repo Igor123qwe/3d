@@ -45,7 +45,7 @@ import type { Guide } from './snapping'
 import { aiStatus, askLayout, askNumbers, askRoomLabel, askSpot, cropForVision, lookupProductViaServer, numberSheet, recognizePlan, type AiCost, type AiStatus, type NumbersResult } from './ai'
 import { applyAiPlan, convertAiPlan, fitResultToLabels, marksFromReads, roomLabelInBox, type ConvertResult } from './planai'
 import { evenWalls, rectifyWalls } from './rectify'
-import { closeGaps, deleteRun, findGaps, guardLocks, setAllLocked, setRunLength, setRunLocked, setRunThickness, touchesLocked, wallRun } from './walledit'
+import { closeGaps, deleteRun, findGaps, guardLocks, refLength, setAllLocked, setRunLengthBy, setRunLocked, setRunThickness, touchesLocked, wallRun } from './walledit'
 import { pointOnSide } from './reconstruct'
 import { pointOnOutline } from './picture'
 import type { LabelDispute } from './segment'
@@ -198,6 +198,12 @@ const MODES: { mode: EditMode; icon: IconName; name: string; hint: string }[] = 
   { mode: 'build', icon: 'wall', name: 'Стройка', hint: 'Стены, двери, окна, размеры. Мебель и электрика видны, но не цепляются мышью' },
   { mode: 'furnish', icon: 'furniture', name: 'Мебель', hint: 'Только мебель: стены и электрика не сдвинутся случайно' },
   { mode: 'electric', icon: 'bolt', name: 'Электрика', hint: 'Только точки электрики: розетки, выключатели, свет, щит' },
+]
+
+const WALL_REFS: { ref: WallRef; name: string; long: string }[] = [
+  { ref: 'axis', name: 'по оси', long: 'по оси' },
+  { ref: 'inner', name: 'внутри', long: 'по внутренней грани' },
+  { ref: 'outer', name: 'снаружи', long: 'по наружной грани' },
 ]
 
 const COLORS = ['', '#e6edf7', '#f5e9d8', '#e6f3e8', '#e0f1f7', '#fdf1dc', '#fbe7ee', '#ececec', '#d9c9b4', '#c7d2fe', '#bbf7d0', '#fecaca', '#fde68a', '#ffffff', '#4b5563']
@@ -2066,6 +2072,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       const run = wallRun(plan.walls, w.id)
       const L = run ? dist(run.a, run.b) : dist(w.a, w.b)
       const locked = !!w.locked
+      // длина по выбранной линии: оси, внутренней или наружной грани
+      const byRef = run ? refLength(plan.walls, rooms, run, wallRef) : null
+      const refName = WALL_REFS.find((r) => r.ref === (byRef?.used ?? 'axis'))!.long
       // правка, что задела зафиксированную стену, не применяется — и об этом сказано
       const guarded = (f: (p: Plan) => Plan) => {
         const next = f(plan)
@@ -2075,10 +2084,33 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       return (
         <div>
           <div className="pl-props-title">Стена</div>
-          <label className="pl-field">
-            <span>Длина, см</span>
-            <NumberField value={Math.round(L)} min={MIN_WALL_LENGTH} step={5} onCommit={(v) => guarded((p) => setRunLength(p, w.id, v))} />
-          </label>
+          <div className="pl-field">
+            <span>Длину считать</span>
+            <div className="pl-chips">
+              {WALL_REFS.map((r) => (
+                <button key={r.ref} className={`pl-chip ${wallRef === r.ref ? 'active' : ''}`} onClick={() => setWallRef(r.ref)} title={`Длина стены ${r.long}`}>
+                  {r.name}
+                </button>
+              ))}
+            </div>
+          </div>
+          {byRef && byRef.value !== null ? (
+            <label className="pl-field">
+              <span>Длина {refName}, см</span>
+              <NumberField value={Math.round(byRef.value * 10) / 10} min={MIN_WALL_LENGTH} step={5} onCommit={(v) => guarded((p) => setRunLengthBy(p, rooms, w.id, v, byRef.used))} />
+            </label>
+          ) : (
+            <label className="pl-field">
+              <span>Длина по оси, см</span>
+              <NumberField value={Math.round(L)} min={MIN_WALL_LENGTH} step={5} onCommit={(v) => guarded((p) => setRunLengthBy(p, rooms, w.id, v, 'axis'))} />
+            </label>
+          )}
+          {byRef && byRef.value === null && (
+            <div className="pl-note">
+              Внутренняя грань разрезана стенами, что к ней примыкают: {byRef.segs.map((x) => fmtLen(x.length, unit)).join(' + ')}. Это стороны разных комнат — каждую задают щелчком по её размеру на плане.
+            </div>
+          )}
+          {byRef && byRef.used !== wallRef && <div className="pl-note">С обеих сторон этой стены комнаты — наружной грани нет, длина по оси.</div>}
           <label className="pl-field">
             <span>Толщина, см</span>
             <select value={w.thickness} disabled={locked} onChange={(e) => guarded((p) => setRunThickness(p, w.id, Number(e.target.value)))}>
@@ -2980,6 +3012,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                   value={unit}
                   onChange={setUnit}
                 />
+                <MenuGroup title="Длина стены" />
+                <MenuChoice options={WALL_REFS.map((r) => ({ value: r.ref, label: r.name }))} value={wallRef} onChange={setWallRef} />
                 <MenuGroup title="Шаг сетки" />
                 <MenuChoice
                   options={[5, 10, 25, 50].map((g) => ({ value: g, label: `${g} см` }))}
@@ -3202,6 +3236,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           onRefine={onRefineArea}
           onNotice={setToast}
           mode={mode}
+          wallRef={wallRef}
         />
       )}
 

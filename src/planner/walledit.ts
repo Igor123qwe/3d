@@ -10,9 +10,9 @@
 // перемычки — так делается ниша или выступ. После каждой правки чертёж
 // склеивается: соосные куски без стыка между ними — одна стена, стена нулевой
 // длины уходит, наложенные стены сливаются.
-import type { Opening, Plan, Pt, Wall } from './types'
+import type { Opening, Plan, Pt, Room, Wall, WallRef } from './types'
 import { uid } from './types'
-import { add, cross, dist, dot, lerp, mul, norm, perp, pointSegDist, sub } from './geometry'
+import { add, cross, dist, dot, lerp, mul, norm, perp, pointInPoly, pointSegDist, sub } from './geometry'
 import { cleanupWalls, MIN_WALL_LENGTH } from './ops'
 
 /** конец стены лежит на прямой, если отстоит от неё не дальше, см */
@@ -108,6 +108,136 @@ export function runSection(walls: Wall[], run: WallRun, p: Pt): { lo: number; hi
     if (s > t + ON && s < hi) hi = s
   }
   return { lo, hi }
+}
+
+// ---------- грани стены: длина по оси, по внутренней или наружной грани ----------
+
+/** отрезок грани прямой: где начинается и кончается, длина */
+export interface FaceSeg {
+  a: Pt
+  b: Pt
+  length: number
+}
+
+/**
+ * Куда уходят от точки p чужие стены: из стыка концом или насквозь (тогда
+ * в обе стороны). Толщина — чтобы знать, сколько они отнимают у грани
+ */
+function joinsAt(walls: Wall[], ids: Set<string>, p: Pt): { d: Pt; thickness: number }[] {
+  const out: { d: Pt; thickness: number }[] = []
+  for (const w of walls) {
+    if (ids.has(w.id) || dist(w.a, w.b) < 0.5) continue
+    if (dist(w.a, p) <= ON) out.push({ d: norm(sub(w.b, w.a)), thickness: w.thickness })
+    else if (dist(w.b, p) <= ON) out.push({ d: norm(sub(w.a, w.b)), thickness: w.thickness })
+    else if (pointSegDist(p, w.a, w.b) <= ON) {
+      const d = norm(sub(w.b, w.a))
+      out.push({ d, thickness: w.thickness }, { d: mul(d, -1), thickness: w.thickness })
+    }
+  }
+  return out
+}
+
+/**
+ * Грань прямой со стороны side (+1 — по run.normal): от угла до угла, с
+ * вычетом Т-стыков, что примыкают с этой стороны. На внутреннем углу грань
+ * короче оси на полтолщины поперечной стены, на наружном — длиннее
+ */
+export function runFace(walls: Wall[], run: WallRun, side: 1 | -1): FaceSeg[] {
+  const ids = new Set(run.ids)
+  const L = dist(run.a, run.b)
+  const n = mul(run.normal, side)
+  const endShift = (p: Pt) => {
+    const js = joinsAt(walls, ids, p)
+    const mine = js.filter((j) => dot(j.d, n) > 0.5)
+    if (mine.length) return Math.max(...mine.map((j) => j.thickness)) / 2
+    const other = js.filter((j) => dot(j.d, n) < -0.5)
+    if (other.length) return -Math.max(...other.map((j) => j.thickness)) / 2
+    return 0
+  }
+  const lo = endShift(run.a)
+  const hi = L - endShift(run.b)
+  // Т-стыки посреди прямой с этой стороны режут грань
+  const cuts: [number, number][] = []
+  for (const w of walls) {
+    if (ids.has(w.id)) continue
+    for (const [p, q] of [
+      [w.a, w.b],
+      [w.b, w.a],
+    ] as const) {
+      if (Math.abs(across(p, run.a, run.normal)) > ON) continue
+      const t = along(p, run.a, run.dir)
+      if (t <= ON || t >= L - ON) continue
+      if (dot(norm(sub(q, p)), n) <= 0.5) continue
+      cuts.push([t - w.thickness / 2, t + w.thickness / 2])
+    }
+  }
+  cuts.sort((x, y) => x[0] - y[0])
+  const segs: [number, number][] = []
+  let from = lo
+  for (const [c0, c1] of cuts) {
+    if (c0 > from) segs.push([from, Math.min(c0, hi)])
+    from = Math.max(from, c1)
+  }
+  if (hi > from) segs.push([from, hi])
+  const off = mul(n, run.thickness / 2)
+  return segs
+    .filter(([x, y]) => y - x > 1)
+    .map(([x, y]) => ({ a: add(add(run.a, mul(run.dir, x)), off), b: add(add(run.a, mul(run.dir, y)), off), length: y - x }))
+}
+
+/** есть ли комната с этой стороны прямой: смотрим чуть дальше грани у каждого её отрезка */
+function roomOnSide(run: WallRun, segs: FaceSeg[], side: 1 | -1, rooms: Room[]): boolean {
+  const n = mul(run.normal, side)
+  return segs.some((sg) => {
+    const p = add(lerp(sg.a, sg.b, 0.5), mul(n, 3))
+    return rooms.some((r) => pointInPoly(p, r.polygon))
+  })
+}
+
+export interface RefLength {
+  /** длина по выбранной линии; null — если грань разрезана стыками и одного числа нет */
+  value: number | null
+  /** отрезки, которые подписать на чертеже */
+  segs: FaceSeg[]
+  /** по какой линии вышло на самом деле: у перегородки нет наружной грани — тогда ось */
+  used: WallRef
+}
+
+/**
+ * Длина прямой по выбранной линии. Внутренняя грань — со стороны комнаты
+ * (у перегородки обе такие; число — если с каждой стороны грань одна),
+ * наружная — со стороны без комнаты; нет такой — по оси
+ */
+export function refLength(walls: Wall[], rooms: Room[], run: WallRun, ref: WallRef): RefLength {
+  const L = dist(run.a, run.b)
+  const axis: RefLength = { value: L, segs: [{ a: run.a, b: run.b, length: L }], used: 'axis' }
+  if (ref === 'axis') return axis
+  const faces = ([1, -1] as const).map((side) => {
+    const segs = runFace(walls, run, side)
+    return { side, segs, room: roomOnSide(run, segs, side, rooms) }
+  })
+  const pick = faces.filter((f) => f.segs.length && (ref === 'inner' ? f.room : !f.room))
+  if (!pick.length) return axis
+  // свободно стоящая стена: обе грани «наружные» — берём длинную
+  const chosen = ref === 'outer' && pick.length > 1 ? [pick.reduce((m, f) => (f.segs[0].length > m.segs[0].length ? f : m))] : pick
+  const single = chosen.every((f) => f.segs.length === 1)
+  return {
+    value: single ? Math.min(...chosen.map((f) => f.segs[0].length)) : null,
+    segs: chosen.flatMap((f) => f.segs),
+    used: ref,
+  }
+}
+
+/**
+ * Задать длину прямой по выбранной линии: разница между гранью и осью
+ * задаётся стыками на концах и при растяжке не меняется
+ */
+export function setRunLengthBy(plan: Plan, rooms: Room[], id: string, length: number, ref: WallRef): Plan {
+  const run = wallRun(plan.walls, id)
+  if (!run) return plan
+  const cur = refLength(plan.walls, rooms, run, ref)
+  if (cur.value === null) return plan
+  return setRunLength(plan, id, dist(run.a, run.b) + (length - cur.value))
 }
 
 /** отрезок прямой [lo, hi] в точках чертежа */

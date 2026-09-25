@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { closeGaps, deleteRun, deleteSection, findGaps, guardLocks, movedSection, normalizeWalls, pushRun, runSection, setAllLocked, setRoomSide, setRunLength, setRunLocked, touchesLocked, wallRun } from '../src/planner/walledit'
+import { closeGaps, deleteRun, deleteSection, findGaps, guardLocks, movedSection, normalizeWalls, pushRun, refLength, runFace, runSection, setAllLocked, setRoomSide, setRunLength, setRunLengthBy, setRunLocked, touchesLocked, wallRun } from '../src/planner/walledit'
 import { buildRooms } from '../src/planner/rooms'
 import { emptyPlan, type Plan, type Wall } from '../src/planner/types'
 
@@ -142,6 +142,51 @@ describe('правка стен как в The Sims', () => {
     it('зафиксированную стену по частям не удалить', () => {
       const p0 = setRunLocked(twoRooms(), 'bottom', true)
       expect(touchesLocked(p0, deleteSection(p0, 'bottom', 0, 400))).toBe(true)
+    })
+  })
+
+  describe('длина по оси, по внутренней и по наружной грани', () => {
+    const p0 = twoRooms()
+    const rooms = buildRooms(p0).rooms
+    const len = (id: string, ref: 'axis' | 'inner' | 'outer') => refLength(p0.walls, rooms, wallRun(p0.walls, id)!, ref)
+
+    it('наружная стена комнаты: по оси 400, внутри 390 (углы съедают по 5), снаружи 410', () => {
+      expect(len('left', 'axis').value).toBe(400)
+      expect(len('left', 'inner').value).toBeCloseTo(390, 5)
+      expect(len('left', 'outer').value).toBeCloseTo(410, 5)
+    })
+
+    it('верх через две комнаты: внутренняя грань разрезана перегородкой — 390 + 390, одного числа нет; снаружи 810', () => {
+      const inner = len('top1', 'inner')
+      expect(inner.value).toBeNull()
+      expect(inner.segs.map((x) => Math.round(x.length))).toEqual([390, 390])
+      expect(len('top1', 'outer').value).toBeCloseTo(810, 5)
+    })
+
+    it('перегородка: внутри с обеих сторон 390; наружной грани нет — по оси', () => {
+      expect(len('mid', 'inner').value).toBeCloseTo(390, 5)
+      expect(len('mid', 'inner').segs).toHaveLength(2)
+      const outer = len('mid', 'outer')
+      expect(outer.used).toBe('axis')
+      expect(outer.value).toBe(400)
+    })
+
+    it('грань — со своей стороны от оси, на полтолщины', () => {
+      const run = wallRun(p0.walls, 'left')!
+      const faces = [runFace(p0.walls, run, 1)[0], runFace(p0.walls, run, -1)[0]]
+      const xs = faces.map((f) => f.a.x).sort((a, b) => a - b)
+      expect(xs).toEqual([-5, 5])
+    })
+
+    it('задать длину по внутренней грани: левая стена внутри станет 400, по оси — 410', () => {
+      const p = setRunLengthBy(p0, rooms, 'left', 400, 'inner')
+      const run = wallRun(p.walls, 'left')!
+      expect(refLength(p.walls, buildRooms(p).rooms, run, 'inner').value).toBeCloseTo(400, 5)
+      expect(Math.hypot(run.b.x - run.a.x, run.b.y - run.a.y)).toBeCloseTo(410, 5)
+    })
+
+    it('грань, разрезанная стыками, числом не задаётся — план не меняется', () => {
+      expect(setRunLengthBy(p0, rooms, 'top1', 700, 'inner')).toBe(p0)
     })
   })
 

@@ -1,5 +1,5 @@
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
-import type { DimensionLine, EditMode, Furniture, Layers, LengthUnit, Opening, Plan, Pt, Room, Selection, Tool, Wall } from './types'
+import type { DimensionLine, EditMode, Furniture, Layers, LengthUnit, Opening, Plan, Pt, Room, Selection, Tool, Wall, WallRef } from './types'
 import type { Area } from './ops'
 import type { PlanHistory } from './store'
 import type { CatalogItem } from './catalog'
@@ -8,7 +8,7 @@ import { openingGeom, type CheckResult } from './checks'
 import { Glyph } from './Glyph'
 import { ACCENT, Scene, planBounds, ptsAttr, sortedFurniture, wallPolygon } from './Scene'
 import { snapFurniture, snapOpening, snapWallPoint, type Guide } from './snapping'
-import { deleteRun, deleteSection, movedSection, pushRun, runSection, runSpan, setRoomSide, stretchRun, touchesLocked, wallAtCorner, wallRun, type WallRun } from './walledit'
+import { deleteRun, deleteSection, movedSection, pushRun, refLength, runSection, runSpan, setRoomSide, stretchRun, touchesLocked, wallAtCorner, wallRun, type WallRun } from './walledit'
 import { buildRooms } from './rooms'
 import {
   addDim,
@@ -96,6 +96,8 @@ export interface CanvasProps {
   onNotice?: (text: string) => void
   /** режим правки: мышь цепляет только объекты этого режима */
   mode?: EditMode
+  /** по какой линии стены подписывать её длину */
+  wallRef?: WallRef
 }
 
 type Drag =
@@ -137,7 +139,7 @@ const UNIT_CM: Record<LengthUnit, number> = { cm: 1, mm: 0.1, m: 100 }
 const UNIT_NAME: Record<LengthUnit, string> = { cm: 'см', mm: 'мм', m: 'м' }
 
 export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) => {
-  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view, onViewChange, onHint, photos, onCalibrate, imageLines, onRoomPick, onCorners, onRefine, onNotice, mode = 'build' } = props
+  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view, onViewChange, onHint, photos, onCalibrate, imageLines, onRoomPick, onCorners, onRefine, onNotice, mode = 'build', wallRef = 'axis' } = props
   const build = mode === 'build'
   const svgRef = useRef<SVGSVGElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -1358,7 +1360,28 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
               {[selRun.a, selRun.b].map((p, i) => (
                 <circle key={i} cx={p.x} cy={p.y} r={6 / zoom} fill="#fff" stroke={ACCENT} strokeWidth={1.5} {...NS} />
               ))}
-              {lengthLabel(selA, selB, 'sel-wall-len')}
+              {selSec || wallRef === 'axis'
+                ? lengthLabel(selA, selB, 'sel-wall-len')
+                : (() => {
+                    // длина по грани: линия грани и подпись снаружи от неё, у каждого её отрезка
+                    const byRef = refLength(plan.walls, rooms, selRun, wallRef)
+                    if (byRef.used === 'axis') return lengthLabel(selA, selB, 'sel-wall-len')
+                    return byRef.segs.map((sg, i) => {
+                      const m = lerp(sg.a, sg.b, 0.5)
+                      const out = norm(sub(m, add(selRun.a, mul(selRun.dir, dot(sub(m, selRun.a), selRun.dir)))))
+                      const p = add(m, mul(out, 10 / zoom))
+                      let ang = angleDeg(sg.a, sg.b)
+                      if (ang > 90 || ang <= -90) ang += 180
+                      return (
+                        <g key={`face-${i}`} pointerEvents="none">
+                          <line x1={sg.a.x} y1={sg.a.y} x2={sg.b.x} y2={sg.b.y} stroke="#f59e0b" strokeWidth={2.5} {...NS} />
+                          <text transform={`translate(${p.x} ${p.y}) rotate(${ang})`} fontSize={12 / zoom} textAnchor="middle" dominantBaseline="middle" fill={ACCENT} stroke="#fff" strokeWidth={3 / zoom} paintOrder="stroke" fontFamily="system-ui, sans-serif" fontWeight={600}>
+                            {fmtLen(sg.length, unit)}
+                          </text>
+                        </g>
+                      )
+                    })
+                  })()}
               {drag.current?.kind === 'wall' && Math.abs(drag.current.offset) >= 0.5 && (
                 <text x={add(lerp(selRun.a, selRun.b, 0.7), mul(selRun.normal, selRun.thickness / 2 + 16 / zoom)).x} y={add(lerp(selRun.a, selRun.b, 0.7), mul(selRun.normal, selRun.thickness / 2 + 16 / zoom)).y} dy={4 / zoom} fontSize={12 / zoom} textAnchor="middle" fill={ACCENT} stroke="#fff" strokeWidth={3 / zoom} paintOrder="stroke" fontFamily="system-ui, sans-serif" fontWeight={700}>
                   сдвиг {fmtLen(Math.abs(drag.current.offset), unit)}
@@ -1374,7 +1397,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           <b>
             {typed} {UNIT_NAME[unit]}
           </b>
-          <span>{typedPt ? 'Enter — поставить' : 'наведите, куда вести'}</span>
+          <span>{typedPt ? 'по оси · Enter — поставить' : 'наведите, куда вести'}</span>
         </div>
       )}
       {/* размер стороны комнаты: число и какую стену двигать */}
