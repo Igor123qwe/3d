@@ -1,5 +1,6 @@
-node_modules/
-dist/
+# без косой черты: правило должно ловить и папку, и файл или ссылку с этим именем
+node_modules
+dist
 .env
 .vscode/
 .DS_Store

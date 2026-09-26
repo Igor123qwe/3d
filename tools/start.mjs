@@ -4,7 +4,7 @@
 // Вся работа здесь, а не в start.cmd и start.sh: bat-файл с кириллицей и
 // ветвлениями слишком легко ломается о кодировку и переводы строк, а Node
 // одинаково ведёт себя во всех системах.
-import { existsSync, statSync, copyFileSync, writeFileSync, readFileSync, renameSync } from 'node:fs'
+import { existsSync, statSync, lstatSync, copyFileSync, writeFileSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -35,13 +35,41 @@ if (spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: root, shell:
 }
 
 // ---------- 2. зависимости ----------
-// ставим, только если их нет или список пакетов поменялся
+// Ставим, если их нет, список пакетов поменялся или нет самого Vite. Одной
+// папки node_modules мало: в ней может не оказаться инструментов разработки
+// (NODE_ENV=production, прерванная установка), а на её месте может лежать
+// файл или битая ссылка — тогда «vite is not recognized»
 const stamp = join(root, '.npm-stamp')
 const lock = join(root, 'package-lock.json')
+const modules = join(root, 'node_modules')
+const viteBin = join(modules, 'vite', 'bin', 'vite.js')
 const mtime = (f) => (existsSync(f) ? statSync(f).mtimeMs : 0)
-if (!existsSync(join(root, 'node_modules')) || !existsSync(stamp) || mtime(lock) > mtime(stamp)) {
-  say('[2/4] Ставлю зависимости, это займёт пару минут...')
-  if (run(npm, ['install']).status !== 0) die('npm install не отработал')
+/** node_modules — не папка (файл или ссылка в никуда): убрать, иначе npm не поставит */
+function clearBrokenModules() {
+  let st = null
+  try {
+    st = lstatSync(modules)
+  } catch {
+    return
+  }
+  if (st.isDirectory()) return
+  say('[2/4] На месте папки node_modules лежит файл или битая ссылка — убираю.')
+  rmSync(modules, { force: true, recursive: true })
+}
+clearBrokenModules()
+const stale = !existsSync(stamp) || mtime(lock) > mtime(stamp) || mtime(join(root, 'package.json')) > mtime(stamp)
+if (!existsSync(modules) || stale || !existsSync(viteBin)) {
+  if (existsSync(modules) && !stale) say('[2/4] В зависимостях нет Vite — доставляю, это займёт пару минут...')
+  else say('[2/4] Ставлю зависимости, это займёт пару минут...')
+  // --include=dev: Vite — пакет разработки; без флага npm пропустит его,
+  // если в системе стоит NODE_ENV=production или omit=dev
+  if (run(npm, ['install', '--include=dev', '--no-audit', '--no-fund']).status !== 0) die('npm install не отработал', 'Проверьте интернет и запустите ещё раз. Не помогло — удалите папку node_modules и запустите снова.')
+  if (!existsSync(viteBin)) {
+    die(
+      'после установки Vite так и не появился в node_modules.',
+      'Удалите папку node_modules и запустите снова. Если повторится — проверьте, не стоит ли NODE_ENV=production\n(команда «npm config get omit» должна показать пусто) и не удаляет ли антивирус файлы из node_modules.',
+    )
+  }
   writeFileSync(stamp, '')
 } else {
   say('[2/4] Зависимости на месте.')
@@ -94,9 +122,14 @@ say('    Браузер откроется сам, как только серв�
 say('    Чтобы остановить — Ctrl+C.')
 say('')
 
+// Vite запускаем тем же Node напрямую, без npm и без поиска команды «vite»
+// в PATH: так Windows не скажет «'vite' is not recognized».
 // --strictPort: занято — ошибка, а не тихий уход на другой порт мимо браузера
-const dev = spawn(npm, ['run', 'dev', '--', '--port', String(port), '--strictPort'], { cwd: root, stdio: 'inherit', shell: win })
-dev.on('exit', (code) => process.exit(code ?? 0))
+const dev = spawn(process.execPath, [viteBin, '--port', String(port), '--strictPort'], { cwd: root, stdio: 'inherit' })
+dev.on('exit', (code) => {
+  if (code) say('\n[!] Сервер остановился с ошибкой. Если выше про node_modules или «Cannot find module» — удалите папку node_modules и запустите снова.')
+  process.exit(code ?? 0)
+})
 
 /** открыть браузер, когда сервер начал отвечать */
 async function openWhenReady() {

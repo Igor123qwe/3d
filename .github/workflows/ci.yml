@@ -14,6 +14,10 @@ jobs:
         with:
           node-version: '20'
           cache: npm
+      - name: В репозитории нет зависимостей, сборки и ключей
+        run: |
+          junk="$(git ls-files node_modules dist .env)"
+          if [ -n "$junk" ]; then echo "Эти пути не должны быть в git: $junk"; exit 1; fi
       - run: npm ci
       - name: Проверка типов
         run: npx tsc --noEmit -p .
