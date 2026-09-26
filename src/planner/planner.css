@@ -647,6 +647,7 @@
 }
 .pl-stats b {
   font-size: 16px;
+  white-space: nowrap;
 }
 .pl-stats span {
   font-size: 11px;
@@ -1712,7 +1713,18 @@
   margin-bottom: 6px;
 }
 .pl-el-tabs {
+  /* вкладки не уезжают при прокрутке длинной панели */
+  position: sticky;
+  top: 0;
+  z-index: 2;
   margin-top: 10px;
+  padding: 6px 0;
+  background: #fff;
+}
+.pl-el-tabs button {
+  white-space: nowrap;
+  padding-left: 8px;
+  padding-right: 8px;
 }
 .pl-el-input {
   font-size: 13px;

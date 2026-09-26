@@ -160,14 +160,15 @@ export function roomDims(plan: Plan, inner: Pt[]): Plan {
   const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)]
   const tol = 3
   let out = plan
+  // линии на пятой части комнаты от угла: подальше от имени и площади в центре
   const pairs: [Pt, Pt][] = [
     [
-      { x: x0, y: y0 + (y1 - y0) * 0.25 },
-      { x: x1, y: y0 + (y1 - y0) * 0.25 },
+      { x: x0, y: y0 + (y1 - y0) * 0.2 },
+      { x: x1, y: y0 + (y1 - y0) * 0.2 },
     ],
     [
-      { x: x0 + (x1 - x0) * 0.25, y: y0 },
-      { x: x0 + (x1 - x0) * 0.25, y: y1 },
+      { x: x0 + (x1 - x0) * 0.2, y: y0 },
+      { x: x0 + (x1 - x0) * 0.2, y: y1 },
     ],
   ]
   for (const [a, b] of pairs) {
@@ -175,7 +176,11 @@ export function roomDims(plan: Plan, inner: Pt[]): Plan {
     const ra = dimSnap(plan.walls, a, tol, false)
     const rb = dimSnap(plan.walls, b, tol, false)
     if (!ra || !rb) continue
-    out = addDimRef(out, ra.p, squareDim(plan.walls, ra.p, ra.ref, rb.p, rb.ref), 0, ra.ref, rb.ref)
+    const pb = squareDim(plan.walls, ra.p, ra.ref, rb.p, rb.ref)
+    // повторное нажатие не плодит дубли: такой размер уже есть
+    const same = (u: Pt, v: Pt) => Math.abs(u.x - v.x) < 2 && Math.abs(u.y - v.y) < 2
+    if (out.dims.some((d) => (same(d.a, ra.p) && same(d.b, pb)) || (same(d.a, pb) && same(d.b, ra.p)))) continue
+    out = addDimRef(out, ra.p, pb, 0, ra.ref, rb.ref)
   }
   return out
 }

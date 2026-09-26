@@ -232,12 +232,12 @@ export function refLength(walls: Wall[], rooms: Room[], run: WallRun, ref: WallR
  * Задать длину прямой по выбранной линии: разница между гранью и осью
  * задаётся стыками на концах и при растяжке не меняется
  */
-export function setRunLengthBy(plan: Plan, rooms: Room[], id: string, length: number, ref: WallRef): Plan {
+export function setRunLengthBy(plan: Plan, rooms: Room[], id: string, length: number, ref: WallRef, end: 'a' | 'b' = 'b'): Plan {
   const run = wallRun(plan.walls, id)
   if (!run) return plan
   const cur = refLength(plan.walls, rooms, run, ref)
   if (cur.value === null) return plan
-  return setRunLength(plan, id, dist(run.a, run.b) + (length - cur.value))
+  return setRunLength(plan, id, dist(run.a, run.b) + (length - cur.value), end)
 }
 
 /** отрезок прямой [lo, hi] в точках чертежа */
@@ -455,10 +455,10 @@ function distToSeg(p: Pt, w: Wall): number {
 }
 
 /** Длина прямой целиком: конец b уходит на нужное место (поперечная стена за ним — вместе с ним) */
-export function setRunLength(plan: Plan, id: string, length: number): Plan {
+export function setRunLength(plan: Plan, id: string, length: number, end: 'a' | 'b' = 'b'): Plan {
   const run = wallRun(plan.walls, id)
   if (!run || !Number.isFinite(length) || length < MIN_WALL_LENGTH) return plan
-  return stretchRun(plan, id, 'b', length - dist(run.a, run.b))
+  return stretchRun(plan, id, end, length - dist(run.a, run.b))
 }
 
 /** Толщина прямой целиком */

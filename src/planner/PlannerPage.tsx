@@ -1,6 +1,6 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { EditMode, Layers, LengthUnit, Plan, Pt, Selection, Tool, Underlay, WallRef } from './types'
-import { CATALOG, CATALOG_MAP, CATEGORIES, FLOORS, ROOM_NAMES, dims3d, itemMode, type CatalogItem, type CategoryKey } from './catalog'
+import { isElectricItem, CATALOG, CATALOG_MAP, CATEGORIES, FLOORS, ROOM_NAMES, dims3d, itemMode, type CatalogItem, type CategoryKey } from './catalog'
 import { usePlanHistory } from './store'
 import { buildRooms } from './rooms'
 import { runChecks } from './checks'
@@ -347,6 +347,10 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const [auto, setAuto] = useState<AutoElectricOptions>({ ...DEFAULT_AUTO, panel: true })
   /** вкладка проекта электрики и подсвеченная группа щита */
   const [elTab, setElTab] = useState<'panel' | 'bom' | 'norms' | 'add'>('panel')
+  /** участок прямой, выделенный Alt + щелчком на холсте: панель и «Удалить» работают с ним */
+  const [wallSection, setWallSection] = useState<{ id: string; lo: number; hi: number; length: number } | null>(null)
+  /** какой конец прямой двигает ввод длины в панели */
+  const [lenEnd, setLenEnd] = useState<'a' | 'b'>('b')
   const [hlCircuit, setHlCircuit] = useState<string | null>(null)
   const [productUrl, setProductUrl] = useState('')
   const [product, setProduct] = useState<ProductInfo | null>(null)
@@ -2004,12 +2008,22 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   }
 
   const electricItems = plan.furniture.filter((f) => f.electric)
+  /** и точки из каталога без инженерных данных (например, из шаблона) — их тоже заменяем и убираем */
+  const electricLike = plan.furniture.filter(isElectricItem).length
   const electricSettings = plan.electric ?? DEFAULT_ELECTRIC
   // проект электрики: группы, трассы, ведомость и нормы — заново на каждую правку
   // проект электрики нужен в режиме электрики, на её вкладке, в «Проверке» и у выбранной точки;
   // в остальное время его не считаем — иначе каждый кадр перетаскивания перекладывал бы щит
   const needDesign = mode === 'electric' || panel === 'electric' || panel === 'checks' || (selection?.kind === 'furniture' && !!plan.furniture.find((f) => f.id === selection.id)?.electric)
   const design = useMemo(() => (needDesign ? designElectrics(plan, rooms, electricSettings) : NO_DESIGN), [plan, rooms, electricSettings, needDesign])
+  /** предметы с ошибками планировки плюс точки электрики с нарушением норм — на плане с красным контуром */
+  const badPoints = useMemo(() => {
+    const set = new Set(badItems)
+    for (const x of design.issues) if (x.level === 'error' && x.pointId) set.add(x.pointId)
+    return set
+  }, [badItems, design])
+  /** замечания «Проверки» без тех, что «Нормы» электрики уже показывают о той же точке */
+  const shownIssues = useMemo(() => check.issues.filter((i) => !(i.id.startsWith('wet-') && i.target && design.issues.some((x) => x.pointId === i.target!.id))), [check, design])
   const setElectric = (patch: Partial<ElectricSettings>) => history.apply((p) => ({ ...p, electric: { ...(p.electric ?? DEFAULT_ELECTRIC), ...patch } }))
 
   const runAutoElectrics = () => {
@@ -2023,18 +2037,18 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       return
     }
     const put = () => {
-      history.apply((p) => ({ ...p, furniture: [...p.furniture.filter((f) => !f.electric), ...items] }))
+      history.apply((p) => ({ ...p, furniture: [...p.furniture.filter((f) => !isElectricItem(f)), ...items] }))
       setSelection(null)
       setLayers((l) => ({ ...l, electric: true }))
       setModeRaw('electric')
       setElTab('panel')
       setToast(`Расставлено точек: ${items.length}. Группы щита, кабель и нормы — в панели «Электрика»`)
     }
-    if (!electricItems.length) put()
+    if (!electricLike) put()
     else
       setAsk({
         title: 'Заменить текущую электрику?',
-        text: `Сейчас на плане ${electricItems.length} точек, по нормам встанет ${items.length}. Прежние точки вернёт Ctrl+Z.`,
+        text: `Сейчас на плане ${electricLike} точек, по нормам встанет ${items.length}. Прежние точки вернёт Ctrl+Z.`,
         options: [
           { key: 'replace', label: 'Заменить', icon: 'bolt', primary: true },
           { key: 'keep', label: 'Оставить как есть' },
@@ -2047,9 +2061,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   }
 
   const clearElectrics = () => {
-    if (!electricItems.length) return
+    if (!electricLike) return
     setAsk({
-      title: `Убрать всю электрику (${electricItems.length} точек)?`,
+      title: `Убрать всю электрику (${electricLike} точек)?`,
       text: 'Розетки, выключатели, свет и датчики уйдут с плана. Вернуть — Ctrl+Z.',
       options: [
         { key: 'clear', label: 'Убрать', icon: 'trash', primary: true },
@@ -2058,7 +2072,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       onPick: (k) => {
         setAsk(null)
         if (k !== 'clear') return
-        history.apply((p) => ({ ...p, furniture: p.furniture.filter((f) => !f.electric) }))
+        history.apply((p) => ({ ...p, furniture: p.furniture.filter((f) => !isElectricItem(f)) }))
         setSelection(null)
       },
     })
@@ -2121,81 +2135,6 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             <span>Подпись</span>
             <input value={f.label ?? ''} placeholder={cat?.name} onChange={(e) => upd({ label: e.target.value })} />
           </label>
-          {cat?.resizable !== false && (
-            <>
-              <label className="pl-field">
-                <span>Ширина, {UNIT_NAME[unit]}</span>
-                <LenField unit={unit} value={f.w} min={5} max={2000} step={5} onCommit={(v) => upd({ w: v })} />
-              </label>
-              <label className="pl-field">
-                <span>Глубина, {UNIT_NAME[unit]}</span>
-                <LenField unit={unit} value={f.d} min={5} max={2000} step={5} onCommit={(v) => upd({ d: v })} />
-              </label>
-            </>
-          )}
-          <label className="pl-field">
-            <span>Поворот, °</span>
-            <NumberField value={Math.round(f.rot)} step={15} onCommit={(v) => upd({ rot: normDeg(v) })} />
-          </label>
-          <label className="pl-field">
-            <span>Высота, {UNIT_NAME[unit]}</span>
-            <LenField unit={unit} value={f.h ?? dims3d(f).h} min={1} max={400} step={5} onCommit={(v) => upd({ h: v })} />
-          </label>
-          <div className="pl-row">
-            <button className="pl-btn" onClick={() => history.apply((p) => rotateFurniture(p, f.id, -15))}>⟲ 15°</button>
-            <button className="pl-btn" onClick={() => history.apply((p) => rotateFurniture(p, f.id, 15))}>⟳ 15°</button>
-            <button className="pl-btn" onClick={() => history.apply((p) => rotateFurniture(p, f.id, 90))}>↻ 90°</button>
-            <button className={`pl-btn ${f.flip ? 'active' : ''}`} onClick={() => upd({ flip: !f.flip })}>⇋ Отразить</button>
-          </div>
-          {!cat?.symbol && (
-            <div className="pl-field pl-field-col">
-              <span>Цвет</span>
-              <div className="pl-swatches">
-                {COLORS.map((c) => (
-                  <button key={c || 'auto'} className={`pl-swatch ${(f.color ?? '') === c ? 'active' : ''}`} style={{ background: c || 'linear-gradient(135deg,#fff 45%,#999 55%)' }} title={c || 'По умолчанию'} onClick={() => upd({ color: c || undefined })} />
-                ))}
-              </div>
-            </div>
-          )}
-          <div className="pl-row">
-            <button
-              className="pl-btn"
-              onClick={() => {
-                const r = duplicateFurniture(plan, f.id, rooms)
-                if (r.id === f.id) return
-                history.apply(() => r.plan)
-                setSelection({ kind: 'furniture', id: r.id })
-              }}
-            >
-              ⧉ Дублировать
-            </button>
-            <button
-              className="pl-btn danger"
-              onClick={() => {
-                history.apply((p) => deleteSelection(p, selection))
-                setSelection(null)
-              }}
-            >
-              🗑 Удалить
-            </button>
-          </div>
-          {f.product && (
-            <div className="pl-block">
-              <div className="pl-props-title">Товар</div>
-              <div className="pl-model">
-                {f.product.photo && <img src={f.product.photo} alt="" loading="lazy" referrerPolicy="no-referrer" />}
-                <div>
-                  <b>{f.product.name}</b>
-                  <div className="pl-note">
-                    {f.product.price ? formatPrice(f.product.price, f.product.currency) : 'цена не указана'} ·{' '}
-                    <a href={f.product.url} target="_blank" rel="noreferrer">
-                      страница товара
-                    </a>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
           {f.electric &&
             (() => {
               const e = f.electric
@@ -2251,8 +2190,89 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                 </div>
               )
             })()}
+          {cat?.resizable !== false && (
+            <>
+              <label className="pl-field">
+                <span>Ширина, {UNIT_NAME[unit]}</span>
+                <LenField unit={unit} value={f.w} min={5} max={2000} step={5} onCommit={(v) => upd({ w: v })} />
+              </label>
+              <label className="pl-field">
+                <span>Глубина, {UNIT_NAME[unit]}</span>
+                <LenField unit={unit} value={f.d} min={5} max={2000} step={5} onCommit={(v) => upd({ d: v })} />
+              </label>
+            </>
+          )}
+          {/* у точки электрики поворот задаёт стена, а высота корпуса — не её свойство: эти поля только для мебели */}
+          {!f.electric && (
+            <>
+              <label className="pl-field">
+                <span>Поворот, °</span>
+                <NumberField value={Math.round(f.rot)} step={15} onCommit={(v) => upd({ rot: normDeg(v) })} />
+              </label>
+              <label className="pl-field">
+                <span>Высота, {UNIT_NAME[unit]}</span>
+                <LenField unit={unit} value={f.h ?? dims3d(f).h} min={1} max={400} step={5} onCommit={(v) => upd({ h: v })} />
+              </label>
+              <div className="pl-row">
+                <button className="pl-btn" onClick={() => history.apply((p) => rotateFurniture(p, f.id, -15))}>⟲ 15°</button>
+                <button className="pl-btn" onClick={() => history.apply((p) => rotateFurniture(p, f.id, 15))}>⟳ 15°</button>
+                <button className="pl-btn" onClick={() => history.apply((p) => rotateFurniture(p, f.id, 90))}>↻ 90°</button>
+                <button className={`pl-btn ${f.flip ? 'active' : ''}`} onClick={() => upd({ flip: !f.flip })}>⇋ Отразить</button>
+              </div>
+            </>
+          )}
+          {!cat?.symbol && (
+            <div className="pl-field pl-field-col">
+              <span>Цвет</span>
+              <div className="pl-swatches">
+                {COLORS.map((c) => (
+                  <button key={c || 'auto'} className={`pl-swatch ${(f.color ?? '') === c ? 'active' : ''}`} style={{ background: c || 'linear-gradient(135deg,#fff 45%,#999 55%)' }} title={c || 'По умолчанию'} onClick={() => upd({ color: c || undefined })} />
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="pl-row">
+            <button
+              className="pl-btn"
+              onClick={() => {
+                const r = duplicateFurniture(plan, f.id, rooms)
+                if (r.id === f.id) return
+                history.apply(() => r.plan)
+                setSelection({ kind: 'furniture', id: r.id })
+              }}
+            >
+              ⧉ Дублировать
+            </button>
+            <button
+              className="pl-btn danger"
+              onClick={() => {
+                history.apply((p) => deleteSelection(p, selection))
+                setSelection(null)
+              }}
+            >
+              🗑 Удалить
+            </button>
+          </div>
+          {f.product && (
+            <div className="pl-block">
+              <div className="pl-props-title">Товар</div>
+              <div className="pl-model">
+                {f.product.photo && <img src={f.product.photo} alt="" loading="lazy" referrerPolicy="no-referrer" />}
+                <div>
+                  <b>{f.product.name}</b>
+                  <div className="pl-note">
+                    {f.product.price ? formatPrice(f.product.price, f.product.currency) : 'цена не указана'} ·{' '}
+                    <a href={f.product.url} target="_blank" rel="noreferrer">
+                      страница товара
+                    </a>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
           {f.note && <div className="pl-hint-box">✨ {f.note}</div>}
           {cat?.hint && <div className="pl-hint-box">💡 {cat.hint}</div>}
+          {!f.electric && (
           <div className="pl-block">
             <div className="pl-props-title">3D-модель</div>
             {f.model ? (
@@ -2293,6 +2313,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
               </button>
             </div>
           </div>
+          )}
           {cat?.clearance && (
             <div className="pl-note">
               Зоны эргономики: {Object.entries(cat.clearance).map(([k, v]) => `${k === 'front' ? 'перед' : k === 'back' ? 'сзади' : k === 'left' ? 'слева' : 'справа'} ${v} см`).join(', ')}
@@ -2319,7 +2340,12 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       }
       return (
         <div>
-          <div className="pl-props-title">Стена</div>
+          <div className="pl-props-title">{wallSection?.id === w.id ? 'Участок стены' : 'Стена'}</div>
+          {wallSection?.id === w.id && (
+            <div className="pl-hint-box">
+              Выделен участок {fmtLen(wallSection.length, unit)} между стыками (Alt + щелчок). Del и «Удалить участок» уберут только его; длина ниже — у всей прямой.
+            </div>
+          )}
           <div className="pl-field">
             <span>Длину считать</span>
             <div className="pl-chips">
@@ -2333,14 +2359,34 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           {byRef && byRef.value !== null ? (
             <label className="pl-field">
               <span>Длина {refName}, {UNIT_NAME[unit]}</span>
-              <LenField unit={unit} value={Math.round(byRef.value * 10) / 10} min={MIN_WALL_LENGTH} step={5} onCommit={(v) => guarded((p) => setRunLengthBy(p, rooms, w.id, v, byRef.used))} />
+              <LenField unit={unit} value={Math.round(byRef.value * 10) / 10} min={MIN_WALL_LENGTH} step={5} onCommit={(v) => guarded((p) => setRunLengthBy(p, rooms, w.id, v, byRef.used, lenEnd))} />
             </label>
           ) : (
             <label className="pl-field">
               <span>Длина по оси, {UNIT_NAME[unit]}</span>
-              <LenField unit={unit} value={Math.round(L)} min={MIN_WALL_LENGTH} step={5} onCommit={(v) => guarded((p) => setRunLengthBy(p, rooms, w.id, v, 'axis'))} />
+              <LenField unit={unit} value={Math.round(L)} min={MIN_WALL_LENGTH} step={5} onCommit={(v) => guarded((p) => setRunLengthBy(p, rooms, w.id, v, 'axis', lenEnd))} />
             </label>
           )}
+          {run &&
+            (() => {
+              // какой конец поедет при вводе длины — по положению на экране, как у подписи комнаты
+              const horizontal = Math.abs(run.b.x - run.a.x) >= Math.abs(run.b.y - run.a.y)
+              const aFirst = horizontal ? run.a.x <= run.b.x : run.a.y <= run.b.y
+              const names = horizontal ? ['◀ левый', 'правый ▶'] : ['▲ верхний', 'нижний ▼']
+              const label = (end: 'a' | 'b') => names[(end === 'a') === aFirst ? 0 : 1]
+              return (
+                <div className="pl-field">
+                  <span>При вводе длины двигать конец</span>
+                  <div className="pl-chips">
+                    {(['a', 'b'] as const).map((end) => (
+                      <button key={end} className={`pl-chip ${lenEnd === end ? 'active' : ''}`} onClick={() => setLenEnd(end)}>
+                        {label(end)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )
+            })()}
           {byRef && byRef.value === null && (
             <div className="pl-note">
               Внутренняя грань разрезана стенами, что к ней примыкают: {byRef.segs.map((x) => fmtLen(x.length, unit)).join(' + ')}. Это стороны разных комнат — каждую задают щелчком по её размеру на плане.
@@ -2388,7 +2434,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           <button
             className="pl-btn danger"
             onClick={() => {
-              // стена — прямая целиком: удаляется то, что подсвечено
+              // удаляется то, что подсвечено на холсте: прямая целиком или участок (Alt + щелчок)
+              if (canvasRef.current) {
+                canvasRef.current.deleteSelected()
+                return
+              }
               if (touchesLocked(plan, deleteRun(plan, w.id))) {
                 setToast('Стена зафиксирована — снимите замок, чтобы удалить')
                 return
@@ -2397,7 +2447,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
               setSelection(null)
             }}
           >
-            🗑 Удалить стену
+            🗑 {wallSection?.id === w.id ? 'Удалить участок' : 'Удалить стену'}
           </button>
         </div>
       )
@@ -3118,8 +3168,12 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                       <th />
                       <th>Группа</th>
                       <th>Защита</th>
-                      <th className="num">А</th>
-                      <th className="num">м</th>
+                      <th className="num" title="Расчётный ток группы">
+                        Ток, А
+                      </th>
+                      <th className="num" title="Длина кабеля группы">
+                        Кабель, м
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
@@ -3158,6 +3212,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
               <div className="pl-note">Пока пусто.</div>
             ) : (
               <>
+                <button className="pl-btn" onClick={() => downloadCsv(`${plan.name || 'план'} электрика`, designCsv(d))}>
+                  ⬇ Скачать щит и ведомость (CSV)
+                </button>
                 {[...new Set(d.bom.map((b) => b.group))].map((g) => (
                   <div key={g}>
                     <div className="pl-note">{g}</div>
@@ -3180,9 +3237,6 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                     </table>
                   </div>
                 ))}
-                <button className="pl-btn" onClick={() => downloadCsv(`${plan.name || 'план'} электрика`, designCsv(d))}>
-                  ⬇ Скачать щит и ведомость (CSV)
-                </button>
               </>
             )}
           </div>
@@ -3275,10 +3329,10 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         <span>Показывать зоны эргономики на плане</span>
         <input type="checkbox" checked={layers.ergo} onChange={() => toggleLayer('ergo')} />
       </label>
-      {check.issues.length === 0 ? (
+      {shownIssues.length === 0 ? (
         <div className="pl-ok">✅ Замечаний нет. Расставьте мебель — проверки появятся автоматически.</div>
       ) : (
-        check.issues.map((i) => (
+        shownIssues.map((i) => (
           <button key={i.id} className={`pl-issue ${i.level}`} onClick={() => focusIssueTarget(i.target ?? null)}>
             <span>{i.level === 'error' ? '⛔' : i.level === 'warn' ? '⚠️' : 'ℹ️'}</span>
             <span>{i.text}</span>
@@ -3689,7 +3743,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           plan={plan}
           rooms={rooms}
           check={check}
-          badItems={badItems}
+          badItems={badPoints}
+          onSectionChange={setWallSection}
           history={history}
           tool={tool}
           onToolChange={setTool}

@@ -345,7 +345,7 @@ const SceneImpl: React.FC<SceneProps> = ({ plan, rooms, check, layers, unit, zoo
               let ang = angleDeg(a, b)
               if (ang > 90 || ang <= -90) ang += 180
               return (
-                <text key={`rl-${r.meta.id}-${i}`} transform={`translate(${p.x} ${p.y}) rotate(${ang})`} fontSize={9.5 / zoom} textAnchor="middle" dominantBaseline="middle" fill="#6b7280" stroke="#fff" strokeWidth={2.5 / zoom} paintOrder="stroke">
+                <text key={`rl-${r.meta.id}-${i}`} transform={`translate(${p.x} ${p.y}) rotate(${ang})`} fontSize={11 / zoom} textAnchor="middle" dominantBaseline="middle" fill="#4b5563" stroke="#fff" strokeWidth={2.5 / zoom} paintOrder="stroke">
                   {fmtLen(L, unit)}
                 </text>
               )
@@ -364,7 +364,7 @@ const SceneImpl: React.FC<SceneProps> = ({ plan, rooms, check, layers, unit, zoo
             let ang = angleDeg(w.a, w.b)
             if (ang > 90 || ang <= -90) ang += 180
             return (
-              <text key={`wl-${w.id}`} transform={`translate(${p.x} ${p.y}) rotate(${ang})`} fontSize={9.5 / zoom} textAnchor="middle" dominantBaseline="middle" fill="#6b7280" stroke="#fff" strokeWidth={2.5 / zoom} paintOrder="stroke">
+              <text key={`wl-${w.id}`} transform={`translate(${p.x} ${p.y}) rotate(${ang})`} fontSize={11 / zoom} textAnchor="middle" dominantBaseline="middle" fill="#4b5563" stroke="#fff" strokeWidth={2.5 / zoom} paintOrder="stroke">
                 {fmtLen(L, unit)}
               </text>
             )

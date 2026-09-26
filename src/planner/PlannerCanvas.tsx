@@ -62,6 +62,8 @@ export interface CanvasHandle {
   zoomBy: (k: number) => void
   centerOn: (p: Pt) => void
   finishDraft: () => void
+  /** удалить то, что подсвечено — как Del: предмет, проём, размер, прямую или участок стены */
+  deleteSelected: () => boolean
 }
 
 export interface CanvasProps {
@@ -75,6 +77,8 @@ export interface CanvasProps {
   selection: Selection
   /** keepPanel — не переключать панель на свойства (постановка из каталога) */
   onSelect: (s: Selection, opts?: { keepPanel?: boolean }) => void
+  /** выделен участок прямой (Alt + щелчок) — панель показывает его, а не всю прямую */
+  onSectionChange?: (sec: { id: string; lo: number; hi: number; length: number } | null) => void
   layers: Layers
   unit: LengthUnit
   ortho: boolean
@@ -106,6 +110,20 @@ export interface CanvasProps {
   hlCircuit?: string | null
 }
 
+/** точка на середине ломаной по длине */
+function routeMid(pts: Pt[]): Pt | undefined {
+  if (!pts.length) return undefined
+  let total = 0
+  for (let i = 1; i < pts.length; i++) total += dist(pts[i - 1], pts[i])
+  let acc = 0
+  for (let i = 1; i < pts.length; i++) {
+    const L = dist(pts[i - 1], pts[i])
+    if (acc + L >= total / 2) return lerp(pts[i - 1], pts[i], L ? (total / 2 - acc) / L : 0)
+    acc += L
+  }
+  return pts[pts.length - 1]
+}
+
 type Drag =
   | { kind: 'pan'; sx: number; sy: number; view0: View; moved: boolean; clickSel: Selection }
   | { kind: 'maybe'; sx: number; sy: number; view0: View }
@@ -114,7 +132,7 @@ type Drag =
   | { kind: 'move'; id: string; offset: Pt; plan0: Plan; item0: Furniture }
   | { kind: 'rotate'; id: string; plan0: Plan }
   | { kind: 'resize'; id: string; plan0: Plan; item0: Furniture }
-  | { kind: 'node'; from: Pt; plan0: Plan }
+  | { kind: 'node'; from: Pt; plan0: Plan; last?: Plan }
   | { kind: 'wall'; id: string; plan0: Plan; start: Pt; run: WallRun; part?: { lo: number; hi: number }; offset: number; last?: Plan; warned?: boolean }
   | { kind: 'stretch'; id: string; plan0: Plan; end: 'a' | 'b'; from: Pt; dirOut: Pt; delta: number; last?: Plan; warned?: boolean }
   | { kind: 'opening'; id: string; plan0: Plan }
@@ -147,7 +165,7 @@ export const UNIT_CM: Record<LengthUnit, number> = { cm: 1, mm: 0.1, m: 100 }
 export const UNIT_NAME: Record<LengthUnit, string> = { cm: 'см', mm: 'мм', m: 'м' }
 
 export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) => {
-  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view, onViewChange, onHint, photos, onCalibrate, imageLines, onRoomPick, onCorners, onRefine, onNotice, mode = 'build', wallRef = 'axis', electricDesign, hlCircuit } = props
+  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view, onViewChange, onHint, photos, onCalibrate, imageLines, onRoomPick, onCorners, onRefine, onNotice, mode = 'build', wallRef = 'axis', electricDesign, hlCircuit, onSectionChange } = props
   const build = mode === 'build'
   const svgRef = useRef<SVGSVGElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -171,6 +189,12 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   useEffect(() => setTyped(''), [tool])
   const [hover, setHover] = useState<Selection>(null)
   const [hoverPart, setHoverPart] = useState<{ id: string; lo: number; hi: number } | null>(null)
+  /** участок, который сейчас выдвигают с Alt: подсвечивается он, а не неподвижный остаток прямой */
+  const [movingId, setMovingId] = useState<string | null>(null)
+  /** курсор над кружком конца выбранной прямой */
+  const [overEnd, setOverEnd] = useState(false)
+  const lastRaw = useRef<Pt | null>(null)
+  const deleteRef = useRef<() => boolean>(() => false)
   /** Alt + щелчок по стене: выделен только участок до стыков — точка щелчка, участок считается заново */
   const [selPart, setSelPart] = useState<{ id: string; at: Pt } | null>(null)
   /** длина следующей стены, набранная цифрами, пока рисуется стена */
@@ -283,6 +307,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     () => ({
       fit,
       zoomBy: (k) => zoomAt(k, size.w / 2, size.h / 2),
+      deleteSelected: () => deleteRef.current(),
       centerOn: (p) => {
         const v = viewRef.current
         onViewChange({ ...v, x: size.w / 2 - p.x * v.zoom, y: size.h / 2 - p.y * v.zoom })
@@ -336,7 +361,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         // подсказка — по типу выбранного: у проёма нет ручки поворота, у размера — дублирования
         text =
           selection?.kind === 'wall'
-            ? 'Стена: тяните поперёк — вся прямая; стрелки — 1 см, с Shift — 10; Alt + щелчок — участок до стыков; кружок на конце — длина; Del — удалить'
+            ? 'Стена: тяните поперёк — вся прямая; кружок на конце — длина; Alt + щелчок — участок; стрелки — 1 см (Shift — 10); Del — удалить'
             : selection?.kind === 'opening'
               ? 'Дверь или окно: тяните вдоль стены. Ширина, сторона и петли — в панели справа. Del — удалить'
               : selection?.kind === 'dim'
@@ -776,11 +801,17 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       return
     }
     const raw = toWorld(e.clientX, e.clientY)
+    lastRaw.current = raw
     const d = drag.current
     if (!d) {
       if (tool === 'select') {
         const h = hitTest(raw)
         setHover((prev) => (sameSel(prev, h) ? prev : h))
+        // над кружком конца выбранной прямой курсор говорит, что его можно тянуть
+        const z0 = viewRef.current.zoom
+        const selRunNow = selection?.kind === 'wall' ? wallRun(plan.walls, selection.id) : null
+        const atEnd = !!selRunNow && (dist(raw, selRunNow.a) < 10 / z0 || dist(raw, selRunNow.b) < 10 / z0)
+        setOverEnd((prev) => (prev === atEnd ? prev : atEnd))
         // над подписью размера комнаты — курсор-рука: по ней можно щёлкнуть и ввести число
         const z = viewRef.current.zoom
         const onLabel =
@@ -870,6 +901,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         setGuides(s.guides)
         const next = moveNodes(d.plan0, [{ from: d.from, to: s.p }])
         if (touchesLocked(d.plan0, next)) return
+        d.last = next
         history.preview(next)
         return
       }
@@ -900,6 +932,11 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         d.offset = off
         d.last = next
         history.preview(d.last)
+        if (d.part) {
+          const mw = movedSection(next.walls, d.run, d.part.lo, d.part.hi, off)
+          const id = mw?.id ?? null
+          setMovingId((prev) => (prev === id ? prev : id))
+        }
         return
       }
       case 'stretch': {
@@ -939,6 +976,28 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   }
 
   /** правка не должна тихо ломать комнаты: разомкнулась — сказать сразу */
+  /** удалить подсвеченное: предмет, проём, размер, прямую целиком или участок (Alt + щелчок). false — нечего или замок */
+  const deleteSelected = (): boolean => {
+    if (!selection || selection.kind === 'room') return false
+    if (selection.kind === 'wall') {
+      const pl0 = planRef.current
+      const part = sectionOf(pl0.walls, selection, selPart)
+      const next = part ? deleteSection(pl0, selection.id, part.lo, part.hi) : deleteRun(pl0, selection.id)
+      if (touchesLocked(pl0, next)) {
+        onNotice?.('Стена зафиксирована — снимите замок, чтобы удалить')
+        return false
+      }
+      history.apply(() => next)
+      setSelPart(null)
+      onSelect(null)
+      return true
+    }
+    history.apply((pl) => deleteSelection(pl, selection))
+    onSelect(null)
+    return true
+  }
+  deleteRef.current = deleteSelected
+
   const warnOpened = (before: Plan, after: Plan) => {
     const n0 = buildRooms(before).rooms.length
     const n1 = buildRooms(after).rooms.length
@@ -982,11 +1041,14 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         history.preview((pl) => cleanupWalls(pl))
         history.endPreview()
         setGuides([])
+        // конец утащили свободно (Shift) и контур разошёлся — сказать сразу, а не только в «Проверке»
+        if (d.last) warnOpened(d.plan0, cleanupWalls(d.last))
         return
       case 'wall':
       case 'stretch': {
         history.endPreview()
         setGuides([])
+        setMovingId(null)
         if (d.last) {
           warnOpened(d.plan0, d.last)
           // выдвинутый участок — теперь своя прямая: выделение переходит на него
@@ -1011,6 +1073,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     drag.current = null
     setPanning(false)
     setDragLabel(null)
+    setMovingId(null)
     setRoomDraft(null)
     setGuides([])
     if (d && 'plan0' in d) history.cancelPreview()
@@ -1085,24 +1148,8 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       }
       if ((e.key === 'Delete' || e.key === 'Backspace') && selection) {
         e.preventDefault()
-        // комната — следствие контура стен, удалять в ней нечего
-        if (selection.kind === 'room') return
-        // стена: удаляется то, что подсвечено, — прямая целиком или участок (Alt + щелчок)
-        if (selection.kind === 'wall') {
-          const pl0 = planRef.current
-          const part = sectionOf(pl0.walls, selection, selPart)
-          const next = part ? deleteSection(pl0, selection.id, part.lo, part.hi) : deleteRun(pl0, selection.id)
-          if (touchesLocked(pl0, next)) {
-            onNotice?.('Стена зафиксирована — снимите замок, чтобы удалить')
-            return
-          }
-          history.apply(() => next)
-          setSelPart(null)
-          onSelect(null)
-          return
-        }
-        history.apply((pl) => deleteSelection(pl, selection))
-        onSelect(null)
+        // комната — следствие контура стен, удалять в ней нечего; стена — то, что подсвечено
+        deleteSelected()
         return
       }
       if (ctrl && e.code === 'KeyD' && selection?.kind === 'furniture') {
@@ -1194,7 +1241,29 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
 
   // ---------- отрисовка ----------
   const drawing = tool !== 'select'
-  const cursorStyle = panning ? 'grabbing' : drawing ? 'crosshair' : overLabel && tool === 'select' ? 'pointer' : hover?.kind === 'furniture' || hover?.kind === 'opening' ? 'move' : hover?.kind === 'wall' ? 'pointer' : 'default'
+  // Alt без движения мыши: участок под курсором подсвечивается сразу, отпустили — гаснет
+  useEffect(() => {
+    const onAlt = (e: KeyboardEvent) => {
+      if (e.key !== 'Alt' || tool !== 'select' || drag.current) return
+      const raw = lastRaw.current
+      if (!raw || hover?.kind !== 'wall') return
+      if (e.type === 'keyup') {
+        setHoverPart(null)
+        return
+      }
+      const run = wallRun(planRef.current.walls, hover.id)
+      const part = run ? runSection(planRef.current.walls, run, raw) : null
+      setHoverPart(part ? { id: hover.id, ...part } : null)
+    }
+    window.addEventListener('keydown', onAlt)
+    window.addEventListener('keyup', onAlt)
+    return () => {
+      window.removeEventListener('keydown', onAlt)
+      window.removeEventListener('keyup', onAlt)
+    }
+  }, [tool, hover])
+
+  const cursorStyle = panning ? 'grabbing' : drawing ? 'crosshair' : overEnd && tool === 'select' ? 'move' : overLabel && tool === 'select' ? 'pointer' : hover?.kind === 'furniture' || hover?.kind === 'opening' ? 'move' : hover?.kind === 'wall' ? 'pointer' : 'default'
   const minor = 50 * zoom
   const major = 100 * zoom
   const draftWalls = draft.slice(1).map((p, i) => ({ id: `d${i}`, a: draft[i], b: p, thickness: wallThickness }))
@@ -1205,6 +1274,11 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   const selRun = selection?.kind === 'wall' ? wallRun(plan.walls, selection.id) : null
   const selSec = selRun ? sectionOf(plan.walls, selection, selPart) : null
   const [selA, selB] = selRun && selSec ? runSpan(selRun, selSec.lo, selSec.hi) : selRun ? [selRun.a, selRun.b] : [null, null]
+  const secId = selSec && selection?.kind === 'wall' ? selection.id : null
+  useEffect(() => {
+    onSectionChange?.(secId && selSec ? { id: secId, lo: selSec.lo, hi: selSec.hi, length: selSec.hi - selSec.lo } : null)
+  }, [secId, selSec?.lo, selSec?.hi]) // eslint-disable-line react-hooks/exhaustive-deps
+  const movingRun = movingId ? wallRun(plan.walls, movingId) : null
   // зафиксированные прямые — по одной на прямую, для значка замка
   const lockedRuns: WallRun[] = []
   for (const w of plan.walls) {
@@ -1220,6 +1294,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     return <polygon key={key} points={ptsAttr([add(p, h), add(q, h), sub(q, h), sub(p, h)])} fill={fill} stroke="none" pointerEvents="none" />
   }
   const ghostWall = openingGhost ? wallMap.get(openingGhost.wallId) : undefined
+  const hlPts = hlCircuit && electricDesign ? new Set(electricDesign.circuits.find((c) => c.id === hlCircuit)?.points.map((pt) => pt.id) ?? []) : null
 
   const wallGhost = (w: Wall, key: string) => <polygon key={key} points={ptsAttr(wallPolygon(w, [...plan.walls, w]))} fill="rgba(37,99,235,0.45)" stroke={ACCENT} strokeWidth={1} {...NS} />
   const lengthLabel = (a: Pt, b: Pt, key: string) => {
@@ -1300,8 +1375,9 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
             <g pointerEvents="none" fontFamily="system-ui, sans-serif">
               {electricDesign.circuits.map((c) => {
                 const dim = hlCircuit && hlCircuit !== c.id
-                // номер группы — в конце трассы: у щита их слишком много
-                const first = c.route[c.route.length - 1]
+                // номер группы — на середине трассы: у щита их слишком много, а конец
+                // (центр комнаты) занят именем комнаты
+                const first = routeMid(c.route)
                 return (
                   <g key={c.id} opacity={dim ? 0.15 : 0.9}>
                     <polyline points={ptsAttr(c.route)} fill="none" stroke={c.color} strokeWidth={hlCircuit === c.id ? 3 : 1.6} strokeDasharray="6 4" strokeLinejoin="round" {...NS} />
@@ -1313,8 +1389,10 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
                   </g>
                 )
               })}
-              {plan.furniture
+              {/* высоты точек читаются только крупно; у подсвеченной группы — всегда */}
+              {(zoom >= 1.4 || hlCircuit) && plan.furniture
                 .filter((f) => f.electric && f.electric.kind !== 'light' && f.electric.kind !== 'spot' && f.electric.kind !== 'leak-sensor')
+                .filter((f) => !hlPts || hlPts.has(f.id))
                 .map((f) => (
                   <text key={`h-${f.id}`} x={f.x} y={f.y} dx={7 / zoom} dy={12 / zoom} fontSize={8.5 / zoom} fill="#374151" stroke="#fff" strokeWidth={2.5 / zoom} paintOrder="stroke">
                     {f.electric!.height}
@@ -1485,6 +1563,9 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
               )
             })()}
 
+          {/* выдвигаемый с Alt участок — подсвечен он, а не остаток прямой */}
+          {movingRun && runBand(movingRun, 0, dist(movingRun.a, movingRun.b), ACCENT, 'moving-part')}
+
           {/* подпись во время поворота или растяжки */}
           {dragLabel && selFurn && (
             <g transform={`translate(${selFurn.x} ${selFurn.y}) scale(${1 / zoom})`} pointerEvents="none">
@@ -1510,7 +1591,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           })}
           {/* стена под курсором: вся прямая или, с Alt, участок до стыков */}
           {hoverRun && !(selRun && hoverRun.ids.includes(selection!.id)) && (
-            hoverPart && hover?.kind === 'wall' && hoverPart.id === hover.id ? runBand(hoverRun, hoverPart.lo, hoverPart.hi, 'rgba(37,99,235,0.35)', 'hover-part') : runBand(hoverRun, 0, dist(hoverRun.a, hoverRun.b), 'rgba(75,85,99,0.55)', 'hover-run')
+            hoverPart && hover?.kind === 'wall' && hoverPart.id === hover.id ? runBand(hoverRun, hoverPart.lo, hoverPart.hi, 'rgba(37,99,235,0.35)', 'hover-part') : runBand(hoverRun, 0, dist(hoverRun.a, hoverRun.b), 'rgba(96,165,250,0.6)', 'hover-run')
           )}
           {/* выбранный проём: расстояния до концов стены — видно, куда его двигать */}
           {selection?.kind === 'opening' &&
@@ -1552,7 +1633,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           {selRun && selA && selB && (
             <g>
               {selSec
-                ? [runBand(selRun, 0, dist(selRun.a, selRun.b), 'rgba(37,99,235,0.3)', 'sel-run'), runBand(selRun, selSec.lo, selSec.hi, ACCENT, 'sel-part')]
+                ? [runBand(selRun, 0, dist(selRun.a, selRun.b), 'rgba(37,99,235,0.3)', 'sel-run'), runBand(selRun, selSec.lo, selSec.hi, movingRun ? 'rgba(37,99,235,0.3)' : ACCENT, 'sel-part')]
                 : runBand(selRun, 0, dist(selRun.a, selRun.b), ACCENT, 'sel-run')}
               {(() => {
                 // стрелки — на трети прямой: посередине стоит её длина
@@ -1657,7 +1738,11 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           const ends: ('a' | 'b')[] = [first, first === 'a' ? 'b' : 'a']
           const names = horizontal ? ['◀ левую', 'правую ▶'] : ['▲ верхнюю', 'нижнюю ▼']
           return (
-            <div className="pl-side-edit" style={{ left: view.x + sideEdit.at.x * zoom, top: view.y + sideEdit.at.y * zoom }} onPointerDown={(e) => e.stopPropagation()}>
+            <div
+              className="pl-side-edit"
+              style={{ left: clamp(view.x + sideEdit.at.x * zoom, 150, Math.max(150, size.w - 150)), top: clamp(view.y + sideEdit.at.y * zoom, 96, Math.max(96, size.h - 8)) }}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
               <div className="pl-side-edit-row">
                 <input
                   autoFocus
