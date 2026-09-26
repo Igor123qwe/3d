@@ -16,6 +16,7 @@ import { DEFAULT_ELECTRIC, ELECTRIC_NAMES, FEED_NAMES, FEED_POWER, distToItem } 
 
 export { DEFAULT_ELECTRIC, FEED_HEIGHT, FEED_NAMES, FEED_POWER } from './electrics'
 import { openingGeom } from './checks'
+import { isHall, isKitchen, isLiving, isOutdoor, isStorage, isWet } from './roomkind'
 import { dist, lerp, obbCorners, pointInPoly, pointSegDist } from './geometry'
 
 
@@ -28,10 +29,6 @@ const LIGHTS: ElectricKind[] = ['light', 'spot', 'wall-lamp']
 /** на стене: подрозетник, трасса спускается к нему */
 const ON_WALL: ElectricKind[] = [...OUTLETS, ...SWITCHES, 'wall-lamp', 'thermostat']
 
-const WET = /санузел|ванн|туалет|душ|уборн/i
-const KITCHEN = /кухн/i
-const HALL = /прихож|коридор|холл|тамбур/i
-const OUTDOOR = /балкон|лоджи/i
 
 export const isOutlet = (f: Furniture) => !!f.electric && OUTLETS.includes(f.electric.kind)
 
@@ -72,7 +69,7 @@ export interface Circuit {
   id: string
   n: number
   name: string
-  kind: 'light' | 'sockets' | 'kitchen' | 'wet' | 'dedicated'
+  kind: 'light' | 'sockets' | 'kitchen' | 'wet' | 'dedicated' | 'auto'
   feeds?: Feed
   device: 'автомат' | 'дифавтомат'
   /** характеристика и номинал: B10, C16, C32 */
@@ -175,7 +172,7 @@ function routeOf(points: Furniture[], panel: { p: Pt; height: number }, trace: n
 function panelSpot(plan: Plan, rooms: Room[]): ElectricDesign['panel'] {
   const placed = plan.furniture.find((f) => f.electric?.kind === 'panel')
   if (placed) return { p: { x: placed.x, y: placed.y }, height: placed.electric!.height, placed: true, room: roomOf(rooms, placed)?.meta.name }
-  const hall = rooms.find((r) => HALL.test(r.meta.name)) ?? rooms[0]
+  const hall = rooms.find((r) => isHall(r.meta.name)) ?? rooms[0]
   if (!hall) return { p: { x: 0, y: 0 }, height: 170, placed: false }
   // ближайшая к подписи комнаты точка её внутреннего контура
   let best = hall.meta.anchor
@@ -225,7 +222,7 @@ function groupPoints(plan: Plan, rooms: Room[], panel: Pt): Draft[] {
   for (const f of kitchen) used.add(f.id)
 
   // 3. розетки санузлов — своя группа с УЗО 10 мА
-  const wet = pts.filter((f) => !used.has(f.id) && isOutlet(f) && WET.test(roomName(f)))
+  const wet = pts.filter((f) => !used.has(f.id) && isOutlet(f) && isWet(roomName(f)))
   if (wet.length) drafts.push({ name: `Розетки: ${[...new Set(wet.map(roomName))].join(', ')}`, kind: 'wet', points: wet })
   for (const f of wet) used.add(f.id)
 
@@ -252,9 +249,14 @@ function groupPoints(plan: Plan, rooms: Room[], panel: Pt): Draft[] {
   flush()
   for (const f of sockets) used.add(f.id)
 
-  // 5. свет с выключателями и датчиками: жилые комнаты отдельно от кухни, санузла и коридора
+  // 5. электрокарнизы — своя группа автоматики, не свет
+  const drives = pts.filter((f) => !used.has(f.id) && f.electric!.kind === 'curtain-motor')
+  if (drives.length) drafts.push({ name: 'Электрокарнизы', kind: 'auto', points: drives })
+  for (const f of drives) used.add(f.id)
+
+  // 6. свет с выключателями и датчиками: жилые комнаты отдельно от кухни, санузла и коридора
   const light = pts.filter((f) => !used.has(f.id))
-  const living = light.filter((f) => !/кухн|санузел|ванн|туалет|душ|прихож|коридор|холл/i.test(roomName(f)))
+  const living = light.filter((f) => isLiving(roomName(f)) && !isKitchen(roomName(f)))
   const service = light.filter((f) => !living.includes(f))
   if (light.length > 10 && living.length && service.length) {
     drafts.push({ name: 'Освещение: жилые комнаты', kind: 'light', points: living })
@@ -266,17 +268,35 @@ function groupPoints(plan: Plan, rooms: Room[], panel: Pt): Draft[] {
 /** автомат, УЗО и кабель группы */
 function protection(d: Draft): Pick<Circuit, 'device' | 'breaker' | 'ratingA' | 'rcdMa' | 'cable'> {
   if (d.kind === 'light') return { device: 'автомат', breaker: 'B10', ratingA: 10, cable: '3×1,5' }
+  if (d.kind === 'auto') return { device: 'дифавтомат', breaker: 'C10', ratingA: 10, rcdMa: 30, cable: '3×1,5' }
   if (d.feeds === 'cooktop') return { device: 'дифавтомат', breaker: 'C32', ratingA: 32, rcdMa: 30, cable: '3×6' }
   if (d.feeds === 'ac') return { device: 'дифавтомат', breaker: 'C10', ratingA: 10, rcdMa: 30, cable: '3×1,5' }
   if (d.kind === 'wet' || d.feeds === 'washer' || d.feeds === 'boiler') return { device: 'дифавтомат', breaker: 'C16', ratingA: 16, rcdMa: 10, cable: '3×2,5' }
   return { device: 'дифавтомат', breaker: 'C16', ratingA: 16, rcdMa: 30, cable: '3×2,5' }
 }
 
+/**
+ * Коэффициент спроса техники на своей линии: духовка не греет на полную
+ * весь вечер, стиральная греет воду четверть цикла. Ориентир — таблицы
+ * СП 256.1325800 (7.1, 7.5) и практика проектирования квартир
+ */
+const FEED_DEMAND: Partial<Record<Feed, number>> = { cooktop: 0.8, oven: 0.6, dishwasher: 0.6, washer: 0.6, boiler: 0.6, fridge: 0.5, ac: 0.7, 'floor-heating': 0.7, hood: 0.5, tv: 0.5 }
+
 /** расчётная нагрузка группы: розетки общего назначения не работают все разом */
 function demandOf(d: Draft, installed: number): number {
   if (d.kind === 'sockets' || d.kind === 'wet') return Math.max(Math.min(installed, 300), installed * 0.4)
   if (d.kind === 'kitchen') return Math.max(Math.min(installed, 1000), installed * 0.7)
+  if (d.kind === 'dedicated' && d.feeds) return installed * (FEED_DEMAND[d.feeds] ?? 1)
   return installed
+}
+
+/** одновременность групп: чем больше групп, тем меньше их доля работает разом (СП 256, табл. 7.5) */
+export function simultaneity(groups: number): number {
+  if (groups <= 3) return 1
+  if (groups <= 5) return 0.8
+  if (groups <= 9) return 0.65
+  if (groups <= 14) return 0.55
+  return 0.5
 }
 
 const cosPhi = 0.95
@@ -286,7 +306,7 @@ export function designElectrics(plan: Plan, rooms: Room[], settings: ElectricSet
   const panel = panelSpot(plan, rooms)
   const trace = settings.ceiling - 15
   // как в схемах щитов: сначала свет, потом розетки, кухня, санузел, техника на своих линиях
-  const ORDER: Circuit['kind'][] = ['light', 'sockets', 'kitchen', 'wet', 'dedicated']
+  const ORDER: Circuit['kind'][] = ['light', 'sockets', 'kitchen', 'wet', 'dedicated', 'auto']
   const drafts = groupPoints(plan, rooms, panel.p).sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind))
   const circuits: Circuit[] = drafts.map((d, i) => {
     const prot = protection(d)
@@ -305,7 +325,8 @@ export function designElectrics(plan: Plan, rooms: Room[], settings: ElectricSet
       rooms: [...new Set(d.points.map((f) => roomOf(rooms, f)?.meta.name ?? 'вне комнат'))],
       installedW,
       demandW,
-      currentA: Math.round(amps(demandW) * 10) / 10,
+      // автомат защищает линию под полной нагрузкой прибора; спрос — для сводки по квартире
+      currentA: Math.round(amps(d.kind === 'dedicated' ? installedW : demandW) * 10) / 10,
       lengthM,
       route,
       color: PALETTE[i % PALETTE.length],
@@ -313,8 +334,8 @@ export function designElectrics(plan: Plan, rooms: Room[], settings: ElectricSet
   })
 
   const installedKw = circuits.reduce((s, c) => s + c.installedW, 0) / 1000
-  // группы тоже не включаются все разом: коэффициент одновременности 0,7
-  const demandKw = Math.round((circuits.reduce((s, c) => s + c.demandW, 0) / 1000) * 0.7 * 10) / 10
+  // группы тоже не включаются все разом: коэффициент одновременности по их числу
+  const demandKw = Math.round((circuits.reduce((s, c) => s + c.demandW, 0) / 1000) * simultaneity(circuits.length) * 10) / 10
   const ratingA = inputRating(settings.allottedKw)
   const cable = (['3×1,5', '3×2,5', '3×6'] as const)
     .map((type) => ({ type, meters: Math.ceil(circuits.filter((c) => c.cable === type).reduce((s, c) => s + c.lengthM, 0) / 5) * 5 }))
@@ -348,7 +369,7 @@ function billOfMaterials(plan: Plan, rooms: Room[], d: ElectricDesign): BomRow[]
   const add = (group: string, name: string, qty: number, unit: BomRow['unit'] = 'шт', note?: string) => {
     if (qty > 0) rows.push({ group, name, unit, qty, note })
   }
-  const inWet = (f: Furniture) => WET.test(roomOf(rooms, f)?.meta.name ?? '')
+  const inWet = (f: Furniture) => isWet(roomOf(rooms, f)?.meta.name ?? '')
   add('Розетки', 'Розетка с заземлением 16 А', count((f) => isOutlet(f) && feedOf(f) !== 'cooktop' && !inWet(f) && f.electric!.kind === 'outlet'))
   add('Розетки', 'Розетка с заземлением IP44, с крышкой', count((f) => isOutlet(f) && inWet(f)), 'шт', 'санузел и ванная — вне зон 0–2')
   add('Розетки', 'Умная розетка', count((f) => f.electric!.kind === 'smart-outlet'))
@@ -405,10 +426,10 @@ function electricIssues(plan: Plan, rooms: Room[], d: ElectricDesign): ElectricI
   // розеток по норме
   if (pts.some(isOutlet)) {
     for (const r of rooms) {
-      if (OUTDOOR.test(r.meta.name) || WET.test(r.meta.name) || /кладов|гардероб/i.test(r.meta.name)) continue
+      if (isOutdoor(r.meta.name) || isWet(r.meta.name) || isStorage(r.meta.name)) continue
       const have = pts.filter((f) => isOutlet(f) && pointInPoly(f, r.polygon)).length
-      const need = KITCHEN.test(r.meta.name) ? 4 : HALL.test(r.meta.name) ? Math.max(1, Math.ceil(r.area / 10)) : Math.ceil(innerPerimeter(r) / 4)
-      const rule = KITCHEN.test(r.meta.name) ? 'на кухне — не меньше 4' : HALL.test(r.meta.name) ? 'в коридоре — одна на каждые 10 м²' : `одна на каждые 4 м периметра (${innerPerimeter(r).toFixed(1)} м)`
+      const need = isKitchen(r.meta.name) ? 4 : isHall(r.meta.name) ? Math.max(1, Math.ceil(r.area / 10)) : Math.ceil(innerPerimeter(r) / 4)
+      const rule = isKitchen(r.meta.name) ? 'на кухне — не меньше 4' : isHall(r.meta.name) ? 'в коридоре — одна на каждые 10 м²' : `одна на каждые 4 м периметра (${innerPerimeter(r).toFixed(1)} м)`
       if (have < need) out.push({ level: 'warn', roomId: r.meta.id, text: `${r.meta.name}: розеток ${have}, по норме не меньше ${need} — ${rule} (СП 31-110-2003, п. 14.29)` })
     }
   }

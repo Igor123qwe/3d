@@ -24,6 +24,8 @@ interface Props {
   rooms: { id: string; name: string; area: number }[]
   initialScope: 'all' | string
   aiEnabled: boolean
+  /** почему ИИ выключен — как сообщил сервер */
+  aiHint?: string
   onRun: (o: FurnishOptions, progress: (text: string) => void) => Promise<FurnishReport | null>
   onClose: () => void
 }
@@ -36,7 +38,7 @@ const readWishes = () => {
   }
 }
 
-export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled, onRun, onClose }) => {
+export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled, aiHint, onRun, onClose }) => {
   const [scope, setScope] = useState<'all' | string>(initialScope)
   const [wishes, setWishes] = useState(readWishes)
   const [replace, setReplace] = useState(false)
@@ -106,7 +108,7 @@ export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled,
           </>
         ) : (
           <>
-            {!aiEnabled && <p className="pl-furnish-warn">ИИ не подключён на сервере: нужен ключ ROUTERAI_API_KEY в .env.</p>}
+            {!aiEnabled && <p className="pl-furnish-warn">{aiHint || 'ИИ не подключён на этом сервере — расставить можно вручную из каталога.'}</p>}
             <div className="pl-furnish-row">
               <span>Где</span>
               <select value={scope} onChange={(e) => setScope(e.target.value)} disabled={!!busy}>

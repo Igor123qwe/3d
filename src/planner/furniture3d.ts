@@ -587,9 +587,10 @@ function counter(w: number, d: number, h: number, color: THREE.Color): THREE.Gro
 /** мойка: тумба, врезанная чаша в столешнице и смеситель */
 function sink(w: number, d: number, h: number, color: THREE.Color): THREE.Group {
   const g = new THREE.Group()
-  // верх опущен: место над столешницей занимает смеситель
-  const fauH = part(h, 0.17, 0.09, 0.24)
-  const top = h - fauH
+  // столешница на высоте соседних тумб (90 см), смеситель — в оставшейся высоте
+  // предмета; у низкого предмета смеситель забирает долю высоты, как раньше
+  const top = h >= 1.0 ? 0.9 : h - part(h, 0.17, 0.09, 0.24)
+  const fauH = h - top
   const ct = part(top, 0.045, 0.026, 0.045)
   const hr = part(d, 0.022, 0.008, 0.012)
   const fd = part(d, 0.035, 0.014, 0.022)
@@ -824,19 +825,16 @@ function shower(w: number, d: number, h: number, color: THREE.Color): THREE.Grou
 }
 
 // ---------- прочее ----------
-/** телевизор: тонкая рама, тёмный экран на +Z, подставка */
+/** телевизор: тонкая рама и тёмный экран на +Z; висит на стене (высота — из каталога), подставки нет */
 function tv(w: number, d: number, h: number): THREE.Group {
   const g = new THREE.Group()
-  const standH = part(h, 0.16, 0.05, 0.18)
-  const panelH = h - standH
+  const panelH = h
   const pd = clamp(d * 0.35, Math.min(0.018, d * 0.3), d * 0.45)
-  const pz = -d / 2 + pd / 2
-  g.add(box(w, panelH, pd, MAT.dark, 0, standH + panelH / 2, pz))
+  // панель посередине своего габарита: он у телевизора и так тонкий
+  const pz = 0
+  g.add(box(w, panelH, pd, MAT.dark, 0, panelH / 2, pz))
   const bez = Math.min(0.018, w * 0.02, panelH * 0.04)
-  g.add(box(w - 2 * bez, panelH - 2 * bez, pd * 0.2, MAT.screen, 0, standH + panelH / 2, pz + pd * 0.5))
-  // подставка
-  g.add(box(w * 0.34, standH * 0.2, d * 0.72, MAT.dark, 0, standH * 0.1, 0))
-  g.add(box(w * 0.11, standH * 0.8, d * 0.34, MAT.dark, 0, standH * 0.6, 0))
+  g.add(box(w - 2 * bez, panelH - 2 * bez, pd * 0.2, MAT.screen, 0, panelH / 2, pz + pd * 0.5))
   return g
 }
 

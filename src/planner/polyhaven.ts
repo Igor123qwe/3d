@@ -102,7 +102,13 @@ export async function phModelUrl(id: string): Promise<{ url: string; include: Re
   return null
 }
 
+// порядок важен: частные слова раньше общих («table lamp» — лампа, а не стол;
+// «bedroom lamp» — лампа, а не кровать; «bathroom mirror» — зеркало, а не ванна)
 const TYPE_RULES: [RegExp, string][] = [
+  [/floor.?lamp|standing.?lamp/i, 'lamp'],
+  [/lamp|light|chandelier|pendant|sconce/i, 'lamp'],
+  [/mirror/i, 'mirror'],
+  [/toilet.?paper|towel|soap|brush/i, 'box'],
   [/coffee.?table|side.?table/i, 'coffee-table'],
   [/dining.?table|kitchen.?table|table/i, 'dining-table'],
   [/office.?chair|desk.?chair/i, 'office-chair'],
@@ -111,7 +117,7 @@ const TYPE_RULES: [RegExp, string][] = [
   [/stool/i, 'chair'],
   [/chair|seat/i, 'chair'],
   [/couch|sofa/i, 'sofa-3'],
-  [/bed(?!side)/i, 'bed-160'],
+  [/bed(?!side|room)/i, 'bed-160'],
   [/night.?stand|bedside/i, 'nightstand'],
   [/wardrobe|closet|armoire/i, 'wardrobe'],
   [/book.?shelf|shelf|shelving|bookcase/i, 'bookshelf'],
@@ -123,17 +129,14 @@ const TYPE_RULES: [RegExp, string][] = [
   [/wash(ing)?.?machine|laundry/i, 'washer'],
   [/kitchen.?sink|sink/i, 'sink'],
   [/toilet|wc/i, 'toilet'],
-  [/bath.?tub|bath/i, 'bathtub-170'],
+  [/bath.?tub|bath(?!room)/i, 'bathtub-170'],
   [/shower/i, 'shower-90'],
   [/basin|wash.?stand/i, 'basin'],
   [/television|tv|monitor|screen/i, 'tv'],
-  [/floor.?lamp|standing.?lamp/i, 'lamp'],
-  [/lamp|light|chandelier|pendant/i, 'lamp'],
   [/plant|tree|flower|pot/i, 'plant'],
   [/rug|carpet/i, 'rug'],
   [/piano/i, 'piano'],
   [/bench/i, 'bench'],
-  [/mirror/i, 'mirror'],
   [/radiator|heater/i, 'radiator'],
 ]
 

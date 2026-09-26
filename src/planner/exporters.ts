@@ -1,4 +1,4 @@
-import type { DimRef, Plan } from './types'
+import type { DimRef, ElectricSettings, FloorKey, Plan } from './types'
 
 export function downloadBlob(name: string, blob: Blob): void {
   const url = URL.createObjectURL(blob)
@@ -144,7 +144,7 @@ export function normalizePlan(p: Partial<Plan>): Plan {
         id: typeof r.id === 'string' ? r.id : `r${i}`,
         anchor,
         name: typeof r.name === 'string' ? r.name : 'Комната',
-        floor: r.floor ?? 'laminate',
+        floor: FLOOR_KEYS.includes(r.floor as FloorKey) ? (r.floor as FloorKey) : 'laminate',
       }
     }),
     dims: list(p.dims, (raw, i) => {
@@ -168,6 +168,20 @@ export function normalizePlan(p: Partial<Plan>): Plan {
     }),
     settings: { grid: Math.max(1, num(p.settings?.grid, 10)) },
     ...(underlayOf(p.underlay) ? { underlay: underlayOf(p.underlay)! } : {}),
+    ...(electricOf(p.electric) ? { electric: electricOf(p.electric)! } : {}),
+  }
+}
+
+const FLOOR_KEYS: FloorKey[] = ['laminate', 'parquet', 'tile', 'carpet', 'concrete', 'plain']
+
+/** исходные данные электрики: без них после перезагрузки щит считался бы заново от умолчаний */
+function electricOf(v: unknown): ElectricSettings | null {
+  const e = v as Partial<ElectricSettings> | null
+  if (!e || typeof e !== 'object') return null
+  return {
+    allottedKw: Math.min(100, Math.max(1, num(e.allottedKw, 10))),
+    stove: e.stove === 'gas' ? 'gas' : 'electric',
+    ceiling: Math.min(500, Math.max(200, num(e.ceiling, 270))),
   }
 }
 
@@ -177,7 +191,7 @@ function underlayOf(v: unknown): Plan['underlay'] | null {
   const w = num(u.px?.w, 0)
   const h = num(u.px?.h, 0)
   if (!(w > 0) || !(h > 0)) return null
-  return {
+  const out: NonNullable<Plan['underlay']> = {
     src: u.src,
     px: { w, h },
     x: num(u.x, 0),
@@ -187,4 +201,7 @@ function underlayOf(v: unknown): Plan['underlay'] | null {
     visible: u.visible !== false,
     locked: !!u.locked,
   }
+  // исходное фото до очистки: по нему модель читает подписи — без него после перезагрузки цифр не будет
+  if (typeof u.original === 'string' && u.original) out.original = u.original
+  return out
 }

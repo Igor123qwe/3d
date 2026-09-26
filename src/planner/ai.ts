@@ -66,7 +66,8 @@ export function aiStatus(force = false): Promise<AiStatus> {
         if (!r.ok) throw new Error(String(r.status))
         return (await r.json()) as AiStatus
       })
-      .catch(() => ({ enabled: false, tasks: [], spentToday: null }) as AiStatus)
+      // сервера нет вовсе (демо на статическом хостинге) — так и говорим, а не про ключ
+      .catch(() => ({ enabled: false, tasks: [], spentToday: null, hint: 'В этой сборке нет сервера ИИ: распознавание и расстановка работают только при локальном запуске с ключом (см. README).' }) as AiStatus)
   }
   return statusCache
 }

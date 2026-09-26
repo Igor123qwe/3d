@@ -4,6 +4,7 @@ import type { ElectricKind, ElectricPoint, ElectricSettings, Feed, Furniture, Op
 import { uid } from './types'
 import { CATALOG_MAP, dims3d } from './catalog'
 import { openingGeom } from './checks'
+import { isHall, isKitchen, isOutdoor, isStorage, isWet } from './roomkind'
 import { add, angleDeg, dist, lerp, mul, norm, obbCorners, perp, pointInPoly, pointSegDist, rotate, sub } from './geometry'
 
 /** высота установки над полом, см — идёт в подпись и в ведомость */
@@ -108,13 +109,6 @@ export const DEFAULT_AUTO: AutoElectricOptions = {
 /** Исходные данные проекта по умолчанию: 10 кВт, электроплита, потолок 2,7 м */
 export const DEFAULT_ELECTRIC: ElectricSettings = { allottedKw: 10, stove: 'electric', ceiling: 270 }
 
-const WET_ROOMS = ['Санузел', 'Ванная', 'Туалет']
-const HALL_ROOMS = ['Прихожая', 'Коридор']
-const KITCHEN_ROOMS = ['Кухня', 'Кухня-гостиная']
-
-const isWet = (name: string) => WET_ROOMS.some((n) => name.includes(n))
-const isHall = (name: string) => HALL_ROOMS.some((n) => name.includes(n))
-const isKitchen = (name: string) => KITCHEN_ROOMS.some((n) => name.includes(n))
 
 /** предмет внутри комнаты? */
 const inRoom = (f: { x: number; y: number }, r: Room) => pointInPoly({ x: f.x, y: f.y }, r.polygon)
@@ -395,7 +389,7 @@ export function autoElectrics(plan: Plan, rooms: Room[], o: AutoElectricOptions,
     const wet = isWet(name)
     const kitchen = isKitchen(name)
     const hall = isHall(name)
-    const outdoor = /балкон|лоджи/i.test(name)
+    const outdoor = isOutdoor(name)
     const furniture = plan.furniture.filter((f) => !CATALOG_MAP[f.type]?.symbol && inRoom(f, room))
 
     // общий свет
@@ -442,7 +436,7 @@ export function autoElectrics(plan: Plan, rooms: Room[], o: AutoElectricOptions,
         if (free) onWall(room, spotAt(room, free.i, free.L / 2).p, 'outlet', 'водонагреватель: отдельная линия, УЗО', { feeds: 'boiler' })
       }
       // добрать до нормы: жилая — 1 на 4 м периметра, кухня — 4, коридор — 1 на 10 м²; кладовой норма не нужна
-      if (!wet && !/кладов|гардероб/i.test(name)) {
+      if (!wet && !isStorage(name)) {
         const perimeter = room.inner.reduce((s, a, i) => s + dist(a, room.inner[(i + 1) % room.inner.length]), 0) / 100
         const need = kitchen ? 4 : hall ? Math.max(1, Math.ceil(room.area / 10)) : room.area > 4 ? Math.ceil(perimeter / 4) : 0
         const why = kitchen ? 'по норме: на кухне не меньше 4 розеток' : hall ? 'коридор: пылесос, зарядка — 1 на 10 м²' : 'по норме: 1 розетка на каждые 4 м периметра'

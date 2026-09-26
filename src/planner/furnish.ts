@@ -11,6 +11,7 @@ import type { Plan, Room } from './types'
 import { CATALOG, CATALOG_MAP, isElectricItem } from './catalog'
 import { applyLayout, catalogForRoom, layoutSummary, vetLayout } from './autolayout'
 import { updateRoomMeta } from './ops'
+import { isFixedPurpose, isSkippedForFurnish } from './roomkind'
 import { lerp, pointInPoly } from './geometry'
 
 export interface FurnishOptions {
@@ -52,12 +53,8 @@ export interface FurnishReport {
   zoningFailed?: string
 }
 
-/** комнаты, которые не обставляют: балкон, лоджия и совсем маленькие */
-const SKIP = /балкон|лоджи|кладов|тамбур|шахт/i
-export const furnishable = (r: Room) => r.area >= 1.5 && !SKIP.test(r.meta.name)
-
-/** кухня, санузел, прихожая: назначение задано разводкой — зонирование его не меняет */
-const FIXED = /кухн|санузел|ванн|туалет|уборн|душ|прихож|коридор|холл|балкон|лоджи/i
+/** комнаты, которые не обставляют: балкон, лоджия, кладовая и совсем маленькие */
+export const furnishable = (r: Room) => r.area >= 1.5 && !isSkippedForFurnish(r.meta.name)
 
 const inRoom = (r: Room) => (f: { x: number; y: number }) => pointInPoly({ x: f.x, y: f.y }, r.polygon)
 
@@ -124,7 +121,7 @@ export async function furnish(plan: Plan, rooms: Room[], o: FurnishOptions, deps
       for (const zone of z.rooms) {
         const r = rooms[ids.indexOf(zone.id)]
         // кухню и санузел не переназначаем, даже если модель предложила
-        if (r && !FIXED.test(r.meta.name)) purpose.set(r.meta.id, { purpose: zone.purpose, why: zone.why })
+        if (r && !isFixedPurpose(r.meta.name)) purpose.set(r.meta.id, { purpose: zone.purpose, why: zone.why })
       }
     } catch (e) {
       zoningFailed = (e as Error).message
@@ -179,7 +176,7 @@ export async function furnish(plan: Plan, rooms: Room[], o: FurnishOptions, deps
     acc = applyLayout(acc, checks)
     const placed = checks.filter((c) => c.ok).length
     report.push({ ...base, placed, rejected: checks.length - placed, summary: layoutSummary(checks) })
-    if (o.rename && o.scope === 'all' && p.purpose !== r.meta.name && !FIXED.test(r.meta.name)) acc = updateRoomMeta(acc, r.meta.id, { name: p.purpose })
+    if (o.rename && o.scope === 'all' && p.purpose !== r.meta.name && !isFixedPurpose(r.meta.name)) acc = updateRoomMeta(acc, r.meta.id, { name: p.purpose })
   })
   return { plan: acc, rooms: report, costs, zoningFailed }
 }

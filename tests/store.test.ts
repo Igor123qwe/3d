@@ -72,3 +72,31 @@ describe('история изменений', () => {
     expect(result.current.canUndo).toBe(false)
   })
 })
+
+describe('серия мелких правок', () => {
+  it('стрелки: десять сдвигов — одна запись в истории, отмена возвращает к началу серии', async () => {
+    const { result } = setup()
+    act(() => result.current.apply((p) => wall(p, 0)))
+    const before = result.current.plan
+    for (let i = 0; i < 10; i++) act(() => result.current.nudge((p) => ({ ...p, walls: p.walls.map((w) => ({ ...w, a: { ...w.a, x: w.a.x + 1 } })) }), 50))
+    expect(result.current.plan.walls[0].a.x).toBe(10)
+    await act(() => new Promise((r) => setTimeout(r, 80)))
+    act(() => result.current.undo())
+    expect(result.current.plan).toBe(before)
+    act(() => result.current.redo())
+    expect(result.current.plan.walls[0].a.x).toBe(10)
+  })
+
+  it('правка посреди серии закрывает серию своей записью', () => {
+    const { result } = setup()
+    act(() => result.current.apply((p) => wall(p, 0)))
+    act(() => result.current.nudge((p) => ({ ...p, walls: p.walls.map((w) => ({ ...w, a: { ...w.a, x: 5 } })) }), 1000))
+    act(() => result.current.apply((p) => wall(p, 300)))
+    expect(result.current.plan.walls).toHaveLength(2)
+    act(() => result.current.undo())
+    expect(result.current.plan.walls).toHaveLength(1)
+    expect(result.current.plan.walls[0].a.x).toBe(5)
+    act(() => result.current.undo())
+    expect(result.current.plan.walls[0].a.x).toBe(0)
+  })
+})

@@ -1105,7 +1105,8 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           onNotice?.('Стена зафиксирована (или держится за зафиксированную) — снимите замок, чтобы двигать')
           return
         }
-        history.apply(() => next)
+        // серия нажатий — одна запись в истории
+        history.nudge(() => next)
         warnOpened(pl0, next)
         // выбранный кусок мог склеиться с соседним, а участок — стал своей прямой
         if (part || !next.walls.some((w) => w.id === selection.id)) {
@@ -1120,7 +1121,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         const step = e.shiftKey ? 10 : 1
         const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0
         const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0
-        history.apply((pl) => nudgeFurniture(pl, selection.id, dx, dy))
+        history.nudge((pl) => nudgeFurniture(pl, selection.id, dx, dy))
         return
       }
       if (ctrl) return

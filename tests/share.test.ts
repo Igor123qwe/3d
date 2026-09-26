@@ -76,6 +76,24 @@ describe('нормализация плана из файла', () => {
     expect(p.walls.map((w) => !!w.locked)).toEqual([true, false])
   })
 
+  it('исходные данные электрики и исходное фото подложки переживают загрузку', () => {
+    const p = normalizePlan({
+      walls: [],
+      electric: { allottedKw: 15, stove: 'gas', ceiling: 300 },
+      underlay: { src: 'data:x', original: 'data:orig', px: { w: 10, h: 10 }, x: 0, y: 0, scale: 1, opacity: 0.5, visible: true, locked: false },
+    })
+    expect(p.electric).toEqual({ allottedKw: 15, stove: 'gas', ceiling: 300 })
+    expect(p.underlay?.original).toBe('data:orig')
+    // мусор вместо настроек — умолчания, а не падение
+    const q = normalizePlan({ walls: [], electric: { allottedKw: 'много', stove: 'дрова', ceiling: -5 } as never })
+    expect(q.electric).toEqual({ allottedKw: 10, stove: 'electric', ceiling: 200 })
+  })
+
+  it('неизвестный пол комнаты заменяется ламинатом', () => {
+    const p = normalizePlan({ walls: [], rooms: [{ id: 'r', anchor: { x: 1, y: 1 }, name: 'Кухня', floor: 'lava' }] as never })
+    expect(p.rooms[0].floor).toBe('laminate')
+  })
+
   it('нулевые и нечисловые габариты предмета заменяются разумными', () => {
     const p = normalizePlan({ furniture: [{ id: 'f', type: 'box', x: 0, y: 0, w: 0, d: Number.NaN, rot: 'нет' }] as never })
     expect(p.furniture[0].w).toBeGreaterThan(0)

@@ -73,6 +73,22 @@
 }
 
 /* ---------- шапка ---------- */
+/* на ноутбуках 861–1180 px переключатели остаются значками, имя проекта не схлопывается */
+@media (max-width: 1180px) and (min-width: 861px) {
+  .pl-mode-switch span,
+  .pl-view-switch span {
+    display: none;
+  }
+  .pl-view-switch button {
+    padding: 5px 9px;
+  }
+  .pl-btn-text {
+    display: none;
+  }
+  .pl-btn-icon {
+    display: inline;
+  }
+}
 .pl-header {
   grid-area: hdr;
   display: flex;
@@ -91,8 +107,8 @@
   min-width: 0;
   flex: 1;
 }
-.pl-name {
-  min-width: 80px;
+.pl-root .pl-name {
+  min-width: 96px;
   max-width: 300px;
   width: 100%;
   font-weight: 600;
@@ -968,8 +984,9 @@
 /* ---------- мобильная раскладка ---------- */
 @media (max-width: 860px) {
   .pl-root {
-    grid-template-rows: 44px 1fr auto auto 22px;
-    grid-template-columns: 1fr;
+    /* minmax(0, …): колонка не шире экрана, даже если шапка просит больше */
+    grid-template-rows: auto minmax(0, 1fr) auto auto 22px;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
       'hdr'
       'canvas'
@@ -977,12 +994,37 @@
       'panel'
       'status';
   }
+  /* шапка в две строки: имя и действия, ниже — режимы и 2D/3D */
   .pl-header {
-    padding: 0 6px;
-    gap: 4px;
+    padding: 4px 6px;
+    gap: 4px 6px;
+    flex-wrap: wrap;
+    min-height: 44px;
   }
-  .pl-name {
-    max-width: 120px;
+  .pl-brand {
+    order: 0;
+    flex: 1 1 60px;
+  }
+  .pl-header-actions {
+    order: 1;
+    margin-left: auto;
+    gap: 2px;
+  }
+  .pl-header-actions .pl-sep {
+    margin: 0 2px;
+  }
+  .pl-mode-switch {
+    order: 2;
+    flex: 1 1 auto;
+    justify-content: space-around;
+  }
+  .pl-header > .pl-view-switch:not(.pl-mode-switch) {
+    order: 3;
+    flex: none;
+  }
+  .pl-root .pl-name {
+    min-width: 60px;
+    max-width: 130px;
   }
   .pl-zoom {
     display: none;

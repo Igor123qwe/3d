@@ -555,7 +555,8 @@ const HEIGHTS: Record<string, [number, number?]> = {
   'counter-80': [90],
   'counter-100': [90],
   'counter-corner': [90],
-  sink: [90],
+  // мойка: столешница на 90, смеситель над ней
+  sink: [110],
   stove: [90],
   fridge: [185],
   dishwasher: [85],

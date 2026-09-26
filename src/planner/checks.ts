@@ -1,4 +1,5 @@
 // Проверка планировки по правилам эргономики, которыми пользуются дизайнеры интерьера.
+import { isLiving, isWet } from './roomkind'
 import type { Furniture, Issue, Opening, Plan, Pt, Room, Wall } from './types'
 import { CATALOG_MAP, type CatalogItem, type Clearance } from './catalog'
 import { findGaps } from './walledit'
@@ -95,7 +96,6 @@ export function openingGeom(op: Opening, wall: Wall): OpeningGeom {
 }
 
 const SIDE_TEXT: Record<ZoneSide, string> = { front: 'Перед', back: 'Позади', left: 'Слева от', right: 'Справа от' }
-const LIVING_ROOMS = ['Гостиная', 'Спальня', 'Детская', 'Кабинет', 'Кухня', 'Кухня-гостиная']
 
 export function runChecks(plan: Plan, rooms: Room[]): CheckResult {
   const issues: Issue[] = []
@@ -191,7 +191,7 @@ export function runChecks(plan: Plan, rooms: Room[]): CheckResult {
     if (openingsOnRoom(r, ['door', 'doorway']).length === 0) {
       push({ id: `nodoor-${r.meta.id}`, level: 'warn', text: `В комнату «${r.meta.name}» нет двери или проёма`, target: { kind: 'room', id: r.meta.id } })
     }
-    if (LIVING_ROOMS.includes(r.meta.name) && openingsOnRoom(r, ['window']).length === 0) {
+    if (isLiving(r.meta.name) && openingsOnRoom(r, ['window']).length === 0) {
       push({ id: `nowin-${r.meta.id}`, level: 'info', text: `В «${r.meta.name}» нет окна — жилой комнате нужен естественный свет`, target: { kind: 'room', id: r.meta.id } })
     }
   }
@@ -261,9 +261,8 @@ export function runChecks(plan: Plan, rooms: Room[]): CheckResult {
   // 7. электрика
   const electrics = plan.furniture.filter((f) => f.electric)
   if (electrics.length) {
-    const wetNames = ['Санузел', 'Ванная', 'Туалет']
     for (const r of rooms) {
-      const wet = wetNames.some((n) => r.meta.name.includes(n))
+      const wet = isWet(r.meta.name)
       const inside = electrics.filter((f) => pointInPoly({ x: f.x, y: f.y }, r.polygon))
       if (!inside.some((f) => f.electric?.kind === 'light' || f.electric?.kind === 'spot')) {
         push({ id: `nolight-${r.meta.id}`, level: 'info', text: `В «${r.meta.name}» нет светильника`, target: { kind: 'room', id: r.meta.id } })

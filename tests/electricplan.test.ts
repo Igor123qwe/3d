@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_AUTO, autoElectrics } from '../src/planner/electrics'
-import { DEFAULT_ELECTRIC, designCsv, designElectrics, feedOf, inputRating, powerOf } from '../src/planner/electricplan'
+import { DEFAULT_ELECTRIC, designCsv, designElectrics, feedOf, inputRating, powerOf, simultaneity } from '../src/planner/electricplan'
 import { buildRooms } from '../src/planner/rooms'
 import { CATALOG_MAP } from '../src/planner/catalog'
 import { TEMPLATES } from '../src/planner/templates'
@@ -116,6 +116,18 @@ describe('щит и группы', () => {
     const csv = designCsv(design)
     expect(csv).toContain('QF1')
     expect(csv).toContain('Подрозетник')
+  })
+
+  it('шаблон со всей техникой и умным домом укладывается в выделенные 10 кВт: спрос с коэффициентами, а не сумма', () => {
+    const { design } = designed(DEFAULT_ELECTRIC, { ...DEFAULT_AUTO, panel: true, smart: true, curtains: true, leak: true, motion: true, ac: true, boiler: true })
+    expect(design.demandKw).toBeLessThanOrEqual(10)
+    expect(design.installedKw).toBeGreaterThan(design.demandKw)
+    expect(design.issues.some((i) => /больше выделенной/.test(i.text))).toBe(false)
+    // электрокарнизы — своя группа автоматики, не свет
+    const auto = design.circuits.find((c) => c.kind === 'auto')!
+    expect(auto.points.every((f) => f.electric?.kind === 'curtain-motor')).toBe(true)
+    expect(design.circuits.filter((c) => c.kind === 'light').every((c) => c.points.every((f) => f.electric?.kind !== 'curtain-motor'))).toBe(true)
+    expect([2, 5, 9, 14, 20].map(simultaneity)).toEqual([1, 0.8, 0.65, 0.55, 0.5])
   })
 
   it('без щита на плане — место предложено в прихожей', () => {

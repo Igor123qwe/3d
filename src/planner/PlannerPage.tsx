@@ -2349,9 +2349,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           >
             ↔ Размеры комнаты на план
           </button>
-          <button className="pl-btn" onClick={() => setFurnishFor(r.meta.id)} title="ИИ обставит комнату по вашим пожеланиям">
-            ✨ Обставить с ИИ…
-          </button>
+          {ai.enabled && (
+            <button className="pl-btn" onClick={() => setFurnishFor(r.meta.id)} title="ИИ обставит комнату по вашим пожеланиям">
+              ✨ Обставить с ИИ…
+            </button>
+          )}
         </div>
       )
     }
@@ -2477,7 +2479,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                       заново по размерам с плана. Или нарисуйте стены поверх картинки: «Комната», «Стена».
                     </span>
                     <div className="pl-note pl-note-warn">
-                      <b>ИИ выключен.</b> {ai.hint || 'Нужен ключ ROUTERAI_API_KEY в файле .env рядом с package.json (см. README).'}
+                      <b>ИИ выключен.</b> {ai.hint || 'На сервере нет ключа ИИ (см. README, раздел «Подключение»).'}
                     </div>
                     <button
                       className="pl-btn small"
@@ -2621,8 +2623,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
 
   const renderCatalog = () => (
     <div>
-      {rooms.length > 0 && (
-        <button className="pl-btn pl-furnish-cta" onClick={() => setFurnishFor(selection?.kind === 'room' ? selection.id : 'all')} title={ai.enabled ? 'ИИ расставит мебель по вашим пожеланиям' : 'ИИ не подключён на сервере'}>
+      {rooms.length > 0 && ai.enabled && (
+        <button className="pl-btn pl-furnish-cta" onClick={() => setFurnishFor(selection?.kind === 'room' ? selection.id : 'all')} title="ИИ расставит мебель по вашим пожеланиям">
           ✨ Расставить с ИИ по пожеланиям
         </button>
       )}
@@ -3375,7 +3377,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             <span className="pl-tool-name">Каталог</span>
           </button>
         )}
-        {mode === 'furnish' && (
+        {mode === 'furnish' && ai.enabled && (
           <button className="pl-tool" onClick={() => setFurnishFor(selection?.kind === 'room' ? selection.id : 'all')} disabled={!rooms.length} title="Расставить мебель с ИИ: вся квартира или комната, по вашим пожеланиям">
             <span className="pl-tool-icon">
               <Icon name="sparkles" size={22} />
@@ -3557,6 +3559,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           rooms={rooms.map((r) => ({ id: r.meta.id, name: r.meta.name, area: r.area }))}
           initialScope={furnishFor}
           aiEnabled={ai.enabled}
+          aiHint={ai.hint}
           onRun={runFurnish}
           onClose={() => setFurnishFor(null)}
         />
