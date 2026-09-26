@@ -165,7 +165,7 @@ export const UNIT_CM: Record<LengthUnit, number> = { cm: 1, mm: 0.1, m: 100 }
 export const UNIT_NAME: Record<LengthUnit, string> = { cm: 'см', mm: 'мм', m: 'м' }
 
 export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) => {
-  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view, onViewChange, onHint, photos, onCalibrate, imageLines, onRoomPick, onCorners, onRefine, onNotice, mode = 'build', wallRef = 'axis', electricDesign, hlCircuit, onSectionChange } = props
+  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view: viewProp, onViewChange, onHint, photos, onCalibrate, imageLines, onRoomPick, onCorners, onRefine, onNotice, mode = 'build', wallRef = 'axis', electricDesign, hlCircuit, onSectionChange } = props
   const build = mode === 'build'
   const svgRef = useRef<SVGSVGElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -193,8 +193,34 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   const [movingId, setMovingId] = useState<string | null>(null)
   /** курсор над кружком конца выбранной прямой */
   const [overEnd, setOverEnd] = useState(false)
+  const [overHandle, setOverHandle] = useState<'rotate' | 'resize' | null>(null)
   const lastRaw = useRef<Pt | null>(null)
   const deleteRef = useRef<() => boolean>(() => false)
+  /** кадры перетаскивания сыплются чаще, чем рисует экран: комнаты и проверки считаем раз на кадр */
+  const pendingPreview = useRef<Plan | null>(null)
+  const previewRaf = useRef<number | null>(null)
+  const flushPreview = () => {
+    if (previewRaf.current !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(previewRaf.current)
+    previewRaf.current = null
+    const p = pendingPreview.current
+    if (!p) return
+    pendingPreview.current = null
+    history.preview(p)
+  }
+  const previewSoon = (p: Plan) => {
+    pendingPreview.current = p
+    if (previewRaf.current !== null) return
+    if (typeof requestAnimationFrame !== 'function') {
+      flushPreview()
+      return
+    }
+    previewRaf.current = requestAnimationFrame(() => {
+      previewRaf.current = null
+      const q = pendingPreview.current
+      pendingPreview.current = null
+      if (q) history.preview(q)
+    })
+  }
   /** Alt + щелчок по стене: выделен только участок до стыков — точка щелчка, участок считается заново */
   const [selPart, setSelPart] = useState<{ id: string; at: Pt } | null>(null)
   /** длина следующей стены, набранная цифрами, пока рисуется стена */
@@ -210,8 +236,38 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   const pointers = useRef(new Map<number, { x: number; y: number }>())
   const pinch = useRef<{ d0: number; mid0: Pt; view0: View } | null>(null)
   const spaceDown = useRef(false)
+  // Вид живёт в холсте: панорама и зум не перерисовывают всю страницу на каждый
+  // пиксель. Наружу вид уходит с задержкой (в конце жеста), а если страница
+  // сама сменила вид («Вписать», центр на объекте), холст берёт его
+  const [view, setViewLocal] = useState(viewProp)
   const viewRef = useRef(view)
   viewRef.current = view
+  const emitted = useRef(viewProp)
+  const commitTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const setView = useCallback(
+    (v: View, delay = 0) => {
+      viewRef.current = v
+      setViewLocal(v)
+      if (commitTimer.current) clearTimeout(commitTimer.current)
+      commitTimer.current = setTimeout(() => {
+        commitTimer.current = null
+        emitted.current = viewRef.current
+        onViewChange(viewRef.current)
+      }, delay)
+    },
+    [onViewChange],
+  )
+  useEffect(() => {
+    const e = emitted.current
+    if (viewProp.x !== e.x || viewProp.y !== e.y || viewProp.zoom !== e.zoom) {
+      emitted.current = viewProp
+      viewRef.current = viewProp
+      setViewLocal(viewProp)
+    }
+  }, [viewProp])
+  useEffect(() => () => {
+    if (commitTimer.current) clearTimeout(commitTimer.current)
+  }, [])
   const planRef = useRef(plan)
   planRef.current = plan
   const draftRef = useRef(draft)
@@ -267,17 +323,17 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     const bw = b.maxX - b.minX + pad * 2
     const bh = b.maxY - b.minY + pad * 2
     const z = clamp(Math.min(size.w / bw, size.h / bh), 0.12, 6)
-    onViewChange({ zoom: z, x: (size.w - bw * z) / 2 - (b.minX - pad) * z, y: (size.h - bh * z) / 2 - (b.minY - pad) * z })
-  }, [size, onViewChange])
+    setView({ zoom: z, x: (size.w - bw * z) / 2 - (b.minX - pad) * z, y: (size.h - bh * z) / 2 - (b.minY - pad) * z })
+  }, [size, setView])
 
   const zoomAt = useCallback(
     (factor: number, sx: number, sy: number) => {
       const v = viewRef.current
       const z = clamp(v.zoom * factor, 0.12, 8)
       const k = z / v.zoom
-      onViewChange({ zoom: z, x: sx - (sx - v.x) * k, y: sy - (sy - v.y) * k })
+      setView({ zoom: z, x: sx - (sx - v.x) * k, y: sy - (sy - v.y) * k }, 40)
     },
-    [onViewChange],
+    [setView],
   )
 
   const finishDraft = useCallback(() => {
@@ -310,11 +366,11 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       deleteSelected: () => deleteRef.current(),
       centerOn: (p) => {
         const v = viewRef.current
-        onViewChange({ ...v, x: size.w / 2 - p.x * v.zoom, y: size.h / 2 - p.y * v.zoom })
+        setView({ ...v, x: size.w / 2 - p.x * v.zoom, y: size.h / 2 - p.y * v.zoom })
       },
       finishDraft,
     }),
-    [fit, zoomAt, size, finishDraft, onViewChange],
+    [fit, zoomAt, size, finishDraft, setView],
   )
 
   // ---------- колесо: масштаб ----------
@@ -327,12 +383,12 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       if (e.ctrlKey || !e.shiftKey) zoomAt(Math.exp(-e.deltaY * 0.0012), e.clientX - r.left, e.clientY - r.top)
       else {
         const v = viewRef.current
-        onViewChange({ ...v, x: v.x - e.deltaY })
+        setView({ ...v, x: v.x - e.deltaY }, 120)
       }
     }
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
-  }, [zoomAt, onViewChange])
+  }, [zoomAt, setView])
 
   // ---------- сброс временных состояний при смене инструмента ----------
   useEffect(() => {
@@ -428,6 +484,17 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     }
   }
 
+  /** дуги открывания считаются один раз на план, а не на каждое движение мыши */
+  const openingGeoms = useMemo(() => {
+    const walls = new Map(plan.walls.map((w) => [w.id, w]))
+    const m = new Map<string, ReturnType<typeof openingGeom>>()
+    for (const op of plan.openings) {
+      const w = walls.get(op.wallId)
+      if (w) m.set(op.id, openingGeom(op, w))
+    }
+    return m
+  }, [plan.walls, plan.openings])
+
   const hitTest = useCallback(
     (p: Pt): Selection => {
       const z = viewRef.current.zoom
@@ -446,7 +513,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       for (const op of build ? plan.openings : []) {
         const w = wallMap.get(op.wallId)
         if (!w) continue
-        const g = openingGeom(op, w)
+        const g = openingGeoms.get(op.id) ?? openingGeom(op, w)
         const s0 = add(g.center, mul(g.dir, -g.hw))
         const s1 = add(g.center, mul(g.dir, g.hw))
         if (pointSegDist(p, s0, s1) < w.thickness / 2 + t) return { kind: 'opening', id: op.id }
@@ -797,7 +864,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       const z = clamp((v0.zoom * d) / Math.max(1, pinch.current.d0), 0.12, 8)
       const wx = (pinch.current.mid0.x - (r?.left ?? 0) - v0.x) / v0.zoom
       const wy = (pinch.current.mid0.y - (r?.top ?? 0) - v0.y) / v0.zoom
-      onViewChange({ zoom: z, x: m.x - (r?.left ?? 0) - wx * z, y: m.y - (r?.top ?? 0) - wy * z })
+      setView({ zoom: z, x: m.x - (r?.left ?? 0) - wx * z, y: m.y - (r?.top ?? 0) - wy * z }, 120)
       return
     }
     const raw = toWorld(e.clientX, e.clientY)
@@ -812,6 +879,14 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         const selRunNow = selection?.kind === 'wall' ? wallRun(plan.walls, selection.id) : null
         const atEnd = !!selRunNow && (dist(raw, selRunNow.a) < 10 / z0 || dist(raw, selRunNow.b) < 10 / z0)
         setOverEnd((prev) => (prev === atEnd ? prev : atEnd))
+        const sf = selection?.kind === 'furniture' ? plan.furniture.find((f) => f.id === selection.id) : undefined
+        let oh: 'rotate' | 'resize' | null = null
+        if (sf && !CATALOG_MAP[sf.type]?.symbol) {
+          const hp = handlePositions(sf)
+          if (dist(raw, hp.rotate) < 9 / z0) oh = 'rotate'
+          else if (CATALOG_MAP[sf.type]?.resizable !== false && dist(raw, hp.resize) < 8 / z0) oh = 'resize'
+        }
+        setOverHandle((prev) => (prev === oh ? prev : oh))
         // над подписью размера комнаты — курсор-рука: по ней можно щёлкнуть и ввести число
         const z = viewRef.current.zoom
         const onLabel =
@@ -840,7 +915,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           d.moved = true
           setPanning(true)
         }
-        if (d.moved) onViewChange({ ...d.view0, x: d.view0.x + dx, y: d.view0.y + dy })
+        if (d.moved) setView({ ...d.view0, x: d.view0.x + dx, y: d.view0.y + dy }, 150)
         return
       }
       case 'maybe': {
@@ -850,7 +925,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         if (Math.hypot(dx, dy) > (e.pointerType === 'touch' ? 10 : 6)) {
           drag.current = { kind: 'pan', sx: d.sx, sy: d.sy, view0: d.view0, moved: true, clickSel: selection }
           setPanning(true)
-          onViewChange({ ...d.view0, x: d.view0.x + dx, y: d.view0.y + dy })
+          setView({ ...d.view0, x: d.view0.x + dx, y: d.view0.y + dy }, 150)
         } else updateDrawingCursor(raw)
         return
       }
@@ -868,13 +943,13 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         if (e.shiftKey) {
           const p = add(raw, d.offset)
           setGuides([])
-          history.preview(updateFurniture(d.plan0, d.id, { x: Math.round(p.x), y: Math.round(p.y) }))
+          previewSoon(updateFurniture(d.plan0, d.id, { x: Math.round(p.x), y: Math.round(p.y) }))
           return
         }
         const without: Plan = { ...d.plan0, furniture: d.plan0.furniture.filter((f) => f.id !== d.id) }
         const s = snapFurniture(d.item0, add(raw, d.offset), without, { grid: 5, tol: Math.max(tol, 10), selfId: d.id })
         setGuides(s.guides)
-        history.preview(updateFurniture(d.plan0, d.id, { x: s.x, y: s.y, rot: s.rot }))
+        previewSoon(updateFurniture(d.plan0, d.id, { x: s.x, y: s.y, rot: s.rot }))
         return
       }
       case 'rotate': {
@@ -882,7 +957,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         if (!f) return
         const ang = roundTo(angleDeg({ x: f.x, y: f.y }, raw) + 90, e.shiftKey ? 1 : 15)
         setDragLabel(`${Math.round(normDeg(ang))}°`)
-        history.preview(updateFurniture(d.plan0, d.id, { rot: normDeg(ang) }))
+        previewSoon(updateFurniture(d.plan0, d.id, { rot: normDeg(ang) }))
         return
       }
       case 'resize': {
@@ -893,7 +968,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         const dd = Math.max(5, roundTo(local.y, 5))
         const c = add(corner, rotate({ x: w / 2, y: dd / 2 }, f.rot))
         setDragLabel(`${fmtLen(w, unit)} × ${fmtLen(dd, unit)}`)
-        history.preview(updateFurniture(d.plan0, d.id, { x: c.x, y: c.y, w, d: dd }))
+        previewSoon(updateFurniture(d.plan0, d.id, { x: c.x, y: c.y, w, d: dd }))
         return
       }
       case 'node': {
@@ -902,7 +977,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         const next = moveNodes(d.plan0, [{ from: d.from, to: s.p }])
         if (touchesLocked(d.plan0, next)) return
         d.last = next
-        history.preview(next)
+        previewSoon(next)
         return
       }
       case 'wall': {
@@ -931,7 +1006,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         }
         d.offset = off
         d.last = next
-        history.preview(d.last)
+        previewSoon(d.last)
         if (d.part) {
           const mw = movedSection(next.walls, d.run, d.part.lo, d.part.hi, off)
           const id = mw?.id ?? null
@@ -949,27 +1024,27 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           return
         }
         d.last = next
-        history.preview(d.last)
+        previewSoon(d.last)
         return
       }
       case 'opening': {
         const op = d.plan0.openings.find((o) => o.id === d.id)
         if (!op) return
         const s = snapOpening(raw, d.plan0, op.width, tol + 15, e.shiftKey)
-        if (s) history.preview(updateOpening(d.plan0, d.id, { wallId: s.wallId, t: s.t }))
+        if (s) previewSoon(updateOpening(d.plan0, d.id, { wallId: s.wallId, t: s.t }))
         return
       }
       case 'underlay': {
         const u = d.plan0.underlay
         if (!u) return
-        history.preview({ ...d.plan0, underlay: { ...u, x: u.x + (raw.x - d.start.x), y: u.y + (raw.y - d.start.y) } })
+        previewSoon({ ...d.plan0, underlay: { ...u, x: u.x + (raw.x - d.start.x), y: u.y + (raw.y - d.start.y) } })
         return
       }
       case 'dim': {
         const dir = norm(sub(d.dim0.b, d.dim0.a))
         const n = perp(dir)
         const off = roundTo(dot(sub(raw, d.dim0.a), n), 5)
-        history.preview(updateDim(d.plan0, d.id, { offset: off === 0 ? 5 : off }))
+        previewSoon(updateDim(d.plan0, d.id, { offset: off === 0 ? 5 : off }))
         return
       }
     }
@@ -1014,11 +1089,14 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     drag.current = null
     setPanning(false)
     setDragLabel(null)
+    // последний кадр перетаскивания должен попасть в план до закрытия серии
+    flushPreview()
     if (!d) return
     const raw = toWorld(e.clientX, e.clientY)
     switch (d.kind) {
       case 'pan':
         if (!d.moved && tool === 'select') onSelect(d.clickSel)
+        else if (d.moved) setView(viewRef.current)
         return
       case 'maybe':
         handleTap(raw, { shift: e.shiftKey })
@@ -1074,6 +1152,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     setPanning(false)
     setDragLabel(null)
     setMovingId(null)
+    pendingPreview.current = null
     setRoomDraft(null)
     setGuides([])
     if (d && 'plan0' in d) history.cancelPreview()
@@ -1094,6 +1173,14 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         if (/^\d$/.test(e.key) || ((e.key === ',' || e.key === '.') && !/[.,]/.test(typed))) {
           e.preventDefault()
           if (typed.length < 7) setTyped(typed + e.key)
+          return
+        }
+        if (e.key === 'Backspace' && !typed && draftRef.current.length) {
+          // шаг назад в черновике: последняя точка снимается
+          e.preventDefault()
+          const rest = draftRef.current.slice(0, -1)
+          draftRef.current = rest
+          setDraft(rest)
           return
         }
         if (e.key === 'Backspace' && typed) {
@@ -1133,6 +1220,13 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       }
       if (e.key === 'Enter' && draftRef.current.length) {
         finishDraft()
+        return
+      }
+      // зум с клавиатуры: + / − / 0 — как в графических редакторах; в черновике стены цифры — длина
+      if (!ctrl && !(tool === 'wall' && draftRef.current.length) && (e.key === '+' || e.key === '=' || e.key === '-' || e.key === '0')) {
+        e.preventDefault()
+        if (e.key === '0') fit()
+        else zoomAt(e.key === '-' ? 1 / 1.25 : 1.25, size.w / 2, size.h / 2)
         return
       }
       if (ctrl && e.code === 'KeyZ') {
@@ -1263,7 +1357,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     }
   }, [tool, hover])
 
-  const cursorStyle = panning ? 'grabbing' : drawing ? 'crosshair' : overEnd && tool === 'select' ? 'move' : overLabel && tool === 'select' ? 'pointer' : hover?.kind === 'furniture' || hover?.kind === 'opening' ? 'move' : hover?.kind === 'wall' ? 'pointer' : 'default'
+  const cursorStyle = panning ? 'grabbing' : drawing ? 'crosshair' : overHandle === 'rotate' && tool === 'select' ? 'grab' : overHandle === 'resize' && tool === 'select' ? 'nwse-resize' : overEnd && tool === 'select' ? 'move' : overLabel && tool === 'select' ? 'pointer' : hover?.kind === 'dim' ? 'move' : hover?.kind === 'furniture' || hover?.kind === 'opening' ? 'move' : hover?.kind === 'wall' ? 'pointer' : 'default'
   const minor = 50 * zoom
   const major = 100 * zoom
   const draftWalls = draft.slice(1).map((p, i) => ({ id: `d${i}`, a: draft[i], b: p, thickness: wallThickness }))
@@ -1540,7 +1634,17 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           )}
           {cursor && (tool === 'wall' || tool === 'room' || tool === 'dimension' || tool === 'measure' || tool === 'calibrate') && (
             <g pointerEvents="none">
-              <circle cx={cursor.p.x} cy={cursor.p.y} r={(cursor.kind === 'endpoint' ? 7 : cursor.kind === 'face' ? 5 : 4) / zoom} fill="none" stroke={cursor.kind === 'endpoint' ? '#f43f5e' : cursor.kind === 'face' ? '#16a34a' : ACCENT} strokeWidth={1.5} {...NS} />
+              {/* конец стены — крупный розовый, грань — зелёный, стена — синий, створ — фиолетовый пунктир, сетка — серый */}
+              <circle
+                cx={cursor.p.x}
+                cy={cursor.p.y}
+                r={(cursor.kind === 'endpoint' ? 7 : cursor.kind === 'face' || cursor.kind === 'wall' ? 5 : cursor.kind === 'align' ? 4.5 : 3.5) / zoom}
+                fill="none"
+                stroke={cursor.kind === 'endpoint' ? '#f43f5e' : cursor.kind === 'face' ? '#16a34a' : cursor.kind === 'wall' ? ACCENT : cursor.kind === 'align' ? '#7c3aed' : '#6b7280'}
+                strokeWidth={1.5}
+                strokeDasharray={cursor.kind === 'align' ? '3 2' : undefined}
+                {...NS}
+              />
             </g>
           )}
 

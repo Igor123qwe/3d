@@ -728,7 +728,12 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         return
       }
       await navigator.clipboard.writeText(url)
-      setToast('Ссылка скопирована: откройте её на телефоне в Chrome (Android) или Safari (iPhone)')
+      // мессенджеры режут очень длинные ссылки — честно предупредим
+      setToast(
+        url.length > 6000
+          ? `Ссылка скопирована, но длинная (${Math.round(url.length / 1000)} тыс. символов) — мессенджер может её обрезать. Надёжнее «Сохранить план в файл»`
+          : 'Ссылка скопирована: откройте её на телефоне в Chrome (Android) или Safari (iPhone)',
+      )
     } catch {
       setToast('Не удалось скопировать ссылку')
     }
@@ -856,6 +861,14 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
 
   const loadPlanFile = async (f: File) => {
     const p = await readPlanFile(f)
+    // файл из более новой версии: читаем, что понимаем, и говорим об этом
+    let newer = 0
+    try {
+      const raw = JSON.parse(await f.text()) as { version?: unknown }
+      if (typeof raw.version === 'number' && raw.version > p.version) newer = raw.version
+    } catch {
+      /* readPlanFile уже разобрал файл — версия просто неизвестна */
+    }
     // через историю: Ctrl+Z вернёт прежний план, как у шаблона и картинки
     const put = () => {
       history.apply(() => p)
@@ -863,7 +876,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       setSelection(null)
       setStart(false)
       setTimeout(() => canvasRef.current?.fit(), 30)
-      setToast(`Открыт план «${p.name}». Прежний вернёт Ctrl+Z`)
+      setToast(newer ? `Открыт план «${p.name}». Файл записан более новой версией планировщика (${newer}) — часть данных могла не прочитаться` : `Открыт план «${p.name}». Прежний вернёт Ctrl+Z`)
     }
     if (!hasOwnWork()) put()
     else
@@ -911,6 +924,16 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     e.target.value = ''
     void intake.takeFiles(files)
   }
+
+  // вторая вкладка с тем же проектом: последняя запись побеждает — предупредим
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (!projectId.current || e.key !== `boop.planner.project.${projectId.current}`) return
+      setToast('Этот проект открыт и в другой вкладке: побеждает последнее сохранение. Лучше работать в одной')
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [])
 
   // Ctrl+S сохраняет файл плана, Ctrl+O открывает; Ctrl+V обрабатывает приёмник.
   // В 3D холста с его клавишами нет, поэтому отмена, повтор и Delete живут здесь
@@ -2760,12 +2783,12 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                     max={100}
                     step={5}
                     value={Math.round(plan.underlay.opacity * 100)}
-                    onChange={(e) => history.silent((p) => updateUnderlay(p, { opacity: Number(e.target.value) / 100 }))}
+                    onChange={(e) => history.nudge((p) => updateUnderlay(p, { opacity: Number(e.target.value) / 100 }))}
                   />
                 </label>
                 <label className="pl-field">
                   <span>Закрепить, не двигать мышью</span>
-                  <input type="checkbox" checked={plan.underlay.locked} onChange={() => history.silent((p) => updateUnderlay(p, { locked: !p.underlay?.locked }))} />
+                  <input type="checkbox" checked={plan.underlay.locked} onChange={() => history.apply((p) => updateUnderlay(p, { locked: !p.underlay?.locked }))} />
                 </label>
                 <label className="pl-field" title="При рисовании стен, комнат и размеров точки липнут к линиям, найденным на картинке">
                   <span>Магнит к линиям картинки{imageLinesPx.length ? ` (${imageLinesPx.length})` : ''}</span>
@@ -3433,7 +3456,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           </button>
         )}
         <div className="pl-brand">
-          <input className="pl-name" value={plan.name} onChange={(e) => history.silent((p) => ({ ...p, name: e.target.value }))} aria-label="Название плана" title="Название плана — можно переименовать" />
+          <input className="pl-name" value={plan.name} onChange={(e) => history.nudge((p) => ({ ...p, name: e.target.value }), 1200)} aria-label="Название плана" title="Название плана — можно переименовать" />
           <span className={`pl-saved ${saveState}`} title="План сохраняется в этом браузере сам">
             {saveState === 'saving' ? 'Сохраняю…' : saveState === 'error' ? 'Не сохранилось' : 'Сохранено в браузере'}
           </span>
@@ -3528,7 +3551,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                 <MenuChoice
                   options={[5, 10, 25, 50].map((g) => ({ value: g, label: `${g} см` }))}
                   value={plan.settings.grid}
-                  onChange={(g) => history.silent((p) => ({ ...p, settings: { ...p.settings, grid: g } }))}
+                  onChange={(g) => history.apply((p) => ({ ...p, settings: { ...p.settings, grid: g } }))}
                 />
               </Dropdown>
             )}

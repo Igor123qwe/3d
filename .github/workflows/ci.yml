@@ -21,3 +21,20 @@ jobs:
         run: npm test
       - name: Сборка
         run: npm run build
+
+  # Сборка в настоящем браузере: страница открывается, шаблон, каталог, электрика
+  smoke:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - name: Браузер для проверки
+        run: npx playwright-core install --with-deps chromium
+      - run: npm run build
+      - name: Дымовая проверка
+        run: npm run smoke

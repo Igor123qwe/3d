@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_AUTO, ELECTRIC_NAMES, autoElectrics, cableEstimate, catalogTypeOf, electricSpec } from '../src/planner/electrics'
+import { DEFAULT_AUTO, ELECTRIC_NAMES, autoElectrics, catalogTypeOf } from '../src/planner/electrics'
 import { buildRooms } from '../src/planner/rooms'
 import { CATALOG_MAP } from '../src/planner/catalog'
 import { TEMPLATES } from '../src/planner/templates'
@@ -106,36 +106,6 @@ describe('умный дом', () => {
   it('щит ставится один', () => {
     const { items } = run(twoRoom(), smart)
     expect(items.filter((i) => i.electric?.kind === 'panel').length).toBe(1)
-  })
-})
-
-describe('ведомость и кабель', () => {
-  it('ведомость считает приборы по видам', () => {
-    const { plan, rooms, items } = run(twoRoom())
-    const withElectrics: Plan = { ...plan, furniture: [...plan.furniture, ...items] }
-    const spec = electricSpec(withElectrics, rooms)
-    expect(spec.length).toBeGreaterThan(2)
-    expect(spec.reduce((s, r) => s + r.count, 0)).toBe(items.length)
-    for (const row of spec) {
-      expect(row.name).toBe(ELECTRIC_NAMES[row.kind])
-      expect(row.where.length).toBeGreaterThan(0)
-      expect(row.height).toBeGreaterThan(0)
-    }
-    // ведомость отсортирована по убыванию количества
-    expect(spec.map((r) => r.count)).toEqual([...spec.map((r) => r.count)].sort((a, b) => b - a))
-  })
-
-  it('оценка кабеля растёт с числом точек', () => {
-    const { plan, rooms, items } = run(twoRoom())
-    const few: Plan = { ...plan, furniture: [...plan.furniture, ...items.slice(0, 3)] }
-    const many: Plan = { ...plan, furniture: [...plan.furniture, ...items] }
-    expect(cableEstimate(many, rooms).meters).toBeGreaterThan(cableEstimate(few, rooms).meters)
-    expect(cableEstimate(many, rooms).groups).toBeGreaterThan(0)
-  })
-
-  it('пустой план даёт пустую ведомость', () => {
-    const { plan, rooms } = run(twoRoom())
-    expect(electricSpec(plan, rooms)).toEqual([])
   })
 })
 

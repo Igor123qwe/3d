@@ -90,8 +90,10 @@ export function runChecks(plan: Plan, rooms: Room[]): CheckResult {
   const items = plan.furniture.map((f) => ({ f, cat: CATALOG_MAP[f.type], body: furnitureBody(f) }))
   const solid = items.filter((i) => !i.cat?.symbol && (i.cat?.z ?? 1) === 1)
   const nameOf = (f: Furniture) => `«${f.label || CATALOG_MAP[f.type]?.name || f.type}»`
+  let dropped = 0
   const push = (i: Issue) => {
     if (issues.length < 80) issues.push(i)
+    else dropped++
   }
 
   // 1. пересечения мебели между собой и со стенами
@@ -332,11 +334,13 @@ export function runChecks(plan: Plan, rooms: Room[]): CheckResult {
     }
   }
 
-  const order = { error: 0, warn: 1, info: 2 }
-  issues.sort((a, b) => order[a.level] - order[b.level])
-  // разрывы между стенами: из-за них комната не замыкается и не находится
+  // разрывы между стенами: из-за них комната не замыкается и не находится — они
+  // объясняют «комнат стало меньше», поэтому идут в общую сортировку, а не в хвост
   for (const g of findGaps(plan.walls).slice(0, 10)) {
     push({ id: `gap-${g.id}-${g.end}`, level: 'warn', text: `Стена не доходит до соседней на ${Math.max(1, Math.round(g.gap))} см — комната тут не замкнётся. «Замкнуть разрывы» выше исправит`, target: { kind: 'wall', id: g.id } })
   }
+  const order = { error: 0, warn: 1, info: 2 }
+  issues.sort((a, b) => order[a.level] - order[b.level])
+  if (dropped > 0) issues.push({ id: 'more', level: 'info', text: `…и ещё ${dropped} — исправьте показанное, остальное появится` })
   return { issues, badZones, triangle, badDoors }
 }
