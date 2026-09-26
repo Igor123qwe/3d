@@ -103,7 +103,8 @@ export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled,
               {report.rooms.map((r) => (
                 <li key={r.id}>
                   <b>{r.purpose}</b>
-                  {r.purpose !== r.name && <span className="pl-furnish-was"> (была «{r.name}»)</span>}
+                  {/* «Спальня» для «Спальня (5ж)» — не переименование: номер БТИ остаётся */}
+                  {!r.name.toLowerCase().startsWith(r.purpose.toLowerCase()) && <span className="pl-furnish-was"> (была «{r.name}»)</span>}
                   {r.error ? !commonError && <div className="pl-furnish-warn">Не вышло: {friendlyAiError(r.error)}</div> : <div>{r.summary}</div>}
                   {r.why && <small>{r.why}</small>}
                 </li>

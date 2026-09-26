@@ -13,7 +13,7 @@ function flat(): Plan {
   return { ...p, rooms: metas }
 }
 
-/** модель: кровать в середине комнаты и мусорный тип, который должен отсеяться */
+/** модель: кровать (или первое из присланного каталога) в середине комнаты и мусорный тип, который должен отсеяться */
 function fakeDeps(log: { zones: ZonesAsk[]; layout: LayoutAsk[] }, over: Partial<FurnishDeps> = {}): FurnishDeps {
   return {
     zones: async (ask) => {
@@ -24,9 +24,11 @@ function fakeDeps(log: { zones: ZonesAsk[]; layout: LayoutAsk[] }, over: Partial
       log.layout.push(ask)
       const xs = ask.polygon.map((q) => q.x)
       const cx = (Math.min(...xs) + Math.max(...xs)) / 2
+      // как настоящая модель: только из присланного каталога
+      const pick = (ask.catalog.find((c) => /bed/.test(c.type)) ?? ask.catalog[0]).type
       return {
         items: [
-          { type: 'bed-160', x: cx, y: 200, rot: 0, why: 'в середине' },
+          { type: pick, x: cx, y: 200, rot: 0, why: 'в середине' },
           { type: 'нет-такого', x: cx, y: 200, rot: 0, why: 'должен отсеяться' },
         ],
         ai: { model: 'fake', costRub: 0.2 },
@@ -47,7 +49,7 @@ describe('расстановка с ИИ по пожеланиям', () => {
     expect(log.layout.map((a) => a.purpose).sort()).toEqual(['Детская', 'Спальня'])
     expect(log.layout.every((a) => a.wishes === 'двое взрослых и ребёнок' && a.apartment?.length === 2)).toBe(true)
     // в каждой комнате встала кровать, мусорный тип отсеян
-    expect(rep.plan.furniture.filter((f) => f.type === 'bed-160')).toHaveLength(2)
+    expect(rep.plan.furniture.filter((f) => /bed/.test(f.type))).toHaveLength(2)
     expect(rep.rooms.every((r) => r.placed === 1 && r.rejected === 1)).toBe(true)
     // комнаты переименованы по назначению
     expect(rep.plan.rooms.map((m) => m.name).sort()).toEqual(['Детская', 'Спальня'])
@@ -66,7 +68,13 @@ describe('расстановка с ИИ по пожеланиям', () => {
     expect(log.layout).toHaveLength(1)
     expect(log.layout[0].purpose).toBe('Кабинет')
     expect(log.layout[0].existing?.map((f) => f.type)).toEqual(['desk'])
-    expect(rep.plan.furniture.map((f) => f.type).sort()).toEqual(['bed-160', 'desk'])
+    // в каталоге кабинета кровати нет: встаёт первое из каталога, стоящий стол на месте
+    const types = rep.plan.furniture.map((f) => f.type)
+    expect(types).toHaveLength(2)
+    expect(types).toContain('desk')
+    expect(types.filter((t) => /bed/.test(t))).toEqual([])
+    const kept = rep.plan.furniture.find((f) => f.id === 'd')!
+    expect(kept.x).toBe(plan.furniture[0].x)
   })
 
   it('«заменить»: старая мебель в комнате уходит, электрика остаётся', async () => {

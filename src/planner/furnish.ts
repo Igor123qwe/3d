@@ -138,19 +138,26 @@ export async function furnish(plan: Plan, rooms: Room[], o: FurnishOptions, deps
       : plan.furniture
           .filter((f) => !isElectricItem(f) && inRoom(r)(f))
           .map((f) => ({ type: f.type, name: CATALOG_MAP[f.type]?.name ?? f.type, x: f.x, y: f.y, w: f.w, d: f.d, rot: f.rot }))
+    // Модели — чистовой контур (внутренние грани стен) в своей системе: от угла
+    // комнаты, без многометровых смещений плана БТИ. По осям стен она ставила
+    // шкаф «вплотную» — на полстены внутрь; в больших числах путалась
+    const ox = Math.min(...r.inner.map((q) => q.x))
+    const oy = Math.min(...r.inner.map((q) => q.y))
+    const loc = <T extends { x: number; y: number }>(q: T): T => ({ ...q, x: Math.round(q.x - ox), y: Math.round(q.y - oy) })
     try {
       const res = await deps.layout({
-        polygon: r.polygon.map((q) => ({ x: q.x, y: q.y })),
-        openings: openingsNear(plan, r),
+        polygon: (r.inner.length >= 3 ? r.inner : r.polygon).map((q) => loc({ x: q.x, y: q.y })),
+        openings: openingsNear(plan, r).map(loc),
         room: r.meta.name,
         purpose: p,
         areaM2: r.area,
         catalog: catalogForRoom(p, CATALOG),
         wishes: wishes || undefined,
         apartment,
-        existing: existing.length ? existing : undefined,
+        existing: existing.length ? existing.map(loc) : undefined,
       })
-      return { ok: true as const, res }
+      // ответ — обратно в координаты плана
+      return { ok: true as const, res: { ...res, items: res.items.map((it) => ({ ...it, x: it.x + ox, y: it.y + oy })) } }
     } catch (e) {
       return { ok: false as const, error: (e as Error).message }
     } finally {
@@ -172,7 +179,7 @@ export async function furnish(plan: Plan, rooms: Room[], o: FurnishOptions, deps
     }
     costs.push(a.res.ai)
     if (o.replace) acc = { ...acc, furniture: acc.furniture.filter((f) => isElectricItem(f) || !inRoom(r)(f)) }
-    const checks = vetLayout(a.res.items, r, acc)
+    const checks = vetLayout(a.res.items, r, acc, { purpose: p.purpose })
     acc = applyLayout(acc, checks)
     const placed = checks.filter((c) => c.ok).length
     report.push({ ...base, placed, rejected: checks.length - placed, summary: layoutSummary(checks) })
