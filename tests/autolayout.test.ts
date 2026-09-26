@@ -278,6 +278,75 @@ describe('проверка расстановки от ИИ', () => {
     expect(checks[1].furniture!.note ?? '').not.toMatch(/поправлено/)
   })
 
+  it('спальня с нишей: шкаф, поставленный моделью поперёк комнаты, уходит в нишу; гардеробная — во всю нишу', () => {
+    // спальня пользователя: справа от кровати углубление 83 × 258 см над выступом коридора
+    const W = (id: string, ax: number, ay: number, bx: number, by: number, t: number) => ({ id, a: { x: ax, y: ay }, b: { x: bx, y: by }, thickness: t })
+    let plan: Plan = {
+      ...empty,
+      walls: [W('top', -20, -20, 377, -20, 40), W('right', 377, -20, 377, 264, 12), W('notchH', 294, 264, 377, 264, 12), W('notchV', 294, 264, 294, 415, 12), W('bottom', -20, 415, 294, 415, 12), W('left', -20, -20, -20, 415, 40)],
+    }
+    const rooms0 = buildRooms(plan).rooms
+    plan = addOpening(plan, 'window', 'left', (231 + 20) / 435, 150, rooms0).plan
+    plan = addOpening(plan, 'door', 'notchV', 0.55, 80, rooms0).plan
+    const r = buildRooms(plan).rooms.find((x) => x.area > 12)!
+    const base = [
+      { type: 'bed-160', x: 185, y: 105, rot: 0, why: '' },
+      { type: 'nightstand', x: 82, y: 20, rot: 0, why: '' },
+      { type: 'nightstand', x: 288, y: 20, rot: 0, why: '' },
+      { type: 'desk', x: 30, y: 231, rot: 270, why: '' },
+      { type: 'office-chair', x: 95, y: 231, rot: 90, why: '' },
+    ]
+    // как ответила Gemini у пользователя: купе вдоль нижней стены
+    for (const store of [
+      { type: 'wardrobe-slide', x: 144, y: 379, rot: 180, why: 'у нижней стены' },
+      { type: 'closet', x: 150, y: 370, rot: 180, why: 'гардеробная' },
+    ]) {
+      const checks = vetLayout([...base, store], r, plan, { purpose: 'Спальня' })
+      for (const c of checks) honest(c, r, plan, checks)
+      const s = checks.find((c) => c.item.type === store.type)!
+      expect(s.furniture!.type).toBe(store.type)
+      // в нише: спинкой к правой стене, во всю её ширину
+      expect(s.furniture!.x - s.furniture!.d / 2, `${store.type} в (${s.furniture!.x}; ${s.furniture!.y})`).toBeGreaterThanOrEqual(288)
+      expect(s.furniture!.rot).toBe(90)
+      expect(s.furniture!.w).toBeGreaterThanOrEqual(250)
+      expect(s.niche).toMatch(/нише 258 × 83/)
+      expect(layoutSummary(checks)).toMatch(/в нише 258 × 83 см/)
+      const next = applyLayout(plan, checks)
+      expect(runChecks(next, buildRooms(next).rooms).issues.map((i) => i.text)).toEqual([])
+    }
+  })
+
+  it('просили «полноценную гардеробную», модель дала купе — в комнате с нишей встаёт гардеробная во всю нишу', () => {
+    const W = (id: string, ax: number, ay: number, bx: number, by: number, t: number) => ({ id, a: { x: ax, y: ay }, b: { x: bx, y: by }, thickness: t })
+    let plan: Plan = {
+      ...empty,
+      walls: [W('top', -20, -20, 377, -20, 40), W('right', 377, -20, 377, 264, 12), W('notchH', 294, 264, 377, 264, 12), W('notchV', 294, 264, 294, 415, 12), W('bottom', -20, 415, 294, 415, 12), W('left', -20, -20, -20, 415, 40)],
+    }
+    const rooms0 = buildRooms(plan).rooms
+    plan = addOpening(plan, 'window', 'left', (231 + 20) / 435, 150, rooms0).plan
+    plan = addOpening(plan, 'door', 'notchV', 0.55, 80, rooms0).plan
+    const r = buildRooms(plan).rooms.find((x) => x.area > 12)!
+    const asked = [
+      { type: 'bed-160', x: 185, y: 105, rot: 0, why: '' },
+      { type: 'wardrobe-slide', x: 144, y: 379, rot: 180, why: 'зона хранения' },
+    ]
+    const checks = vetLayout(asked, r, plan, { purpose: 'Спальня', wishes: 'хочу полноценную гардеробную' })
+    const closet = checks.find((c) => c.furniture?.type === 'closet')!
+    expect(closet.item.type).toBe('wardrobe-slide')
+    expect(closet.furniture!.w).toBe(258)
+    expect(layoutSummary(checks)).toMatch(/гардеробная — в нише 258 × 83 см/)
+    // без просьбы — шкаф остаётся шкафом, но тоже в нише
+    const plain = vetLayout(asked, r, plan, { purpose: 'Спальня' })
+    expect(plain.find((c) => c.item.type === 'wardrobe-slide')!.furniture!.type).toBe('wardrobe-slide')
+  })
+
+  it('гардеробной без ниши нет — вместо неё шкаф-купе с понятной причиной', () => {
+    const { plan, room: r } = room()
+    const checks = vetLayout([{ type: 'closet', x: 250, y: 360, rot: 180, why: '' }], r, plan, { purpose: 'Спальня' })
+    expect(checks[0].furniture!.type).toBe('wardrobe-slide')
+    expect(checks[0].furniture!.note).toMatch(/ниши в комнате нет/)
+  })
+
   it('второй предмет на том же месте встаёт рядом, а не поверх', () => {
     const { plan, room: r } = room()
     const checks = vetLayout(
@@ -343,7 +412,7 @@ describe('проверка расстановки от ИИ', () => {
     const next = applyLayout(plan, checks)
     // кровать и тумбы, что встали к ней; мусора нет
     expect(next.furniture.map((f) => f.type).sort()).toEqual(['bed-160', 'nightstand', 'nightstand'])
-    expect(layoutSummary(checks)).toMatch(/Поставлено предметов: 3 — Кровать 160×200, Тумба прикроватная, Тумба прикроватная\. Отклонено 1/)
+    expect(layoutSummary(checks)).toMatch(/Поставлено предметов: 3 — Кровать 160×200, Тумба прикроватная ×2\. Отклонено 1/)
   })
 
   it('объяснение модели попадает в пояснение, а не в подпись', () => {

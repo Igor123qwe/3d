@@ -12,7 +12,9 @@ import type { AiPlacement } from './aicontract'
 import type { Furniture, Plan, Pt, Room, Wall } from './types'
 import { uid } from './types'
 import { CATALOG, CATALOG_MAP, dims3d, type CatalogItem } from './catalog'
-import { furnitureBody, openingGeom, wallBody, zonesOf } from './checks'
+import { frontBlockedShare, furnitureBody, isWideStorage, openingGeom, runChecks, TOLERATED_FRONT_SHARE, wallBody, zonesOf } from './checks'
+import { findNiches, nicheSpot, nicheText, type Niche } from './niches'
+import { composeKitchen, KITCHEN_MODULES } from './kitchen'
 import { add, convexOverlap, dist, mul, norm, normDeg, obbCorners, perp, pointInPoly, rotate, sub } from './geometry'
 
 export interface PlacementCheck {
@@ -31,6 +33,10 @@ export interface PlacementCheck {
   widened?: number
   /** придвинут к своей паре: тумба к изголовью, стул к столу */
   paired?: string
+  /** шкаф или гардеробная встали в нишу комнаты */
+  niche?: string
+  /** модуль кухонного гарнитура, собранного программой; у первого — как собран */
+  kitchen?: string | true
 }
 
 export interface LayoutOptions {
@@ -40,9 +46,11 @@ export interface LayoutOptions {
   snapCm?: number
   /** назначение комнаты, под которое спрашивали модель; нет — по имени комнаты */
   purpose?: string
+  /** пожелания хозяина: просили гардеробную — шкаф в нише становится гардеробной */
+  wishes?: string
 }
 
-export const DEFAULT_LAYOUT: Required<Omit<LayoutOptions, 'purpose'>> = { outTolerance: 2, snapCm: 25 }
+export const DEFAULT_LAYOUT: Required<Omit<LayoutOptions, 'purpose' | 'wishes'>> = { outTolerance: 2, snapCm: 25 }
 
 function pointSegDist(p: Pt, a: Pt, b: Pt): number {
   const vx = b.x - a.x
@@ -104,7 +112,22 @@ interface Ctx {
   tol: number
   /** двуспальные кровати, что уже встали: к ним — тумбы по бокам */
   beds?: Furniture[]
+  /** ниши комнаты: хранению — туда */
+  niches: Niche[]
 }
+
+/** шкафы и гардеробные: им место в нише (кухонный пенал — не про это) */
+const isStorage = (cat: CatalogItem) => (cat.glyph === 'wardrobe' || cat.glyph === 'wardrobe-slide') && cat.category !== 'kitchen'
+
+/** Ниша, в которой стоит предмет; с окном не в счёт — высокий шкаф его закроет */
+const nicheOf = (f: { x: number; y: number }, c: { niches: Niche[] }) => c.niches.find((n) => !n.window && f.x > n.x0 && f.x < n.x1 && f.y > n.y0 && f.y < n.y1)
+
+/**
+ * Хранение в нише — почти всегда верно: ниша не отнимает места у комнаты и
+ * проходов. Выигрыш больше, чем штраф за уход от предложенного места: модель
+ * ниш не видит, и шкаф, поставленный ею поперёк комнаты, уходит в нишу
+ */
+const NICHE_BONUS = 400
 
 /** на чём сидят за столом: им место в зоне стола */
 const SEAT_TYPES = new Set(['chair', 'office-chair', 'bar-stool'])
@@ -187,7 +210,7 @@ const PAIRS: Record<string, PairRule> = {
   },
   'office-chair': { hosts: DESKS, spots: seatSpots, note: toSeat, alone: 'нет стола, к которому его придвинуть', full: 'у стола не осталось места' },
   chair: { hosts: (c) => DESKS(c) || TABLES(c), spots: seatSpots, note: toSeat, alone: 'нет стола, к которому его придвинуть', full: 'у стола не осталось места' },
-  'bar-stool': { hosts: (c) => c.type === 'island' || c.type === 'kitchen-table', spots: seatSpots, note: () => 'к острову', alone: 'нет острова или стола, к которому его придвинуть', full: 'у острова не осталось места' },
+  'bar-stool': { hosts: (c) => c.type === 'island' || c.type === 'kitchen-table', spots: seatSpots, note: (h) => (h.type === 'island' ? 'к острову' : 'к столу'), alone: 'нет острова или стола, к которому его придвинуть', full: 'у острова не осталось места' },
   bench: {
     hosts: (c) => c.glyph === 'bed',
     // в ногах кровати, вдоль неё
@@ -220,9 +243,20 @@ function penalty(f: Furniture, cat: CatalogItem, c: Ctx): number {
       c.walls.some((w) => convexOverlap(z.poly, w, 1.5)) ||
       c.taken.some((t, i) => !cat.allowInZone?.includes(c.takenKinds[i]) && convexOverlap(z.poly, t, 1.5)) ||
       c.swings.some((s) => convexOverlap(z.poly, s, 2))
+    if (!blocked) continue
+    const front = z.side === 'front' && (cat.glyph === 'wardrobe' || cat.glyph === 'wardrobe-slide' || cat.glyph === 'drawers')
+    // широкий шкаф с закрытым краем фронта: одна секция из многих — мелочь, как и в «Проверке»
+    if (front && isWideStorage(f, cat)) {
+      const share = frontBlockedShare(f, z.size, [...c.walls, ...c.taken.filter((_, i) => !cat.allowInZone?.includes(c.takenKinds[i])), ...c.swings])
+      if (share <= TOLERATED_FRONT_SHARE) {
+        p += 160 * share
+        continue
+      }
+    }
     // дверцы шкафа и ящики комода, упёртые в кровать, — не открыть: это дороже узкого прохода
-    if (blocked) p += z.side === 'front' && (cat.glyph === 'wardrobe' || cat.glyph === 'drawers') ? 160 : 80
+    p += front ? 160 : 80
   }
+  if (isStorage(cat) && nicheOf(f, c)) p -= NICHE_BONUS
   const body = furnitureBody(f)
   // стул в зоне стола и тумба в зоне кровати — на своём месте, остальное мешает подойти
   for (const z of c.takenZones) if (!z.allow?.includes(f.type) && convexOverlap(body, z.poly, 1.5)) p += 80
@@ -343,6 +377,8 @@ function findSpot(cat: CatalogItem, want: Spot, c: Ctx): { spot: Spot; moved: nu
   // 2. спинкой к стене — для всего, что к стене и ставится; тумбам — места у изголовья
   if (wallish) for (const s of wallSpots(cat.w, cat.d, c.inner)) consider(s)
   if (cat.type === 'nightstand') for (const b of c.beds ?? []) for (const s of nightstandSpots(b, cat.w, cat.d)) consider(s)
+  // шкафу — ниша, даже если модель поставила его в другой конец комнаты
+  if (isStorage(cat)) for (const n of c.niches) if (!n.window) consider(nicheSpot(n, cat.w, cat.d))
   // 3. рядом с предложенным, потом по всей комнате
   if (!best) for (const s of gridSpots(want, 250, 10)) consider(s)
   if (!best) {
@@ -385,10 +421,32 @@ function spotCost(f: Furniture, cat: CatalogItem, want: Spot, c: Ctx): number {
 }
 
 /** чем заменить, если так удобнее: распашному шкафу перед кроватью не хватает места на дверцы — купе */
-const ALTERNATIVES: Record<string, string[]> = { wardrobe: ['wardrobe-slide'] }
+const ALTERNATIVES: Record<string, string[]> = { wardrobe: ['wardrobe-slide'], closet: ['wardrobe-slide'], 'dining-table': ['table-round', 'kitchen-table'] }
+/** почему заменили — в пояснение */
+const ALTERNATIVE_WHY: Record<string, string> = {
+  wardrobe: 'дверцам распашного здесь не хватает места',
+  closet: 'подходящей ниши в комнате нет',
+  'dining-table': 'вокруг большого стола здесь не хватает проходов',
+}
 
 /** шкафы растягиваются на всю нишу или стену, где встали */
-const FILLS = new Set(['wardrobe', 'wardrobe-slide'])
+const FILLS = new Set(['wardrobe', 'wardrobe-slide', 'closet'])
+
+/**
+ * Гардеробная — только в нише и во всю её ширину; глубина — вся ниша или чуть
+ * меньше, чтобы у соседей остался проход (кровать рядом с нишей)
+ */
+function closetKinds(cat: CatalogItem, niches: Niche[]): CatalogItem[] {
+  const out: CatalogItem[] = []
+  for (const n of niches) {
+    if (n.window || n.depth < 55) continue
+    // мельче 1,2 м внутрь не зайти: хватит 60–70 см под штанги и двери, остальное — проходу у кровати;
+    // глубже — гардеробная, куда заходят, во всю глубину
+    const depths = n.depth >= 120 ? [Math.min(n.depth, 150), n.depth - 10] : [Math.min(n.depth, 70), 60]
+    for (const d of new Set(depths)) out.push({ ...cat, w: n.width, d })
+  }
+  return out
+}
 const FILL_MAX = 300
 
 /**
@@ -402,7 +460,12 @@ function fillAlongWall(f: Furniture, cat: CatalogItem, c: Ctx): Furniture {
   const zonesHit = (g: Furniture) => {
     const body = furnitureBody(g)
     const others = c.takenZones.filter((z) => convexOverlap(body, z.poly, 1.5)).length
-    const own = zonesOf(g, cat).filter((z) => c.taken.some((t) => convexOverlap(z.poly, t, 1.5)) || c.swings.some((s) => convexOverlap(z.poly, s, 2))).length
+    const own = zonesOf(g, cat).filter((z) => {
+      const hit = c.taken.some((t) => convexOverlap(z.poly, t, 1.5)) || c.swings.some((s) => convexOverlap(z.poly, s, 2))
+      // у широкого шкафа закрытый край фронта не мешает расти дальше
+      if (hit && z.side === 'front' && isWideStorage(g, cat)) return frontBlockedShare(g, z.size, [...c.taken, ...c.swings]) > TOLERATED_FRONT_SHARE
+      return hit
+    }).length
     return others + own
   }
   const nearWindow = (g: Furniture) => {
@@ -443,7 +506,164 @@ const FAIL_TEXT: Record<Fail, string> = {
  * Проверить предложенную расстановку, поправить места и превратить её в предметы плана.
  * Порядок важен: что модель назвала первым, то и приоритетнее при конфликте.
  */
-export function vetLayout(proposed: AiPlacement[], room: Room, plan: Plan, options: LayoutOptions = {}): PlacementCheck[] {
+export function vetLayout(asked: AiPlacement[], room: Room, plan: Plan, options: LayoutOptions = {}): PlacementCheck[] {
+  const proposed = closetIfAsked(asked, room, plan, options)
+  if (proposed !== asked) {
+    // в отчёте — что предложила модель, а ставится гардеробная
+    return vetLayout(proposed, room, plan, { ...options, wishes: undefined }).map((c, i) => (i < asked.length ? { ...c, item: asked[i] } : c))
+  }
+  const kitchen = kitchenFirst(proposed, room, plan, options)
+  if (kitchen) return kitchen
+  const first = vetOnce(proposed, room, plan, options)
+  // Модель ниш не видит: шкаф встаёт поперёк комнаты, а кровать, поставленная
+  // раньше, закрывает нишу. Пробуем тот же замысел, но шкаф — в нишу, и берём
+  // вариант, после которого у «Проверки» меньше замечаний
+  if (!first.niches.length || first.checks.some((c) => c.ok && c.niche)) return first.checks
+  const idx = proposed.findIndex((it, i) => {
+    const cat = CATALOG_MAP[it.type]
+    return !!cat && isStorage(cat) && first.checks[i]?.ok
+  })
+  if (idx < 0) return first.checks
+  const cat = CATALOG_MAP[proposed[idx].type]
+  let best = first.checks
+  let bestScore = scoreLayout(best, plan)
+  for (const n of first.niches) {
+    if (n.window) continue
+    const s = nicheSpot(n, Math.min(cat.w, n.width), cat.d)
+    const variant = proposed.map((it, i) => (i === idx ? { ...it, x: s.x, y: s.y, rot: s.rot } : it))
+    const alt = vetOnce(variant, room, plan, options).checks
+    // в отчёте — предложение модели как было, и сдвиг — от него
+    alt.forEach((c, i) => {
+      if (i >= proposed.length) return
+      c.item = proposed[i]
+      if (c.furniture) c.moved = Math.round(dist(c.furniture, proposed[i]))
+    })
+    const score = scoreLayout(alt, plan)
+    if (score < bestScore) {
+      best = alt
+      bestScore = score
+    }
+  }
+  return best
+}
+
+/** ниши комнаты по её контуру, дверям и окнам */
+function roomNiches(room: Room, plan: Plan): Niche[] {
+  const doors: Pt[] = []
+  const windows: Pt[] = []
+  for (const op of plan.openings) {
+    const wall = plan.walls.find((w) => w.id === op.wallId)
+    if (!wall) continue
+    const g = openingGeom(op, wall)
+    if (!(pointInPoly(g.center, room.polygon) || pointSegDistPoly(g.center, room.polygon) < 60)) continue
+    ;(op.kind === 'window' ? windows : doors).push(g.center)
+  }
+  return findNiches(room.inner.length >= 3 ? room.inner : room.polygon, { doors, windows })
+}
+
+/**
+ * Просили гардеробную, а модель дала шкаф (так ответила Gemini у пользователя:
+ * «полноценную гардеробную» — шкаф-купе вдоль стены). Есть ниша — шкаф
+ * становится гардеробной: она встанет в нишу во всю её ширину
+ */
+function closetIfAsked(proposed: AiPlacement[], room: Room, plan: Plan, options: LayoutOptions): AiPlacement[] {
+  if (!/гардеробн/i.test(options.wishes ?? '') || proposed.some((p) => p.type === 'closet')) return proposed
+  const i = proposed.findIndex((p) => p.type === 'wardrobe' || p.type === 'wardrobe-slide')
+  if (i < 0 || !catalogForRoom(options.purpose || room.meta.name, CATALOG).some((c) => c.type === 'closet')) return proposed
+  if (!roomNiches(room, plan).some((n) => !n.window && n.depth >= 55)) return proposed
+  return proposed.map((p, k) => (k === i ? { ...p, type: 'closet' } : p))
+}
+
+/** что пишут у модуля гарнитура */
+const KITCHEN_NOTE: Record<string, string> = {
+  fridge: 'с края гарнитура, ближе к входу',
+  sink: 'в линии гарнитура, рядом посудомойка',
+  stove: 'столешница с обеих сторон, не у окна и не вплотную к холодильнику',
+  dishwasher: 'рядом с мойкой — короче трубы',
+  'tall-cabinet': 'высокое — с края, рядом с холодильником',
+  'counter-corner': 'угол гарнитура',
+}
+
+/**
+ * Кухня: гарнитур собирает программа — одной линией или буквой Г, в правильном
+ * порядке и без зазоров, — а стол и стулья ставятся в то, что осталось.
+ * null — это не кухня, гарнитур уже стоит или ни одна раскладка не встала
+ */
+function kitchenFirst(proposed: AiPlacement[], room: Room, plan: Plan, options: LayoutOptions): PlacementCheck[] | null {
+  const purpose = options.purpose || room.meta.name
+  const mods = proposed.filter((p) => KITCHEN_MODULES.has(p.type))
+  const core = new Set(mods.map((m) => m.type).filter((t) => t === 'fridge' || t === 'sink' || t === 'stove'))
+  if (core.size < 2 && !(/кухн/i.test(purpose) && mods.length >= 2)) return null
+  const fitting = new Set(catalogForRoom(purpose, CATALOG).map((c) => c.type))
+  if (!['fridge', 'sink', 'stove'].every((t) => fitting.has(t))) return null
+  const standing = plan.furniture.filter((f) => !CATALOG_MAP[f.type]?.symbol && pointInPoly({ x: f.x, y: f.y }, room.polygon))
+  // гарнитур уже стоит — не пересобираем, дополняем по одному
+  if (standing.some((f) => KITCHEN_MODULES.has(f.type))) return null
+  const inner = room.inner.length >= 3 ? room.inner : room.polygon
+  const doorZones: Pt[][] = []
+  const doors: Pt[] = []
+  const windows: [Pt, Pt][] = []
+  for (const op of plan.openings) {
+    const wall = plan.walls.find((w) => w.id === op.wallId)
+    if (!wall) continue
+    const g = openingGeom(op, wall)
+    if (!(pointInPoly(g.center, room.polygon) || pointSegDistPoly(g.center, room.polygon) < 60)) continue
+    if (op.kind === 'window') {
+      windows.push([add(g.center, mul(g.dir, -g.hw)), add(g.center, mul(g.dir, g.hw))])
+      continue
+    }
+    doors.push(g.center)
+    doorZones.push(g.swing)
+    // проход перед дверью, куда бы она ни открывалась
+    doorZones.push(obbCorners(g.center.x, g.center.y, g.hw * 2 + 10, 180, (Math.atan2(g.dir.y, g.dir.x) * 180) / Math.PI))
+  }
+  const xs = room.polygon.map((p) => p.x)
+  const ys = room.polygon.map((p) => p.y)
+  const [x0, x1, y0, y1] = [Math.min(...xs) - 60, Math.max(...xs) + 60, Math.min(...ys) - 60, Math.max(...ys) + 60]
+  const walls = plan.walls.filter((w) => Math.max(w.a.x, w.b.x) >= x0 && Math.min(w.a.x, w.b.x) <= x1 && Math.max(w.a.y, w.b.y) >= y0 && Math.min(w.a.y, w.b.y) <= y1).map(wallBody)
+  const run = composeKitchen({ inner, blockers: [...walls, ...standing.map(furnitureBody)], doorZones, doors, windows, proposed: mods })
+  if (!run) return null
+
+  // что модель назвала — сопоставляем с собранным по типу; тумбы — с тумбами любой длины
+  const how = `кухня собрана гарнитуром ${run.shape === 'corner' ? 'буквой Г' : 'вдоль стены'}: ${run.order.join(' — ')}`
+  const left = [...run.furniture]
+  const checks: PlacementCheck[] = []
+  const isCounter = (t: string) => /^counter-\d/.test(t)
+  for (const it of mods) {
+    const i = left.findIndex((f) => f.type === it.type || (isCounter(it.type) && isCounter(f.type)))
+    if (i < 0) continue
+    const f = left.splice(i, 1)[0]
+    checks.push({ item: it, ok: true, furniture: { ...f, note: KITCHEN_NOTE[f.type] ?? 'столешница гарнитура' }, moved: Math.round(dist(f, it)), kitchen: true })
+  }
+  for (const f of left) checks.push({ item: { type: f.type, x: f.x, y: f.y, rot: f.rot, why: 'гарнитур' }, ok: true, furniture: { ...f, note: KITCHEN_NOTE[f.type] ?? 'столешница гарнитура' }, moved: 0, added: true, kitchen: true })
+  if (checks.length) checks[0].kitchen = how
+  // стол и стулья — в оставшееся место, гарнитур для них уже стоит
+  const rest = proposed.filter((p) => !KITCHEN_MODULES.has(p.type))
+  const withRun = { ...plan, furniture: [...plan.furniture, ...run.furniture] }
+  return [...checks, ...(rest.length ? vetLayout(rest, room, withRun, options) : [])]
+}
+
+/**
+ * Насколько расстановка плоха глазами «Проверки»: отказы, красные и жёлтые
+ * замечания; хранение в нише — плюс; уход от замысла модели — немного минус
+ */
+function scoreLayout(checks: PlacementCheck[], plan: Plan): number {
+  const before = runChecks(plan, []).issues
+  const after = runChecks(applyLayout(plan, checks), []).issues
+  const fresh = (level: string) => after.filter((i) => i.level === level).length - before.filter((i) => i.level === level).length
+  let score = fresh('error') * 300 + fresh('warn') * 100
+  for (const c of checks) {
+    if (!c.ok) score += 1000
+    else {
+      if (c.niche) score -= 150
+      score += Math.min(c.moved ?? 0, 300) * 0.1
+    }
+  }
+  return score
+}
+
+/** одна проверка и починка расстановки; ниши — наружу, для сравнения вариантов */
+function vetOnce(proposed: AiPlacement[], room: Room, plan: Plan, options: LayoutOptions): { checks: PlacementCheck[]; niches: Niche[] } {
   let items = proposed
   const o = { ...DEFAULT_LAYOUT, ...options }
   const walls = plan.walls
@@ -451,6 +671,8 @@ export function vetLayout(proposed: AiPlacement[], room: Room, plan: Plan, optio
   // двери в этой комнате: в их створ и на дугу открывания ставить нельзя; окна — не закрывать высоким
   const swings: Pt[][] = []
   const windowPts: Pt[] = []
+  const doorCenters: Pt[] = []
+  const windowCenters: Pt[] = []
   for (const op of plan.openings) {
     const wall = walls.find((w) => w.id === op.wallId)
     if (!wall) continue
@@ -459,8 +681,10 @@ export function vetLayout(proposed: AiPlacement[], room: Room, plan: Plan, optio
     if (!near) continue
     if (op.kind !== 'window') {
       swings.push(g.swing)
+      doorCenters.push(g.center)
       continue
     }
+    windowCenters.push(g.center)
     const n = perp(norm(sub(wall.b, wall.a)))
     for (const side of [1, -1]) {
       for (let k = -2; k <= 2; k++) {
@@ -478,7 +702,8 @@ export function vetLayout(proposed: AiPlacement[], room: Room, plan: Plan, optio
   const standing = plan.furniture.filter((f) => !CATALOG_MAP[f.type]?.symbol && pointInPoly({ x: f.x, y: f.y }, room.polygon))
   const taken: Pt[][] = standing.map(furnitureBody)
   const takenZones: Zone[] = standing.flatMap((f) => zonesFor(f, CATALOG_MAP[f.type]))
-  const ctx: Ctx = { inner, walls: wallPolys, swings, windowPts, taken, takenKinds: standing.map((f) => f.type), takenZones, tol: o.outTolerance }
+  const niches = findNiches(inner, { doors: doorCenters, windows: windowCenters })
+  const ctx: Ctx = { inner, walls: wallPolys, swings, windowPts, taken, takenKinds: standing.map((f) => f.type), takenZones, tol: o.outTolerance, niches }
 
   // журнальный стол в санузле геометрию пройдёт, а смысл — нет: только уместные в комнате типы
   // список тот же, что ушёл модели: по назначению, а не по старому имени комнаты
@@ -512,7 +737,11 @@ export function vetLayout(proposed: AiPlacement[], room: Room, plan: Plan, optio
     ctx.takenZones = [...standingZones, ...others.flatMap((p) => zonesFor(p.f, p.used))]
     ctx.beds = others.filter((p) => isDoubleBed(p.used)).map((p) => p.f)
   }
-  const kinds = (cat: CatalogItem) => [cat, ...(ALTERNATIVES[cat.type] ?? []).map((t) => CATALOG_MAP[t]).filter((c): c is CatalogItem => !!c && fitting.has(c.type))]
+  const kinds = (cat: CatalogItem) => [
+    // гардеробная — только в нише: вне ниши ей нужны стены, которых нет
+    ...(cat.type === 'closet' ? closetKinds(cat, niches) : [cat]),
+    ...(ALTERNATIVES[cat.type] ?? []).map((t) => CATALOG_MAP[t]).filter((c): c is CatalogItem => !!c && fitting.has(c.type)),
+  ]
   /** лучшее место среди самого предмета и его замен (купе вместо распашного) */
   const bestOf = (cat: CatalogItem, want: Spot) => {
     let best: { used: CatalogItem; spot: Spot; moved: number; cost: number } | null = null
@@ -520,10 +749,10 @@ export function vetLayout(proposed: AiPlacement[], room: Room, plan: Plan, optio
     for (const k of kinds(cat)) {
       const r = findSpot(k, want, ctx)
       if ('fail' in r) {
-        if (k === cat) fail = r.fail
+        if (k.type === cat.type) fail = r.fail
         continue
       }
-      const cost = r.cost + (k === cat ? 0 : 30)
+      const cost = r.cost + (k.type === cat.type ? 0 : 30)
       if (!best || cost < best.cost) best = { used: k, spot: r.spot, moved: r.moved, cost }
     }
     return { best, fail }
@@ -569,7 +798,7 @@ export function vetLayout(proposed: AiPlacement[], room: Room, plan: Plan, optio
       // тумбы у изголовья едут вместе с кроватью: иначе они держат её на месте
       const attached = isDoubleBed(p.used) ? placed.filter((q) => q.used.type === 'nightstand' && nightstandSpots(p.f, q.used.w, q.used.d).some((s) => dist(s, q.f) < 40)) : []
       rebuild(new Set([p.idx, ...attached.map((q) => q.idx)]))
-      const now = spotCost(p.f, p.used, p.want, ctx) + (p.used === p.cat ? 0 : 30)
+      const now = spotCost(p.f, p.used, p.want, ctx) + (p.used.type === p.cat.type ? 0 : 30)
       const { best } = bestOf(p.cat, p.want)
       if (!best || best.cost >= now - 10) continue
       const moved = toFurniture(best.used, best.spot, p.f.id)
@@ -671,24 +900,29 @@ export function vetLayout(proposed: AiPlacement[], room: Room, plan: Plan, optio
     const notes = [item.why || '']
     const bigger = p.f.w - p.used.w
     const pair = paired.get(p.idx)
-    if (p.used !== p.cat && ALTERNATIVES[p.cat.type]?.includes(p.used.type)) notes.push(`${p.used.name} вместо ${p.cat.name.toLowerCase()}: дверцам распашного здесь не хватает места`)
-    else if (p.used !== p.cat) notes.push(`${p.used.name} вместо ${p.cat.name.toLowerCase()}: большой не помещается`)
+    const swapped = p.used.type !== p.cat.type
+    const niche = isStorage(p.used) ? nicheOf(p.f, ctx) : undefined
+    if (swapped && ALTERNATIVES[p.cat.type]?.includes(p.used.type)) notes.push(`${p.used.name} вместо ${p.cat.name.toLowerCase()}: ${ALTERNATIVE_WHY[p.cat.type]}`)
+    else if (swapped) notes.push(`${p.used.name} вместо ${p.cat.name.toLowerCase()}: большой не помещается`)
+    else if (niche) notes.push(`в ${nicheText(niche)}: хранение там, где оно не отнимает места у комнаты`)
     else if (pair && moved > 20) notes.push(pair)
     else if (moved > 20) notes.push(`место поправлено на ${moved} см: предложенное не подходило`)
-    if (bigger >= 10) notes.push(`во всю нишу: ${Math.round(p.f.w)} см вместо ${p.used.w}`)
+    if (p.used.type === 'closet') notes.push(`${Math.round(p.f.w)} × ${Math.round(p.f.d)} см, двери-купе`)
+    else if (bigger >= 10) notes.push(`во всю нишу: ${Math.round(p.f.w)} см вместо ${p.used.w}`)
     p.f = { ...p.f, note: notes.filter(Boolean).join(' · ') || undefined }
     done.set(p.idx, {
       item,
       ok: true,
       furniture: p.f,
       moved,
-      replaced: p.used !== p.cat ? p.cat.name : undefined,
+      replaced: swapped ? p.cat.name : undefined,
       widened: bigger >= 10 ? Math.round(p.f.w) : undefined,
       paired: pair && moved > 20 ? pair : undefined,
+      niche: niche ? nicheText(niche) : undefined,
     })
   }
   // в отчёте — предложение модели как было
-  return [...items.map((_, i) => ({ ...done.get(i)!, item: proposed[i] })), ...added]
+  return { checks: [...items.map((_, i) => ({ ...done.get(i)!, item: proposed[i] })), ...added], niches }
 }
 
 function pointSegDistPoly(p: Pt, poly: Pt[]): number {
@@ -711,13 +945,21 @@ export function applyLayout(plan: Plan, checks: PlacementCheck[]): Plan {
 export function layoutSummary(checks: PlacementCheck[]): string {
   const ok = checks.filter((c) => c.ok).length
   const bad = checks.length - ok
-  const movedN = checks.filter((c) => c.ok && !c.replaced && !c.added && !c.paired && (c.moved ?? 0) > 20).length
+  const movedN = checks.filter((c) => c.ok && !c.replaced && !c.added && !c.paired && !c.niche && !c.kitchen && (c.moved ?? 0) > 20).length
   const smaller = checks.filter((c) => c.ok && c.replaced).length
   const widened = checks.filter((c) => c.ok && c.widened).length
   // «тумба — у изголовья кровати, кресло офисное — к столу»: что придвинуто к своей паре
   const pairs = [...new Set(checks.filter((c) => c.ok && c.paired).map((c) => `${(CATALOG_MAP[c.furniture!.type]?.name ?? '').toLowerCase()} — ${c.paired}`))]
-  const fixes = [movedN ? `место поправлено у ${movedN}` : '', pairs.join(', '), smaller ? `замена на подходящий — ${smaller}` : '', widened ? `шкаф во всю нишу` : ''].filter(Boolean).join(', ')
-  const names = checks.filter((c) => c.ok && c.furniture).map((c) => CATALOG_MAP[c.furniture!.type]?.name ?? c.furniture!.type)
+  const inNiche = checks.filter((c) => c.ok && c.niche).map((c) => `${(CATALOG_MAP[c.furniture!.type]?.name ?? '').toLowerCase()} — в ${c.niche}`)
+  const kitchen = checks.find((c) => typeof c.kitchen === 'string')?.kitchen as string | undefined
+  const fixes = [kitchen ?? '', movedN ? `место поправлено у ${movedN}` : '', pairs.join(', '), ...inNiche, smaller ? `замена на подходящий — ${smaller}` : '', widened ? `шкаф во всю нишу` : ''].filter(Boolean).join(', ')
+  // одинаковые — одной строкой: «Тумба 60 ×3», а не три раза подряд
+  const count = new Map<string, number>()
+  for (const c of checks) if (c.ok && c.furniture) {
+    const name = CATALOG_MAP[c.furniture.type]?.name ?? c.furniture.type
+    count.set(name, (count.get(name) ?? 0) + 1)
+  }
+  const names = [...count].map(([name, n]) => (n > 1 ? `${name} ×${n}` : name))
   const head = `Поставлено предметов: ${ok}${names.length ? ` — ${names.join(', ')}` : ''}${fixes ? ` (${fixes})` : ''}`
   if (!bad) return head
   const reasons = new Map<string, number>()
@@ -749,6 +991,10 @@ export function catalogForRoom(name: string, all: CatalogItem[]): { type: string
   const extra = new Set<string>()
   if (cats.has('kids')) for (const t of ['bed-90', 'bed-140', 'nightstand', 'wardrobe', 'desk', 'office-chair', 'office-shelf']) extra.add(t)
   if (cats.has('office')) for (const t of ['armchair', 'sofa-2']) extra.add(t)
+  // на кухне едят: обычные стулья и круглый стол тоже к месту
+  if (cats.has('kitchen')) for (const t of ['chair', 'table-round', 'dining-table']) extra.add(t)
+  // гардеробная в нишу прихожей — лучшее место для верхней одежды
+  if (cats.has('hall')) extra.add('closet')
   // в спальне часто и работают: стол со стулом у окна
   if (cats.has('bedroom') && !cats.has('living')) for (const t of ['desk', 'office-chair']) extra.add(t)
   // радиатор и колонна — часть здания, «произвольный объект» — заготовка: их не расставляют;

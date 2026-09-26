@@ -81,6 +81,24 @@ export function openingGeom(op: Opening, wall: Wall): OpeningGeom {
 
 const SIDE_TEXT: Record<ZoneSide, string> = { front: 'Перед', back: 'Позади', left: 'Слева от', right: 'Справа от' }
 
+/** шкаф шириной от полутора метров: фронт у него из нескольких секций */
+export const isWideStorage = (f: { w: number }, cat: CatalogItem | undefined): boolean => (cat?.glyph === 'wardrobe' || cat?.glyph === 'wardrobe-slide') && f.w >= 150
+
+/** какую долю фронта широкого шкафа можно закрыть, не мешая им пользоваться: одну секцию из четырёх */
+export const TOLERATED_FRONT_SHARE = 0.25
+
+/** Доля фронта, перед которой не встать: по полосам 10 см вдоль шкафа, у самого фасада и в глубине прохода */
+export function frontBlockedShare(f: Furniture, depth: number, blockers: Pt[][]): number {
+  const n = Math.max(2, Math.ceil(f.w / 10))
+  let hit = 0
+  for (let k = 0; k < n; k++) {
+    const lx = -f.w / 2 + ((k + 0.5) * f.w) / n
+    const probe = [0.25, 0.75].map((t) => add({ x: f.x, y: f.y }, rotate({ x: lx, y: f.d / 2 + depth * t }, f.rot)))
+    if (probe.some((q) => blockers.some((b) => pointInPoly(q, b)))) hit++
+  }
+  return hit / n
+}
+
 export function runChecks(plan: Plan, rooms: Room[]): CheckResult {
   const issues: Issue[] = []
   const badZones = new Set<string>()
@@ -134,6 +152,11 @@ export function runChecks(plan: Plan, rooms: Room[]): CheckResult {
             break
           }
         }
+      }
+      // широкий шкаф, у которого закрыт лишь край фронта (тумба у шкафа во всю нишу), — не замечание
+      if (blocker && z.side === 'front' && isWideStorage(A.f, A.cat)) {
+        const blockers = [...wallBodies.map((wb) => wb.poly), ...solid.filter((B) => B.f.id !== A.f.id && !A.cat?.allowInZone?.includes(B.f.type)).map((B) => B.body)]
+        if (frontBlockedShare(A.f, z.size, blockers) <= TOLERATED_FRONT_SHARE) blocker = null
       }
       if (blocker) {
         badZones.add(key)

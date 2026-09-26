@@ -6,6 +6,7 @@
 // что уже стоит. Каждый ответ проходит ту же проверку геометрией (vetLayout),
 // что и раньше: предмет вне комнаты, на двери или поверх другого не ставится.
 // Всё складывается в один план — одна правка в истории, Ctrl+Z убирает разом.
+import { findNiches } from './niches'
 import type { AiCost, LayoutAsk, LayoutResult, ZonesAsk, ZonesResult } from './ai'
 import type { Plan, Room } from './types'
 import { CATALOG, CATALOG_MAP, isElectricItem } from './catalog'
@@ -151,12 +152,19 @@ export async function furnish(plan: Plan, rooms: Room[], o: FurnishOptions, deps
     const ox = Math.min(...r.inner.map((q) => q.x))
     const oy = Math.min(...r.inner.map((q) => q.y))
     const loc = <T extends { x: number; y: number }>(q: T): T => ({ ...q, x: Math.round(q.x - ox), y: Math.round(q.y - oy) })
+    // ниши — модели словами: по списку углов она их не видит и ставит шкаф поперёк комнаты
+    const ops = openingsNear(plan, r).map(loc)
+    const niches = findNiches((r.inner.length >= 3 ? r.inner : r.polygon).map((q) => loc({ x: q.x, y: q.y })), {
+      doors: ops.filter((q) => q.kind !== 'window'),
+      windows: ops.filter((q) => q.kind === 'window'),
+    })
     try {
       const res = await deps.layout({
         polygon: (r.inner.length >= 3 ? r.inner : r.polygon).map((q) => loc({ x: q.x, y: q.y })),
         size: bbox(r),
         quality: o.quality,
-        openings: openingsNear(plan, r).map(loc),
+        openings: ops,
+        niches: niches.length ? niches : undefined,
         room: r.meta.name,
         purpose: p,
         areaM2: r.area,
@@ -188,7 +196,7 @@ export async function furnish(plan: Plan, rooms: Room[], o: FurnishOptions, deps
     }
     costs.push(a.res.ai)
     if (o.replace) acc = { ...acc, furniture: acc.furniture.filter((f) => isElectricItem(f) || !inRoom(r)(f)) }
-    const checks = vetLayout(a.res.items, r, acc, { purpose: p.purpose })
+    const checks = vetLayout(a.res.items, r, acc, { purpose: p.purpose, wishes })
     acc = applyLayout(acc, checks)
     const placed = checks.filter((c) => c.ok).length
     report.push({ ...base, placed, rejected: checks.length - placed, summary: layoutSummary(checks), idea: a.res.plan, model: a.res.ai?.model, tried: a.res.ai?.tried })
