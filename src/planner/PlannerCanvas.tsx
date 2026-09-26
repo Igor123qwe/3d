@@ -79,6 +79,9 @@ export interface CanvasProps {
   onSelect: (s: Selection, opts?: { keepPanel?: boolean }) => void
   /** выделен участок прямой (Alt + щелчок) — панель показывает его, а не всю прямую */
   onSectionChange?: (sec: { id: string; lo: number; hi: number; length: number } | null) => void
+  /** остальные предметы группы (кроме основного в selection): Shift+клик, Shift+рамка, Ctrl+A */
+  multi?: string[]
+  onMultiChange?: (ids: string[]) => void
   layers: Layers
   unit: LengthUnit
   ortho: boolean
@@ -131,7 +134,10 @@ function routeMid(pts: Pt[]): Pt | undefined {
   return pts[pts.length - 1]
 }
 
+const NO_MULTI: string[] = []
+
 type Drag =
+  | { kind: 'band'; a: Pt }
   | { kind: 'pan'; sx: number; sy: number; view0: View; moved: boolean; clickSel: Selection }
   | { kind: 'maybe'; sx: number; sy: number; view0: View }
   | { kind: 'room'; a: Pt }
@@ -172,7 +178,7 @@ export const UNIT_CM: Record<LengthUnit, number> = { cm: 1, mm: 0.1, m: 100 }
 export const UNIT_NAME: Record<LengthUnit, string> = { cm: 'см', mm: 'мм', m: 'м' }
 
 export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) => {
-  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view: viewProp, onViewChange, onHint, photos, onCalibrate, imageLines, onRoomPick, onCorners, onRefine, onNotice, mode = 'build', wallRef = 'axis', electricDesign, hlCircuit, onSectionChange } = props
+  const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view: viewProp, onViewChange, onHint, photos, onCalibrate, imageLines, onRoomPick, onCorners, onRefine, onNotice, mode = 'build', wallRef = 'axis', electricDesign, hlCircuit, onSectionChange, multi = NO_MULTI, onMultiChange } = props
   const build = mode === 'build'
   const svgRef = useRef<SVGSVGElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -201,6 +207,10 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   /** курсор над кружком конца выбранной прямой */
   const [overEnd, setOverEnd] = useState(false)
   const [overHandle, setOverHandle] = useState<'rotate' | 'resize' | null>(null)
+  /** рамка выделения нескольких предметов (Shift + тянуть по пустому месту) */
+  const [band, setBand] = useState<{ a: Pt; b: Pt } | null>(null)
+  /** все выделенные предметы: основной плюс группа */
+  const groupIds = (): string[] => (selection?.kind === 'furniture' ? [selection.id, ...multi.filter((id) => id !== selection.id)] : multi)
   const lastRaw = useRef<Pt | null>(null)
   const deleteRef = useRef<() => boolean>(() => false)
   /** кадры перетаскивания сыплются чаще, чем рисует экран: комнаты и проверки считаем раз на кадр */
@@ -432,7 +442,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
                 : selection?.kind === 'room'
                   ? 'Комната: имя и пол — в панели справа. Размер стороны — щелчком по подписи на плане'
                   : selection
-                    ? 'Предмет: тяните — двигать; ручка сверху — поворот, уголок — размер; R — на 90°, Ctrl+D — дублировать, Del — удалить'
+                    ? 'Предмет: тяните — двигать; ручка сверху — поворот, уголок — размер; R — на 90°; Ctrl+D — дублировать; Del — удалить; Shift+клик или Shift+рамка — несколько'
                     : mode === 'furnish'
                 ? 'Мебель: клик — выбрать предмет, тянуть — двигать. Стены и электрика сейчас не цепляются. Добавить — «Каталог» слева'
                 : mode === 'electric'
@@ -832,8 +842,25 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     const hit = hitTest(raw)
     if (hit?.kind === 'furniture') {
       const f = plan.furniture.find((x) => x.id === hit.id)!
-      if (!sameSel(hit, selection)) onSelect(hit)
+      const inGroup = groupIds().includes(hit.id)
+      if (e.shiftKey && !build) {
+        // Shift+клик: добавить к выделению или убрать из него
+        if (selection?.kind === 'furniture' && selection.id !== hit.id) {
+          onMultiChange?.(inGroup ? multi.filter((x) => x !== hit.id) : [...multi, hit.id])
+          if (inGroup) return
+        } else if (!sameSel(hit, selection)) onSelect(hit)
+      } else if (!inGroup) {
+        if (multi.length) onMultiChange?.([])
+        if (!sameSel(hit, selection)) onSelect(hit)
+      }
+      // клик по предмету из группы — тянуть всю группу
       drag.current = { kind: 'move', id: f.id, offset: sub({ x: f.x, y: f.y }, raw), plan0: plan, item0: f }
+      return
+    }
+    if ((!hit || hit.kind === 'room') && e.shiftKey && !build) {
+      // Shift + тянуть по пустому месту (или по полу комнаты) — рамка: выделить всё, что внутри
+      drag.current = { kind: 'band', a: raw }
+      setBand({ a: raw, b: raw })
       return
     }
     if (hit?.kind === 'opening') {
@@ -920,6 +947,9 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       return
     }
     switch (d.kind) {
+      case 'band':
+        setBand({ a: d.a, b: raw })
+        return
       case 'pan': {
         const dx = e.clientX - d.sx
         const dy = e.clientY - d.sy
@@ -961,7 +991,17 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         const without: Plan = { ...d.plan0, furniture: d.plan0.furniture.filter((f) => f.id !== d.id) }
         const s = snapFurniture(d.item0, add(raw, d.offset), without, { grid: 5, tol: Math.max(tol, 10), selfId: d.id })
         setGuides(s.guides)
-        previewSoon(updateFurniture(d.plan0, d.id, { x: s.x, y: s.y, rot: s.rot }))
+        let next = updateFurniture(d.plan0, d.id, { x: s.x, y: s.y, rot: s.rot })
+        // группа едет вместе с тем предметом, за который тянут; магнит — только по нему
+        const others = groupIds().filter((id) => id !== d.id)
+        if (others.length && groupIds().includes(d.id)) {
+          const dx = s.x - d.item0.x
+          const dy = s.y - d.item0.y
+          const base = new Map(d.plan0.furniture.map((f) => [f.id, f]))
+          const set = new Set(others)
+          next = { ...next, furniture: next.furniture.map((f) => (set.has(f.id) && base.has(f.id) ? { ...f, x: base.get(f.id)!.x + dx, y: base.get(f.id)!.y + dy } : f)) }
+        }
+        previewSoon(next)
         return
       }
       case 'rotate': {
@@ -1079,6 +1119,13 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       onSelect(null)
       return true
     }
+    if (selection.kind === 'furniture' && multi.length) {
+      const ids = new Set(groupIds())
+      history.apply((pl) => ({ ...pl, furniture: pl.furniture.filter((f) => !ids.has(f.id)) }))
+      onMultiChange?.([])
+      onSelect(null)
+      return true
+    }
     history.apply((pl) => deleteSelection(pl, selection))
     onSelect(null)
     return true
@@ -1106,9 +1153,26 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     if (!d) return
     const raw = toWorld(e.clientX, e.clientY)
     switch (d.kind) {
+      case 'band': {
+        setBand(null)
+        const x0 = Math.min(d.a.x, raw.x)
+        const x1 = Math.max(d.a.x, raw.x)
+        const y0 = Math.min(d.a.y, raw.y)
+        const y1 = Math.max(d.a.y, raw.y)
+        const inside = plan.furniture.filter((f) => itemMode(f) === mode && f.x >= x0 && f.x <= x1 && f.y >= y0 && f.y <= y1).map((f) => f.id)
+        if (!inside.length) return
+        // уже выделенное остаётся: рамка добавляет
+        const cur = groupIds()
+        const all = [...cur, ...inside.filter((id) => !cur.includes(id))]
+        if (selection?.kind !== 'furniture') onSelect({ kind: 'furniture', id: all[0] }, { keepPanel: true })
+        onMultiChange?.(all.slice(1))
+        return
+      }
       case 'pan':
-        if (!d.moved && tool === 'select') onSelect(d.clickSel)
-        else if (d.moved) setView(viewRef.current)
+        if (!d.moved && tool === 'select') {
+          onSelect(d.clickSel)
+          if (multi.length) onMultiChange?.([])
+        } else if (d.moved) setView(viewRef.current)
         return
       case 'maybe':
         handleTap(raw, { shift: e.shiftKey })
@@ -1164,6 +1228,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     setPanning(false)
     setDragLabel(null)
     setMovingId(null)
+    setBand(null)
     pendingPreview.current = null
     setRoomDraft(null)
     setGuides([])
@@ -1220,6 +1285,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         }
       }
       if (e.key === 'Escape') {
+        if (multi.length) onMultiChange?.([])
         if (sideEdit) setSideEdit(null)
         else if (calibEdit) setCalibEdit(null)
         else if (draftRef.current.length) finishDraft()
@@ -1267,14 +1333,34 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       }
       if (ctrl && e.code === 'KeyD' && selection?.kind === 'furniture') {
         e.preventDefault()
-        const r = duplicateFurniture(planRef.current, selection.id, rooms)
-        if (r.id === selection.id) return
-        history.apply(() => r.plan)
-        onSelect({ kind: 'furniture', id: r.id })
+        // группа дублируется целиком: копии становятся новым выделением
+        let pl = planRef.current
+        const made: string[] = []
+        for (const id of groupIds()) {
+          const r = duplicateFurniture(pl, id, rooms)
+          if (r.id !== id) {
+            pl = r.plan
+            made.push(r.id)
+          }
+        }
+        if (!made.length) return
+        const done = pl
+        history.apply(() => done)
+        onSelect({ kind: 'furniture', id: made[0] })
+        onMultiChange?.(made.slice(1))
+        return
+      }
+      if (ctrl && e.code === 'KeyA' && !build) {
+        // выделить все предметы этого режима
+        e.preventDefault()
+        const ids = planRef.current.furniture.filter((f) => itemMode(f) === mode).map((f) => f.id)
+        if (!ids.length) return
+        onSelect({ kind: 'furniture', id: ids[0] }, { keepPanel: true })
+        onMultiChange?.(ids.slice(1))
         return
       }
       if (e.code === 'KeyR' && !ctrl) {
-        if (selection?.kind === 'furniture') history.apply((pl) => rotateFurniture(pl, selection.id, e.shiftKey ? -90 : 90))
+        if (selection?.kind === 'furniture') history.apply((pl) => groupIds().reduce((q, id) => rotateFurniture(q, id, e.shiftKey ? -90 : 90), pl))
         else if (tool === 'place') setGhostRot((r) => normDeg(r + 90))
         return
       }
@@ -1334,7 +1420,8 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         const step = e.shiftKey ? 10 : 1
         const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0
         const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0
-        history.nudge((pl) => nudgeFurniture(pl, selection.id, dx, dy))
+        const ids = groupIds()
+        history.nudge((pl) => ids.reduce((q, id) => nudgeFurniture(q, id, dx, dy), pl))
         return
       }
       if (ctrl) return
@@ -1350,7 +1437,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       window.removeEventListener('keydown', onKey)
       window.removeEventListener('keyup', onKeyUp)
     }
-  }, [tool, selection, selPart, typed, ortho, unit, wallThickness, history, onSelect, onToolChange, onNotice, finishDraft, dimStart, measure, placing, handleTap, fit, zoomAt, size])
+  }, [tool, selection, selPart, typed, ortho, unit, wallThickness, history, onSelect, onToolChange, onNotice, finishDraft, dimStart, measure, placing, handleTap, fit, zoomAt, size, multi, onMultiChange, mode, rooms])
 
   // ---------- отрисовка ----------
   const drawing = tool !== 'select'
@@ -1699,6 +1786,17 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
                 </g>
               )
             })()}
+
+          {/* группа выделенных предметов и рамка выделения */}
+          {multi.length > 0 &&
+            groupIds().map((id) => {
+              const f = plan.furniture.find((x) => x.id === id)
+              if (!f) return null
+              return <polygon key={`grp-${id}`} points={ptsAttr(obbCorners(f.x, f.y, Math.max(f.w, 14 / zoom), Math.max(f.d, 14 / zoom), f.rot))} fill="rgba(37,99,235,0.08)" stroke={ACCENT} strokeWidth={1.5 / zoom} strokeDasharray={`${4 / zoom} ${3 / zoom}`} pointerEvents="none" />
+            })}
+          {band && (
+            <rect x={Math.min(band.a.x, band.b.x)} y={Math.min(band.a.y, band.b.y)} width={Math.abs(band.b.x - band.a.x)} height={Math.abs(band.b.y - band.a.y)} fill="rgba(37,99,235,0.08)" stroke={ACCENT} strokeWidth={1 / zoom} strokeDasharray={`${4 / zoom} ${3 / zoom}`} pointerEvents="none" />
+          )}
 
           {/* выдвигаемый с Alt участок — подсвечен он, а не остаток прямой */}
           {movingRun && runBand(movingRun, 0, dist(movingRun.a, movingRun.b), ACCENT, 'moving-part')}

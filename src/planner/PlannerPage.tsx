@@ -349,6 +349,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const [elTab, setElTab] = useState<'panel' | 'bom' | 'norms' | 'add'>('panel')
   /** участок прямой, выделенный Alt + щелчком на холсте: панель и «Удалить» работают с ним */
   const [wallSection, setWallSection] = useState<{ id: string; lo: number; hi: number; length: number } | null>(null)
+  /** группа предметов, выделенных вместе с основным: Shift+клик, Shift+рамка, Ctrl+A */
+  const [multi, setMulti] = useState<string[]>([])
   /** какой конец прямой двигает ввод длины в панели */
   const [lenEnd, setLenEnd] = useState<'a' | 'b'>('b')
   const [hlCircuit, setHlCircuit] = useState<string | null>(null)
@@ -630,6 +632,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   /** Переключить режим: инструмент — «Выбор», панель — своя, чужое выделение снимается */
   const switchMode = (m: EditMode) => {
     setModeRaw(m)
+    setMulti([])
     setToolRaw('select')
     setPlacing(null)
     const cur = modeOfSelection(selection)
@@ -2173,8 +2176,63 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const totalArea = rooms.reduce((s, r) => s + r.area, 0)
   const toggleLayer = (k: keyof Layers) => setLayers((l) => ({ ...l, [k]: !l[k] }))
 
+  // группа живёт только пока основной — предмет
+  useEffect(() => {
+    if (selection?.kind !== 'furniture' && multi.length) setMulti([])
+  }, [selection, multi.length])
+
   // ---------- панель свойств ----------
   const renderProps = () => {
+    if (selection?.kind === 'furniture' && multi.length) {
+      const ids = [selection.id, ...multi].filter((id) => plan.furniture.some((f) => f.id === id))
+      const names = ids.map((id) => {
+        const f = plan.furniture.find((x) => x.id === id)!
+        return f.label || CATALOG_MAP[f.type]?.name || f.type
+      })
+      return (
+        <div>
+          <div className="pl-props-title">Выбрано предметов: {ids.length}</div>
+          <div className="pl-note">{names.slice(0, 8).join(', ')}{names.length > 8 ? ` и ещё ${names.length - 8}` : ''}</div>
+          <div className="pl-hint-box">Тяните любой из них — поедут все. Стрелки двигают группу, Del удаляет, Ctrl+D дублирует. Shift+клик добавляет или убирает предмет, Esc снимает выделение.</div>
+          <div className="pl-row">
+            <button className="pl-btn" onClick={() => history.apply((p) => ids.reduce((q, id) => rotateFurniture(q, id, 90), p))}>
+              ↻ 90° все
+            </button>
+            <button
+              className="pl-btn"
+              onClick={() => {
+                let pl = plan
+                const made: string[] = []
+                for (const id of ids) {
+                  const r = duplicateFurniture(pl, id, rooms)
+                  if (r.id !== id) {
+                    pl = r.plan
+                    made.push(r.id)
+                  }
+                }
+                if (!made.length) return
+                const done = pl
+                history.apply(() => done)
+                setSelection({ kind: 'furniture', id: made[0] })
+                setMulti(made.slice(1))
+              }}
+            >
+              ⧉ Дублировать все
+            </button>
+            <button
+              className="pl-btn danger"
+              onClick={() => {
+                history.apply((p) => ({ ...p, furniture: p.furniture.filter((f) => !ids.includes(f.id)) }))
+                setSelection(null)
+                setMulti([])
+              }}
+            >
+              🗑 Удалить все
+            </button>
+          </div>
+        </div>
+      )
+    }
     if (selection?.kind === 'furniture') {
       const f = plan.furniture.find((x) => x.id === selection.id)
       if (!f) return null
@@ -3801,6 +3859,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           check={check}
           badItems={badPoints}
           onSectionChange={setWallSection}
+          multi={multi}
+          onMultiChange={setMulti}
           history={history}
           tool={tool}
           onToolChange={setTool}
