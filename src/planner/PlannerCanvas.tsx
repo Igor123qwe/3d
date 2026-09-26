@@ -142,8 +142,8 @@ const sectionOf = (walls: Wall[], sel: Selection, part: { id: string; at: Pt } |
   const s = runSection(walls, run, part.at)
   return s.hi - s.lo < dist(run.a, run.b) - 0.5 ? s : null
 }
-const UNIT_CM: Record<LengthUnit, number> = { cm: 1, mm: 0.1, m: 100 }
-const UNIT_NAME: Record<LengthUnit, string> = { cm: 'см', mm: 'мм', m: 'м' }
+export const UNIT_CM: Record<LengthUnit, number> = { cm: 1, mm: 0.1, m: 100 }
+export const UNIT_NAME: Record<LengthUnit, string> = { cm: 'см', mm: 'мм', m: 'м' }
 
 export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) => {
   const { plan, rooms, check, badItems, history, tool, onToolChange, selection, onSelect, layers, unit, ortho, wallThickness, placing, view, onViewChange, onHint, photos, onCalibrate, imageLines, onRoomPick, onCorners, onRefine, onNotice, mode = 'build', wallRef = 'axis', electricDesign, hlCircuit } = props
@@ -810,7 +810,8 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       case 'maybe': {
         const dx = e.clientX - d.sx
         const dy = e.clientY - d.sy
-        if (Math.hypot(dx, dy) > 6) {
+        // палец дрожит сильнее мыши: тап с касания — до 10 px
+        if (Math.hypot(dx, dy) > (e.pointerType === 'touch' ? 10 : 6)) {
           drag.current = { kind: 'pan', sx: d.sx, sy: d.sy, view0: d.view0, moved: true, clickSel: selection }
           setPanning(true)
           onViewChange({ ...d.view0, x: d.view0.x + dx, y: d.view0.y + dy })

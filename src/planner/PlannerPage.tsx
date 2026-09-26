@@ -4,7 +4,7 @@ import { CATALOG, CATALOG_MAP, CATEGORIES, FLOORS, ROOM_NAMES, dims3d, itemMode,
 import { usePlanHistory } from './store'
 import { buildRooms } from './rooms'
 import { runChecks } from './checks'
-import { PlannerCanvas, dialogOpen, type CanvasHandle, type View } from './PlannerCanvas'
+import { PlannerCanvas, dialogOpen, UNIT_CM, UNIT_NAME, type CanvasHandle, type View } from './PlannerCanvas'
 import { Scene, planBounds } from './Scene'
 import { Glyph } from './Glyph'
 import { TEMPLATES } from './templates'
@@ -234,6 +234,33 @@ const NumberField: React.FC<{
           e.currentTarget.blur()
         }
       }}
+    />
+  )
+}
+
+/**
+ * Длина в выбранных единицах: внутри — сантиметры, снаружи — см/мм/м.
+ * Шаг и границы тоже в единицах, чтобы стрелки поля шагали разумно
+ */
+const LenField: React.FC<{
+  value: number
+  unit: LengthUnit
+  onCommit: (cm: number) => void
+  min?: number
+  max?: number
+  step?: number
+  list?: string
+}> = ({ value, unit, onCommit, min, max, step, list }) => {
+  const k = UNIT_CM[unit]
+  const round = (v: number) => Math.round((v / k) * 100) / 100
+  return (
+    <NumberField
+      value={round(value)}
+      min={min === undefined ? undefined : round(min)}
+      max={max === undefined ? undefined : round(max)}
+      step={step === undefined ? undefined : unit === 'm' ? step / 100 : unit === 'mm' ? step * 10 : step}
+      list={unit === 'cm' ? list : undefined}
+      onCommit={(v) => onCommit(Math.round(v * k * 100) / 100)}
     />
   )
 }
@@ -2065,12 +2092,12 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           {cat?.resizable !== false && (
             <>
               <label className="pl-field">
-                <span>Ширина, см</span>
-                <NumberField value={f.w} min={5} max={2000} step={5} onCommit={(v) => upd({ w: v })} />
+                <span>Ширина, {UNIT_NAME[unit]}</span>
+                <LenField unit={unit} value={f.w} min={5} max={2000} step={5} onCommit={(v) => upd({ w: v })} />
               </label>
               <label className="pl-field">
-                <span>Глубина, см</span>
-                <NumberField value={f.d} min={5} max={2000} step={5} onCommit={(v) => upd({ d: v })} />
+                <span>Глубина, {UNIT_NAME[unit]}</span>
+                <LenField unit={unit} value={f.d} min={5} max={2000} step={5} onCommit={(v) => upd({ d: v })} />
               </label>
             </>
           )}
@@ -2079,8 +2106,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             <NumberField value={Math.round(f.rot)} step={15} onCommit={(v) => upd({ rot: normDeg(v) })} />
           </label>
           <label className="pl-field">
-            <span>Высота, см</span>
-            <NumberField value={f.h ?? dims3d(f).h} min={1} max={400} step={5} onCommit={(v) => upd({ h: v })} />
+            <span>Высота, {UNIT_NAME[unit]}</span>
+            <LenField unit={unit} value={f.h ?? dims3d(f).h} min={1} max={400} step={5} onCommit={(v) => upd({ h: v })} />
           </label>
           <div className="pl-row">
             <button className="pl-btn" onClick={() => history.apply((p) => rotateFurniture(p, f.id, -15))}>⟲ 15°</button>
@@ -2147,8 +2174,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                 <div className="pl-block">
                   <div className="pl-props-title">⚡ {ELECTRIC_NAMES[e.kind]}</div>
                   <label className="pl-field">
-                    <span>Высота от пола, см</span>
-                    <NumberField value={e.height} min={0} max={400} step={5} onCommit={(v) => updE({ height: v })} />
+                    <span>Высота от пола, {UNIT_NAME[unit]}</span>
+                    <LenField unit={unit} value={e.height} min={0} max={400} step={5} onCommit={(v) => updE({ height: v })} />
                   </label>
                   {outlet && (
                     <label className="pl-field">
@@ -2273,13 +2300,13 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           </div>
           {byRef && byRef.value !== null ? (
             <label className="pl-field">
-              <span>Длина {refName}, см</span>
-              <NumberField value={Math.round(byRef.value * 10) / 10} min={MIN_WALL_LENGTH} step={5} onCommit={(v) => guarded((p) => setRunLengthBy(p, rooms, w.id, v, byRef.used))} />
+              <span>Длина {refName}, {UNIT_NAME[unit]}</span>
+              <LenField unit={unit} value={Math.round(byRef.value * 10) / 10} min={MIN_WALL_LENGTH} step={5} onCommit={(v) => guarded((p) => setRunLengthBy(p, rooms, w.id, v, byRef.used))} />
             </label>
           ) : (
             <label className="pl-field">
-              <span>Длина по оси, см</span>
-              <NumberField value={Math.round(L)} min={MIN_WALL_LENGTH} step={5} onCommit={(v) => guarded((p) => setRunLengthBy(p, rooms, w.id, v, 'axis'))} />
+              <span>Длина по оси, {UNIT_NAME[unit]}</span>
+              <LenField unit={unit} value={Math.round(L)} min={MIN_WALL_LENGTH} step={5} onCommit={(v) => guarded((p) => setRunLengthBy(p, rooms, w.id, v, 'axis'))} />
             </label>
           )}
           {byRef && byRef.value === null && (
@@ -2362,8 +2389,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             </select>
           </label>
           <label className="pl-field">
-            <span>Ширина, см</span>
-            <NumberField value={o.width} min={MIN_OPENING_WIDTH} max={Math.max(MIN_OPENING_WIDTH, Math.floor(L - 2))} step={5} list={`pl-widths-${o.kind}`} onCommit={(v) => upd({ width: v })} />
+            <span>Ширина, {UNIT_NAME[unit]}</span>
+            <LenField unit={unit} value={o.width} min={MIN_OPENING_WIDTH} max={Math.max(MIN_OPENING_WIDTH, Math.floor(L - 2))} step={5} list={`pl-widths-${o.kind}`} onCommit={(v) => upd({ width: v })} />
             <datalist id={`pl-widths-${o.kind}`}>
               {OPENING_WIDTHS[o.kind].map((v) => (
                 <option key={v} value={v} />
@@ -2503,8 +2530,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             <b>{fmtLen(dist(d.a, d.b), unit)}</b>
           </label>
           <label className="pl-field">
-            <span>Отступ, см</span>
-            <NumberField value={d.offset} step={5} onCommit={(v) => history.apply((p) => updateDim(p, d.id, { offset: v || 5 }))} />
+            <span>Отступ, {UNIT_NAME[unit]}</span>
+            <LenField unit={unit} value={d.offset} step={5} onCommit={(v) => history.apply((p) => updateDim(p, d.id, { offset: v || 5 }))} />
           </label>
           <div className="pl-note">
             {d.aRef && d.bRef
@@ -2972,8 +2999,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             </select>
           </label>
           <label className="pl-field">
-            <span>Высота потолка, см</span>
-            <NumberField value={electricSettings.ceiling} min={220} max={400} step={5} onCommit={(v) => setElectric({ ceiling: v })} />
+            <span>Высота потолка, {UNIT_NAME[unit]}</span>
+            <LenField unit={unit} value={electricSettings.ceiling} min={220} max={400} step={5} onCommit={(v) => setElectric({ ceiling: v })} />
           </label>
           {(
             [

@@ -515,12 +515,12 @@ describe('имена комнат после распознавания', () => 
     const { metas, rooms } = buildRooms(p1)
     const big = metas.find((m) => rooms.find((r) => r.meta.id === m.id)!.area > 10)!
     const small = metas.find((m) => m.id !== big.id)!
-    const result = { walls: p1.walls, openings: [], rooms: [{ ...big, name: '5ж' }, { ...small, name: 'Помещение 2' }], underlay: undefined } as never
+    const result = { walls: p1.walls, openings: [], rooms: [{ ...big, name: '5ж' }, { ...small, name: 'Помещение 2' }], underlay: undefined } as unknown as Parameters<typeof applyAiPlan>[1]
     const { plan } = applyAiPlan(p1, result)
     const names = plan.rooms.map((m) => m.name).sort()
     expect(names).toEqual(['Гостиная (5ж)', 'Санузел'])
     // настоящее имя не трогаем
-    const { plan: kept } = applyAiPlan(p1, { ...result, rooms: [{ ...big, name: 'Кухня' }, { ...small, name: 'Санузел' }] } as never)
+    const { plan: kept } = applyAiPlan(p1, { ...result, rooms: [{ ...big, name: 'Кухня' }, { ...small, name: 'Санузел' }] })
     expect(kept.rooms.map((m) => m.name).sort()).toEqual(['Кухня', 'Санузел'])
   })
 })
