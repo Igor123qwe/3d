@@ -84,7 +84,7 @@ export interface CanvasProps {
   onHint: (text: string) => void
   photos?: Record<string, string>
   /** пользователь показал отрезок известной длины на подложке */
-  onCalibrate?: (a: Pt, b: Pt) => void
+  onCalibrate?: (a: Pt, b: Pt, cm: number) => void
   /** линии, найденные на картинке подложки: магнит при обводке */
   imageLines?: Guide[]
   /** клик внутри комнаты на картинке */
@@ -122,6 +122,8 @@ type Drag =
 
 const NS = { vectorEffect: 'non-scaling-stroke' as const }
 const sameSel = (a: Selection, b: Selection) => (a === null && b === null) || (!!a && !!b && a.kind === b.kind && a.id === b.id)
+/** открыт диалог или стартовый экран: горячие клавиши холста не должны работать под ним */
+export const dialogOpen = () => !!document.querySelector('.pl-ask-backdrop, .pl-start-backdrop, .pl-furnish')
 const isEditable = (t: EventTarget | null) => {
   const el = t as HTMLElement | null
   if (!el) return false
@@ -159,6 +161,8 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   const [dimStartRef, setDimStartRef] = useState<DimRef | undefined>(undefined)
   const [measure, setMeasure] = useState<{ a: Pt; b: Pt; live: boolean } | null>(null)
   const [calibA, setCalibA] = useState<Pt | null>(null)
+  /** отрезок показан — спрашиваем его длину прямо у него, без window.prompt */
+  const [calibEdit, setCalibEdit] = useState<{ a: Pt; b: Pt; value: string } | null>(null)
   const [cornerPts, setCornerPts] = useState<Pt[]>([])
   useEffect(() => setCornerPts([]), [tool])
   useEffect(() => setTyped(''), [tool])
@@ -326,12 +330,19 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     let text = ''
     switch (tool) {
       case 'select':
+        // подсказка — по типу выбранного: у проёма нет ручки поворота, у размера — дублирования
         text =
           selection?.kind === 'wall'
-            ? 'Стена: тяните поперёк — сдвинется вся прямая, примыкающие стены потянутся за ней. Стрелки — на 1 см, с Shift — на 10. Alt + щелчок — только участок до стыков: его можно выдвинуть или удалить (Del). Кружок на конце — длина'
-            : selection
-              ? 'Перетаскивайте объект. Ручка сверху — поворот, уголок — размер. Del — удалить, R — повернуть на 90°, Ctrl+D — дублировать'
-              : mode === 'furnish'
+            ? 'Стена: тяните поперёк — вся прямая; стрелки — 1 см, с Shift — 10; Alt + щелчок — участок до стыков; кружок на конце — длина; Del — удалить'
+            : selection?.kind === 'opening'
+              ? 'Дверь или окно: тяните вдоль стены. Ширина, сторона и петли — в панели справа. Del — удалить'
+              : selection?.kind === 'dim'
+                ? 'Размер: тяните — отступ от стены. Концы, привязанные к стенам, следуют за ними. Del — удалить'
+                : selection?.kind === 'room'
+                  ? 'Комната: имя и пол — в панели справа. Размер стороны — щелчком по подписи на плане'
+                  : selection
+                    ? 'Предмет: тяните — двигать; ручка сверху — поворот, уголок — размер; R — на 90°, Ctrl+D — дублировать, Del — удалить'
+                    : mode === 'furnish'
                 ? 'Мебель: клик — выбрать предмет, тянуть — двигать. Стены и электрика сейчас не цепляются. Добавить — «Каталог» слева'
                 : mode === 'electric'
                   ? 'Электрика: клик — выбрать точку, тянуть — двигать. Стены и мебель сейчас не цепляются. Расставить по нормам — панель «Электрика»'
@@ -452,12 +463,16 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           setGuides(s.guides)
           break
         }
-        case 'measure':
-        case 'calibrate': {
+        case 'calibrate':
+          // по картинке: сетка и стены чертежа тут ни при чём — курсор там, куда показали
+          setCursor({ p: raw, kind: 'free' })
+          setGuides([])
+          break
+        case 'measure': {
           const s = snapWallPoint(raw, p.walls, { grid: g, tol, ortho: false, lines: imageLines })
           setCursor({ p: s.p, kind: s.kind })
           setGuides(s.guides)
-          if (tool === 'measure') setMeasure((m) => (m && m.live ? { ...m, b: s.p } : m))
+          setMeasure((m) => (m && m.live ? { ...m, b: s.p } : m))
           break
         }
         case 'roomPick':
@@ -565,8 +580,8 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         }
         case 'calibrate': {
           if (!calibA) setCalibA(raw)
-          else {
-            onCalibrate?.(calibA, raw)
+          else if (dist(calibA, raw) > 2) {
+            setCalibEdit({ a: calibA, b: raw, value: '' })
             setCalibA(null)
           }
           return
@@ -812,6 +827,13 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         setAreaDraft({ a: d.a, b: raw })
         return
       case 'move': {
+        // с Shift — без магнита: предмет встаёт ровно туда, куда тянут, и не разворачивается к стене
+        if (e.shiftKey) {
+          const p = add(raw, d.offset)
+          setGuides([])
+          history.preview(updateFurniture(d.plan0, d.id, { x: Math.round(p.x), y: Math.round(p.y) }))
+          return
+        }
         const without: Plan = { ...d.plan0, furniture: d.plan0.furniture.filter((f) => f.id !== d.id) }
         const s = snapFurniture(d.item0, add(raw, d.offset), without, { grid: 5, tol: Math.max(tol, 10), selfId: d.id })
         setGuides(s.guides)
@@ -888,7 +910,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       case 'opening': {
         const op = d.plan0.openings.find((o) => o.id === d.id)
         if (!op) return
-        const s = snapOpening(raw, d.plan0, op.width, tol + 15)
+        const s = snapOpening(raw, d.plan0, op.width, tol + 15, e.shiftKey)
         if (s) history.preview(updateOpening(d.plan0, d.id, { wallId: s.wallId, t: s.t }))
         return
       }
@@ -987,7 +1009,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   // ---------- клавиатура ----------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (isEditable(e.target)) return
+      if (isEditable(e.target) || dialogOpen()) return
       const ctrl = e.ctrlKey || e.metaKey
       if (e.code === 'Space') {
         spaceDown.current = true
@@ -1027,6 +1049,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       }
       if (e.key === 'Escape') {
         if (sideEdit) setSideEdit(null)
+        else if (calibEdit) setCalibEdit(null)
         else if (draftRef.current.length) finishDraft()
         else if (dimStart) setDimStart(null)
         else if (measure) setMeasure(null)
@@ -1114,6 +1137,26 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           if (w) onSelect({ kind: 'wall', id: w.id })
           setSelPart(null)
         }
+        return
+      }
+      // проём: стрелки двигают его вдоль стены на 1 см, с Shift — на 10
+      if (e.key.startsWith('Arrow') && selection?.kind === 'opening') {
+        e.preventDefault()
+        const pl0 = planRef.current
+        const op = pl0.openings.find((o) => o.id === selection.id)
+        const wall = op && pl0.walls.find((w) => w.id === op.wallId)
+        if (!op || !wall) return
+        const v = { x: e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0, y: e.key === 'ArrowUp' ? -1 : e.key === 'ArrowDown' ? 1 : 0 }
+        const dir = norm(sub(wall.b, wall.a))
+        const k = dot(v, dir)
+        if (Math.abs(k) < 0.3) {
+          onNotice?.(Math.abs(dir.x) >= Math.abs(dir.y) ? 'Проём двигается вдоль стены — стрелками ← →' : 'Проём двигается вдоль стены — стрелками ↑ ↓')
+          return
+        }
+        const L = dist(wall.a, wall.b)
+        const hw = op.width / 2
+        const pos = Math.min(L - hw, Math.max(hw, op.t * L + Math.sign(k) * (e.shiftKey ? 10 : 1)))
+        history.nudge((pl) => updateOpening(pl, op.id, { t: pos / L }))
         return
       }
       if (e.key.startsWith('Arrow') && selection?.kind === 'furniture') {
@@ -1329,6 +1372,13 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           )}
 
           {/* калибровка масштаба подложки */}
+          {calibEdit && (
+            <g pointerEvents="none">
+              <line x1={calibEdit.a.x} y1={calibEdit.a.y} x2={calibEdit.b.x} y2={calibEdit.b.y} stroke="#16a34a" strokeWidth={2} {...NS} />
+              <circle cx={calibEdit.a.x} cy={calibEdit.a.y} r={4 / zoom} fill="#16a34a" />
+              <circle cx={calibEdit.b.x} cy={calibEdit.b.y} r={4 / zoom} fill="#16a34a" />
+            </g>
+          )}
           {calibA && cursor && (
             <g>
               <line x1={calibA.x} y1={calibA.y} x2={cursor.p.x} y2={cursor.p.y} stroke="#16a34a" strokeWidth={1.5} {...NS} />
@@ -1411,6 +1461,42 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           {hoverRun && !(selRun && hoverRun.ids.includes(selection!.id)) && (
             hoverPart && hover?.kind === 'wall' && hoverPart.id === hover.id ? runBand(hoverRun, hoverPart.lo, hoverPart.hi, 'rgba(37,99,235,0.35)', 'hover-part') : runBand(hoverRun, 0, dist(hoverRun.a, hoverRun.b), 'rgba(75,85,99,0.55)', 'hover-run')
           )}
+          {/* выбранный проём: расстояния до концов стены — видно, куда его двигать */}
+          {selection?.kind === 'opening' &&
+            build &&
+            (() => {
+              const op = plan.openings.find((o) => o.id === selection.id)
+              const wall = op && wallMap.get(op.wallId)
+              if (!op || !wall) return null
+              const L = dist(wall.a, wall.b)
+              const dir = norm(sub(wall.b, wall.a))
+              const n = perp(dir)
+              const hw = op.width / 2
+              const left = op.t * L - hw
+              const right = L - op.t * L - hw
+              const off = wall.thickness / 2 + 14 / zoom
+              const label = (from: number, to: number, key: string) => {
+                if (to - from < 1) return null
+                const m = add(wall.a, mul(dir, (from + to) / 2))
+                const p = add(m, mul(n, off))
+                let ang = angleDeg(wall.a, wall.b)
+                if (ang > 90 || ang <= -90) ang += 180
+                return (
+                  <g key={key} pointerEvents="none">
+                    <line x1={add(wall.a, mul(dir, from)).x + n.x * off} y1={add(wall.a, mul(dir, from)).y + n.y * off} x2={add(wall.a, mul(dir, to)).x + n.x * off} y2={add(wall.a, mul(dir, to)).y + n.y * off} stroke={ACCENT} strokeWidth={1} strokeDasharray="3 3" {...NS} />
+                    <text transform={`translate(${p.x} ${p.y}) rotate(${ang})`} dy={-4 / zoom} fontSize={11 / zoom} textAnchor="middle" fill={ACCENT} stroke="#fff" strokeWidth={3 / zoom} paintOrder="stroke" fontFamily="system-ui, sans-serif" fontWeight={600}>
+                      {fmtLen(to - from, unit)}
+                    </text>
+                  </g>
+                )
+              }
+              return (
+                <g>
+                  {label(0, left, 'op-left')}
+                  {label(L - right, L, 'op-right')}
+                </g>
+              )
+            })()}
           {/* выбранная прямая (или её участок): подсветка, стрелки «тянуть поперёк», кружки на концах, длина */}
           {selRun && selA && selB && (
             <g>
@@ -1472,6 +1558,46 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           <span>{typedPt ? 'по оси · Enter — поставить' : 'наведите, куда вести'}</span>
         </div>
       )}
+      {/* масштаб подложки: длина показанного отрезка */}
+      {calibEdit &&
+        (() => {
+          const m = lerp(calibEdit.a, calibEdit.b, 0.5)
+          const commit = () => {
+            const cm = Number(calibEdit.value.replace(',', '.'))
+            if (!Number.isFinite(cm) || cm <= 0) {
+              onNotice?.('Нужно число больше нуля, например 372')
+              return
+            }
+            onCalibrate?.(calibEdit.a, calibEdit.b, cm)
+            setCalibEdit(null)
+          }
+          return (
+            <div className="pl-side-edit" style={{ left: view.x + m.x * zoom, top: view.y + m.y * zoom }} onPointerDown={(e) => e.stopPropagation()}>
+              <div className="pl-side-edit-row">
+                <span className="pl-side-edit-note">этот отрезок на плане —</span>
+                <input
+                  autoFocus
+                  inputMode="decimal"
+                  placeholder="372"
+                  value={calibEdit.value}
+                  onChange={(e) => setCalibEdit({ ...calibEdit, value: e.target.value })}
+                  onKeyDown={(e) => {
+                    e.stopPropagation()
+                    if (e.key === 'Enter') commit()
+                    if (e.key === 'Escape') setCalibEdit(null)
+                  }}
+                />
+                <span>см</span>
+                <button className="pl-btn primary" onClick={commit}>
+                  OK
+                </button>
+                <button className="pl-btn" onClick={() => setCalibEdit(null)} title="Отмена (Esc)">
+                  ✕
+                </button>
+              </div>
+            </div>
+          )
+        })()}
       {/* размер стороны комнаты: число и какую стену двигать */}
       {sideEdit &&
         (() => {

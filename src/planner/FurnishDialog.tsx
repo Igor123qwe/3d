@@ -145,6 +145,8 @@ export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled,
               onKeyDown={(e) => {
                 e.stopPropagation()
                 if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void run()
+                // Esc должен закрывать диалог и из поля: слушатель окна событие не получит
+                if (e.key === 'Escape' && !busy) onClose()
               }}
               placeholder="Например: живём вдвоём, работаем из дома — нужны два рабочих места; хочется много хранения и диван для гостей"
             />

@@ -318,7 +318,8 @@ export interface OpeningSnap {
 }
 
 /** Ближайшая стена для проёма и его положение вдоль неё */
-export function snapOpening(raw: Pt, plan: Plan, width: number, tol: number): OpeningSnap | null {
+/** free — без шага 5 см и без прилипания к середине и к отступу от угла (Shift) */
+export function snapOpening(raw: Pt, plan: Plan, width: number, tol: number, free = false): OpeningSnap | null {
   let best: OpeningSnap | null = null
   let bestD = Infinity
   for (const w of plan.walls) {
@@ -328,8 +329,13 @@ export function snapOpening(raw: Pt, plan: Plan, width: number, tol: number): Op
     if (d > w.thickness / 2 + tol || d >= bestD) continue
     const hw = width / 2
     let pos = projectT(raw, w.a, w.b) * L
-    pos = roundTo(pos, 5)
-    if (Math.abs(pos - L / 2) < tol) pos = L / 2
+    if (!free) {
+      pos = roundTo(pos, 5)
+      // середина стены и «в 10 см от угла» — как обычно ставят дверь у стены
+      if (Math.abs(pos - L / 2) < tol) pos = L / 2
+      else if (Math.abs(pos - (hw + 10)) < tol) pos = hw + 10
+      else if (Math.abs(pos - (L - hw - 10)) < tol) pos = L - hw - 10
+    }
     pos = Math.min(L - hw, Math.max(hw, pos))
     const t = pos / L
     const dir = norm(sub(w.b, w.a))

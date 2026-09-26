@@ -4,7 +4,7 @@ import { CATALOG, CATALOG_MAP, CATEGORIES, FLOORS, ROOM_NAMES, dims3d, itemMode,
 import { usePlanHistory } from './store'
 import { buildRooms } from './rooms'
 import { runChecks } from './checks'
-import { PlannerCanvas, type CanvasHandle, type View } from './PlannerCanvas'
+import { PlannerCanvas, dialogOpen, type CanvasHandle, type View } from './PlannerCanvas'
 import { Scene, planBounds } from './Scene'
 import { Glyph } from './Glyph'
 import { TEMPLATES } from './templates'
@@ -803,7 +803,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   // Ctrl+S сохраняет файл плана, Ctrl+O открывает; Ctrl+V обрабатывает приёмник
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (isEditable(e.target) || !(e.ctrlKey || e.metaKey)) return
+      if (isEditable(e.target) || dialogOpen() || !(e.ctrlKey || e.metaKey)) return
       if (e.code === 'KeyS') {
         e.preventDefault()
         downloadJson(plan)
@@ -817,16 +817,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     return () => window.removeEventListener('keydown', onKey)
   }, [plan])
 
-  const onCalibrate = (a: Pt, b: Pt) => {
+  const onCalibrate = (a: Pt, b: Pt, cm: number) => {
     const u = plan.underlay
     if (!u) return
-    const answer = window.prompt('Какой размер у показанного отрезка на плане, в сантиметрах?', '372')
-    if (answer === null) return
-    const cm = Number(answer.replace(',', '.'))
-    if (!Number.isFinite(cm) || cm <= 0) {
-      setToast('Нужно число больше нуля, например 372')
-      return
-    }
     history.apply((p) => (p.underlay ? { ...p, underlay: calibrate(p.underlay, a, b, cm) } : p))
     setCalibrated(true)
     setScaleKnown(true)
@@ -3565,7 +3558,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         />
       )}
       <footer className="pl-status">
-        <span className="pl-status-hint">{aiBusy ? `✨ ${aiBusy}` : hint}</span>
+        <span className="pl-status-hint" title={aiBusy ? aiBusy : hint}>
+          {aiBusy ? `✨ ${aiBusy}` : hint}
+        </span>
         <span className="pl-status-stats">
           {fmtArea(totalArea)} · {rooms.length} {rooms.length === 1 ? 'комната' : rooms.length >= 2 && rooms.length <= 4 ? 'комнаты' : 'комнат'} · сетка {fmtNum(plan.settings.grid)} см
         </span>

@@ -824,13 +824,14 @@
   position: absolute;
   left: 50%;
   bottom: 40px;
+  /* поверх диалогов: «План сохранён» не должен прятаться за затемнением */
+  z-index: 60;
   transform: translateX(-50%);
   background: #1f2937;
   color: #fff;
   padding: 8px 14px;
   border-radius: 999px;
   font-size: 13px;
-  z-index: 20;
 }
 
 /* ---------- 3D и AR ---------- */
