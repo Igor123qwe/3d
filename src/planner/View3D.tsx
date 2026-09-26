@@ -214,7 +214,8 @@ export const View3D: React.FC<View3DProps> = ({ plan, rooms, selection, onSelect
     controls.enableDamping = true
     controls.dampingFactor = 0.1
     controls.maxPolarAngle = Math.PI / 2 - 0.03
-    controls.minDistance = 0.5
+    // ближе камера входит в стену и кадр закрывает серая плоскость
+    controls.minDistance = 1.2
     controls.maxDistance = 80
 
     scene.add(new THREE.HemisphereLight(0xffffff, 0xb8c0cc, 1.1))

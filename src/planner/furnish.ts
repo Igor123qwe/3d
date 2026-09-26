@@ -176,7 +176,8 @@ export async function furnish(plan: Plan, rooms: Room[], o: FurnishOptions, deps
     acc = applyLayout(acc, checks)
     const placed = checks.filter((c) => c.ok).length
     report.push({ ...base, placed, rejected: checks.length - placed, summary: layoutSummary(checks) })
-    if (o.rename && o.scope === 'all' && p.purpose !== r.meta.name && !isFixedPurpose(r.meta.name)) acc = updateRoomMeta(acc, r.meta.id, { name: p.purpose })
+    // имя меняем только если в комнате что-то встало: пустая «Детская» вводит в заблуждение
+    if (o.rename && o.scope === 'all' && placed > 0 && p.purpose !== r.meta.name && !isFixedPurpose(r.meta.name)) acc = updateRoomMeta(acc, r.meta.id, { name: p.purpose })
   })
   return { plan: acc, rooms: report, costs, zoningFailed }
 }

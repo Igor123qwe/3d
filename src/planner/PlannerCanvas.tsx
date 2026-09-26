@@ -3,7 +3,7 @@ import type { DimRef, DimensionLine, EditMode, Furniture, Layers, LengthUnit, Op
 import type { Area } from './ops'
 import type { PlanHistory } from './store'
 import type { CatalogItem } from './catalog'
-import { CATALOG_MAP, itemMode } from './catalog'
+import { CATALOG_MAP, isElectricItem, itemMode } from './catalog'
 import { openingGeom, type CheckResult } from './checks'
 import { Glyph } from './Glyph'
 import { ACCENT, Scene, planBounds, ptsAttr, sortedFurniture, wallPolygon } from './Scene'
@@ -73,7 +73,8 @@ export interface CanvasProps {
   tool: Tool
   onToolChange: (t: Tool) => void
   selection: Selection
-  onSelect: (s: Selection) => void
+  /** keepPanel — не переключать панель на свойства (постановка из каталога) */
+  onSelect: (s: Selection, opts?: { keepPanel?: boolean }) => void
   layers: Layers
   unit: LengthUnit
   ortho: boolean
@@ -153,6 +154,8 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   const [size, setSize] = useState({ w: 800, h: 600 })
   const [cursor, setCursor] = useState<{ p: Pt; kind: string } | null>(null)
   const [guides, setGuides] = useState<Guide[]>([])
+  /** подпись у предмета во время поворота или растяжки: «45°», «120 × 60 см» */
+  const [dragLabel, setDragLabel] = useState<string | null>(null)
   const [draft, setDraft] = useState<Pt[]>([])
   const [roomDraft, setRoomDraft] = useState<{ a: Pt; b: Pt } | null>(null)
   const [areaDraft, setAreaDraft] = useState<{ a: Pt; b: Pt } | null>(null)
@@ -362,7 +365,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         text = 'Клик по стене — проём встанет на неё; ещё клик — ещё один. Ширина и петли — в панели справа. Esc — закончить'
         break
       case 'place':
-        text = placing ? `«${placing.name}»: кликните, куда поставить. R — повернуть, Esc — отмена. Объект сам прилипает к стене` : 'Выберите предмет в каталоге'
+        text = placing ? `«${placing.name}»: кликните, куда поставить. R — повернуть, Shift+клик — поставить несколько, Esc — отмена. Предмет сам прилипает к стене` : 'Выберите предмет в каталоге'
         break
       case 'dimension':
         text = dimStart
@@ -504,7 +507,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   )
 
   const handleTap = useCallback(
-    (raw: Pt) => {
+    (raw: Pt, mods: { shift?: boolean } = {}) => {
       const p = planRef.current
       const g = p.settings.grid
       switch (tool) {
@@ -553,8 +556,10 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           const s = snapFurniture(temp, raw, p, { grid: 5, tol: Math.max(tol, 12) })
           const r = addFurniture(p, placing, s.x, s.y, s.rot)
           history.apply(() => r.plan)
-          onSelect({ kind: 'furniture', id: r.id })
-          onToolChange('select')
+          // каталог остаётся открытым: следующий предмет — карточка и клик.
+          // Shift или электрика (розетки ставят пачками) — предмет остаётся «в руке»
+          onSelect({ kind: 'furniture', id: r.id }, { keepPanel: true })
+          if (!mods.shift && !isElectricItem({ type: placing.type, electric: placing.electric })) onToolChange('select')
           return
         }
         case 'dimension': {
@@ -845,6 +850,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         const f = d.plan0.furniture.find((x) => x.id === d.id)
         if (!f) return
         const ang = roundTo(angleDeg({ x: f.x, y: f.y }, raw) + 90, e.shiftKey ? 1 : 15)
+        setDragLabel(`${Math.round(normDeg(ang))}°`)
         history.preview(updateFurniture(d.plan0, d.id, { rot: normDeg(ang) }))
         return
       }
@@ -855,6 +861,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         const w = Math.max(10, roundTo(local.x, 5))
         const dd = Math.max(5, roundTo(local.y, 5))
         const c = add(corner, rotate({ x: w / 2, y: dd / 2 }, f.rot))
+        setDragLabel(`${fmtLen(w, unit)} × ${fmtLen(dd, unit)}`)
         history.preview(updateFurniture(d.plan0, d.id, { x: c.x, y: c.y, w, d: dd }))
         return
       }
@@ -947,6 +954,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     const d = drag.current
     drag.current = null
     setPanning(false)
+    setDragLabel(null)
     if (!d) return
     const raw = toWorld(e.clientX, e.clientY)
     switch (d.kind) {
@@ -954,7 +962,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         if (!d.moved && tool === 'select') onSelect(d.clickSel)
         return
       case 'maybe':
-        handleTap(raw)
+        handleTap(raw, { shift: e.shiftKey })
         return
       case 'room': {
         setRoomDraft(null)
@@ -1002,6 +1010,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     const d = drag.current
     drag.current = null
     setPanning(false)
+    setDragLabel(null)
     setRoomDraft(null)
     setGuides([])
     if (d && 'plan0' in d) history.cancelPreview()
@@ -1098,7 +1107,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       }
       if (ctrl && e.code === 'KeyD' && selection?.kind === 'furniture') {
         e.preventDefault()
-        const r = duplicateFurniture(planRef.current, selection.id)
+        const r = duplicateFurniture(planRef.current, selection.id, rooms)
         if (r.id === selection.id) return
         history.apply(() => r.plan)
         onSelect({ kind: 'furniture', id: r.id })
@@ -1475,6 +1484,16 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
                 </g>
               )
             })()}
+
+          {/* подпись во время поворота или растяжки */}
+          {dragLabel && selFurn && (
+            <g transform={`translate(${selFurn.x} ${selFurn.y}) scale(${1 / zoom})`} pointerEvents="none">
+              <rect x={-(dragLabel.length * 6.6 + 12) / 2} y={-40} width={dragLabel.length * 6.6 + 12} height={20} rx={5} fill="#111827" opacity={0.88} />
+              <text x={0} y={-30} fontSize={11.5} textAnchor="middle" dominantBaseline="central" fill="#fff">
+                {dragLabel}
+              </text>
+            </g>
+          )}
 
           {/* замки на зафиксированных стенах */}
           {lockedRuns.map((r) => {

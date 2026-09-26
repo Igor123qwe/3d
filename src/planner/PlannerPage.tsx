@@ -238,6 +238,10 @@ const NumberField: React.FC<{
   )
 }
 
+/** магазин закрыл страницу для роботов — говорим по-человечески и предлагаем форму */
+const friendlyProductError = (msg: string): string =>
+  /40[13]|ответил|forbidden|blocked/i.test(msg) ? 'Магазин не отдал страницу (закрыл доступ для роботов). Заполните название и размеры вручную — форма ниже.' : msg
+
 /**
  * Длина в выбранных единицах: внутри — сантиметры, снаружи — см/мм/м.
  * Шаг и границы тоже в единицах, чтобы стрелки поля шагали разумно
@@ -311,6 +315,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const [phCat, setPhCat] = useState('furniture')
   const [phItems, setPhItems] = useState<PhAsset[]>([])
   const [phState, setPhState] = useState<'idle' | 'loading' | 'error'>('idle')
+  /** счётчик «Повторить» — перезапускает загрузку фотокаталога */
+  const [phTry, setPhTry] = useState(0)
   const [customModelUrl, setCustomModelUrl] = useState('')
   const [trace, setTrace] = useState<TraceOptions>(DEFAULT_TRACE)
   /** магнит к линиям картинки при рисовании стен, комнат и размеров */
@@ -517,7 +523,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   }, [plan.furniture, topViews, photoMode])
 
   useEffect(() => {
-    if (view3d) setHint('3D-вид: вращайте сцену мышью или пальцем. AR: на Android — «AR через камеру» в Chrome, на iPhone — «AR на iPhone» в Safari')
+    if (view3d) setHint('3D-вид: вращайте сцену мышью или пальцем, клик по предмету — выбрать, Delete — удалить, Ctrl+Z — отмена. AR: на Android — «AR через камеру» в Chrome, на iPhone — «AR на iPhone» в Safari')
   }, [view3d])
 
   // план из ссылки (#mode=ar&plan=...)
@@ -584,7 +590,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     return () => {
       alive = false
     }
-  }, [catMode, phCat]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [catMode, phCat, phTry]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const isMobile = () => window.innerWidth < 860
 
@@ -606,11 +612,12 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     return 'build'
   }
 
-  const onSelect = useCallback((s: Selection) => {
+  const onSelect = useCallback((s: Selection, opts?: { keepPanel?: boolean }) => {
     setSelection(s)
     const m = modeOfSelection(s)
     if (m) setModeRaw(m)
-    if (s) {
+    // постановка из каталога: каталог остаётся, чтобы следующий предмет был в один клик
+    if (s && !opts?.keepPanel) {
       setPanel('props')
       if (!isMobile()) setPanelOpen(true)
     }
@@ -901,10 +908,32 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     void intake.takeFiles(files)
   }
 
-  // Ctrl+S сохраняет файл плана, Ctrl+O открывает; Ctrl+V обрабатывает приёмник
+  // Ctrl+S сохраняет файл плана, Ctrl+O открывает; Ctrl+V обрабатывает приёмник.
+  // В 3D холста с его клавишами нет, поэтому отмена, повтор и Delete живут здесь
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (isEditable(e.target) || dialogOpen() || !(e.ctrlKey || e.metaKey)) return
+      if (isEditable(e.target) || dialogOpen()) return
+      const ctrl = e.ctrlKey || e.metaKey
+      if (view3d) {
+        if (ctrl && e.code === 'KeyZ') {
+          e.preventDefault()
+          if (e.shiftKey) history.redo()
+          else history.undo()
+          return
+        }
+        if (ctrl && e.code === 'KeyY') {
+          e.preventDefault()
+          history.redo()
+          return
+        }
+        if ((e.key === 'Delete' || e.key === 'Backspace') && selection?.kind === 'furniture') {
+          e.preventDefault()
+          history.apply((p) => deleteSelection(p, selection))
+          setSelection(null)
+          return
+        }
+      }
+      if (!ctrl) return
       if (e.code === 'KeyS') {
         e.preventDefault()
         downloadJson(plan)
@@ -916,7 +945,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [plan])
+  }, [plan, view3d, selection]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const onCalibrate = (a: Pt, b: Pt, cm: number) => {
     const u = plan.underlay
@@ -2054,6 +2083,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const focusIssueTarget = (s: Selection) => {
     if (!s) return
     setSelection(s)
+    // дверь из «Проверки» правится в стройке, розетка — в электрике: режим следует за целью
+    const m = modeOfSelection(s)
+    if (m) setModeRaw(m)
     let p: Pt | null = null
     if (s.kind === 'furniture') {
       const f = plan.furniture.find((x) => x.id === s.id)
@@ -2129,7 +2161,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             <button
               className="pl-btn"
               onClick={() => {
-                const r = duplicateFurniture(plan, f.id)
+                const r = duplicateFurniture(plan, f.id, rooms)
                 if (r.id === f.id) return
                 history.apply(() => r.plan)
                 setSelection({ kind: 'furniture', id: r.id })
@@ -2779,7 +2811,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     )
   }
 
-  const filteredCatalog = CATALOG.filter((c) => (catCategory === 'all' || c.category === catCategory) && (!catQuery || c.name.toLowerCase().includes(catQuery.toLowerCase())))
+  // поиск идёт по всему каталогу, категория — только когда строка пуста
+  const filteredCatalog = CATALOG.filter((c) => (catQuery ? true : catCategory === 'all' || c.category === catCategory) && (!catQuery || c.name.toLowerCase().includes(catQuery.toLowerCase())))
 
   const filteredPhoto = phItems.filter((a) => !catQuery || `${a.name} ${a.tags.join(' ')}`.toLowerCase().includes(catQuery.toLowerCase()))
 
@@ -2804,7 +2837,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       {catMode !== 'link' && (
         <input
           className="pl-search"
-          placeholder={catMode === 'photo' ? 'Поиск по Poly Haven (англ.): sofa, chair, lamp…' : 'Поиск: кровать, стол, розетка…'}
+          placeholder={catMode === 'photo' ? (phState === 'error' ? 'Каталог недоступен' : 'Поиск по Poly Haven (англ.): sofa, chair, lamp…') : 'Поиск: кровать, стол, розетка…'}
           value={catQuery}
           onChange={(e) => setCatQuery(e.target.value)}
         />
@@ -2829,7 +2862,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
               {productState === 'loading' ? 'Читаю…' : 'Найти'}
             </button>
           </div>
-          {productError && <div className="pl-note">{productError}</div>}
+          {productError && <div className="pl-note-warn">{friendlyProductError(productError)}</div>}
           {product && (
             <div className="pl-block">
               <div className="pl-model">
@@ -2886,16 +2919,31 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       )}
       {catMode === 'link' ? null : catMode === 'photo' ? (
         <div>
-          <div className="pl-chips">
-            {(phCats.length ? phCats : [{ name: 'furniture', count: 0 }]).slice(0, 14).map((c) => (
-              <button key={c.name} className={`pl-chip ${phCat === c.name ? 'active' : ''}`} onClick={() => setPhCat(c.name)}>
-                {c.name}
-                {c.count ? ` · ${c.count}` : ''}
-              </button>
-            ))}
-          </div>
+          {phState !== 'error' && (
+            <div className="pl-chips pl-chips-row">
+              {(phCats.length ? phCats : [{ name: 'furniture', count: 0 }]).slice(0, 14).map((c) => (
+                <button key={c.name} className={`pl-chip ${phCat === c.name ? 'active' : ''}`} onClick={() => setPhCat(c.name)}>
+                  {c.name}
+                  {c.count ? ` · ${c.count}` : ''}
+                </button>
+              ))}
+            </div>
+          )}
           {phState === 'loading' && <div className="pl-note">Загружаем каталог…</div>}
-          {phState === 'error' && <div className="pl-note">Каталог недоступен: нет связи с polyhaven.com. Попробуйте позже или вставьте ссылку на свой GLB в свойствах предмета.</div>}
+          {phState === 'error' && (
+            <div className="pl-note pl-note-warn">
+              Каталог недоступен: нет связи с polyhaven.com. Попробуйте позже или вставьте ссылку на свой GLB в свойствах предмета.
+              <div className="pl-row" style={{ marginTop: 8 }}>
+                <button className="pl-btn small" onClick={() => setPhTry((n) => n + 1)}>
+                  Повторить
+                </button>
+                <button className="pl-btn ghost small" onClick={() => setCatMode('schemes')}>
+                  К схемам
+                </button>
+              </div>
+            </div>
+          )}
+          {phState === 'idle' && filteredPhoto.length === 0 && <div className="pl-note">Ничего не найдено{catQuery ? ` по «${catQuery}»` : ''}. Poly Haven ищет по-английски: sofa, chair, lamp.</div>}
           <div className="pl-cat-grid">
             {filteredPhoto.map((a) => (
               <button key={a.id} className={`pl-cat-item photo ${placing?.model?.id === a.id ? 'active' : ''}`} onClick={() => pickPhoto(a)} title={a.tags.join(', ')}>
@@ -2905,11 +2953,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
               </button>
             ))}
           </div>
-          <div className="pl-note">Модели Poly Haven (лицензия CC0 — свободное использование). Фото и 3D подгружаются с polyhaven.com.</div>
+          {phState !== 'error' && <div className="pl-note">Модели Poly Haven (лицензия CC0 — свободное использование). Фото и 3D подгружаются с polyhaven.com.</div>}
         </div>
       ) : (
         <>
-      <div className="pl-chips">
+      <div className="pl-chips pl-chips-row" role="tablist" aria-label="Категории">
         <button className={`pl-chip ${catCategory === 'all' ? 'active' : ''}`} onClick={() => setCatCategory('all')}>
           Все
         </button>
@@ -2919,6 +2967,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           </button>
         ))}
       </div>
+      {filteredCatalog.length === 0 && (
+        <div className="pl-note">
+          Ничего не найдено по «{catQuery}». Ищите по-русски: кровать, стол, розетка. Нет в каталоге — вкладка «По ссылке» (размеры с сайта магазина) или «Произвольный объект».
+        </div>
+      )}
       <div className="pl-cat-grid">
         {filteredCatalog.map((c) => {
           const vb = c.symbol ? '-14 -14 28 28' : `${-c.w / 2 - 4} ${-c.d / 2 - 4} ${c.w + 8} ${c.d + 8}`
@@ -3810,6 +3863,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           aiEnabled={ai.enabled}
           aiHint={ai.hint}
           onRun={runFurnish}
+          onUndo={history.undo}
           onClose={() => setFurnishFor(null)}
         />
       )}

@@ -157,6 +157,20 @@ describe('мебель', () => {
     expect(Math.round(b.x - a.x)).toBe(a.w + 10)
   })
 
+  it('дублирование обходит занятое место и не уходит из комнаты', () => {
+    const { plan, id } = withSofa()
+    const a = plan.furniture[0]
+    // справа уже стоит такой же диван — копия должна встать в другое место
+    const blocker = { ...a, id: 'blk', x: a.x + a.w + 10 }
+    const crowded = { ...plan, furniture: [...plan.furniture, blocker] }
+    const room = { id: 'r', name: 'Комната', polygon: [{ x: a.x - 300, y: a.y - 300 }, { x: a.x + 300, y: a.y - 300 }, { x: a.x + 300, y: a.y + 300 }, { x: a.x - 300, y: a.y + 300 }], area: 36, wallIds: [] as string[] }
+    const r = duplicateFurniture(crowded, id, [room as never])
+    const copy = r.plan.furniture.find((f) => f.id === r.id)!
+    expect(Math.abs(copy.x - blocker.x) > 5 || Math.abs(copy.y - blocker.y) > 5).toBe(true)
+    expect(copy.x).toBeGreaterThan(a.x - 300)
+    expect(copy.x).toBeLessThan(a.x + 300)
+  })
+
   it('сдвиг стрелками', () => {
     const { plan, id } = withSofa()
     const moved = nudgeFurniture(plan, id, -10, 5)

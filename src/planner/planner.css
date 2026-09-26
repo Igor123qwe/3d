@@ -607,6 +607,18 @@
   gap: 6px;
   margin: 8px 0;
 }
+/* категории каталога — одна строка с прокруткой, как лента в Planner 5D */
+.pl-chips-row {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+}
+.pl-chips-row .pl-chip {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
 .pl-chip {
   border: 1px solid #d1d5db;
   background: #fff;

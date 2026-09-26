@@ -2,7 +2,7 @@
 import type { DimensionLine, Furniture, Opening, OpeningKind, Plan, Pt, Room, RoomMeta, Selection, Underlay, Wall } from './types'
 import { uid } from './types'
 import { CATALOG_MAP, type CatalogItem } from './catalog'
-import { add, dist, eq, lerp, mul, norm, normDeg, perp, pointInPoly, projectT, segIntersect, sub } from './geometry'
+import { add, bboxOf, dist, eq, lerp, mul, norm, normDeg, obbCorners, perp, pointInPoly, projectT, rotate, segIntersect, sub } from './geometry'
 
 export const OPENING_DEFAULT_WIDTH: Record<OpeningKind, number> = { door: 80, window: 150, doorway: 90 }
 export const OPENING_WIDTHS: Record<OpeningKind, number[]> = {
@@ -350,16 +350,41 @@ export function rotateFurniture(plan: Plan, id: string, deg: number): Plan {
   return updateFurniture(plan, id, { rot: normDeg(f.rot + deg) })
 }
 
-export function duplicateFurniture(plan: Plan, id: string): { plan: Plan; id: string } {
+/**
+ * Копия предмета рядом с оригиналом. Место ищется по кругу: вдоль ширины
+ * вправо (стулья и тумбы встают в ряд), влево, вперёд, назад, потом дальше —
+ * первое, где копия не ложится на другой предмет и не уходит из комнаты
+ * оригинала (когда комнаты даны). Свободного места нет — копия справа, как есть
+ */
+export function duplicateFurniture(plan: Plan, id: string, rooms: Room[] = []): { plan: Plan; id: string } {
   const f = plan.furniture.find((x) => x.id === id)
   if (!f) return { plan, id }
   const cat = CATALOG_MAP[f.type]
   const nid = uid('f')
-  // копию ставим рядом: вдоль ширины объекта, чтобы стулья и тумбы вставали в ряд
-  const shift = cat?.symbol ? 30 : f.w + 10
-  const dx = Math.cos((f.rot * Math.PI) / 180) * shift
-  const dy = Math.sin((f.rot * Math.PI) / 180) * shift
-  const copy: Furniture = { ...f, id: nid, x: f.x + dx, y: f.y + dy }
+  const symbol = !!cat?.symbol
+  const stepW = symbol ? 30 : f.w + 10
+  const stepD = symbol ? 30 : f.d + 10
+  const home = rooms.find((r) => pointInPoly({ x: f.x, y: f.y }, r.polygon))
+  const others = plan.furniture.filter((x) => x.id !== id && !CATALOG_MAP[x.type]?.symbol)
+  const free = (c: Pt): boolean => {
+    if (home && !pointInPoly(c, home.polygon)) return false
+    if (symbol) return true
+    const my = bboxOf(obbCorners(c.x, c.y, f.w, f.d, f.rot))
+    return !others.some((o) => {
+      const ob = bboxOf(obbCorners(o.x, o.y, o.w, o.d, o.rot))
+      return my.minX < ob.maxX - 1 && my.maxX > ob.minX + 1 && my.minY < ob.maxY - 1 && my.maxY > ob.minY + 1
+    })
+  }
+  const dirs = [rotate({ x: 1, y: 0 }, f.rot), rotate({ x: -1, y: 0 }, f.rot), rotate({ x: 0, y: 1 }, f.rot), rotate({ x: 0, y: -1 }, f.rot)]
+  let at: Pt | null = null
+  for (let k = 1; k <= 3 && !at; k++) {
+    for (let i = 0; i < dirs.length && !at; i++) {
+      const c = add({ x: f.x, y: f.y }, mul(dirs[i], (i < 2 ? stepW : stepD) * k))
+      if (free(c)) at = c
+    }
+  }
+  const c = at ?? add({ x: f.x, y: f.y }, mul(dirs[0], stepW))
+  const copy: Furniture = { ...f, id: nid, x: c.x, y: c.y }
   return { plan: { ...plan, furniture: [...plan.furniture, copy] }, id: nid }
 }
 

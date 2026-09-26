@@ -42,7 +42,7 @@ describe('проверка расстановки от ИИ', () => {
     const { plan, room: r } = room()
     const checks = vetLayout([{ type: 'bed-160', x: 2000, y: 2000, rot: 0, why: '' }], r, plan)
     expect(checks[0].ok).toBe(false)
-    expect(checks[0].reason).toMatch(/вне комнаты/)
+    expect(checks[0].reason).toMatch(/Кровать.*не поместил/)
   })
 
   it('отказывает предмету, торчащему сквозь стену', () => {
@@ -50,7 +50,7 @@ describe('проверка расстановки от ИИ', () => {
     // кровать 160 × 200 у самого края: половина окажется снаружи
     const checks = vetLayout([{ type: 'bed-160', x: 490, y: 200, rot: 0, why: '' }], r, plan)
     expect(checks[0].ok).toBe(false)
-    expect(checks[0].reason).toMatch(/выходит за стены/)
+    expect(checks[0].reason).toMatch(/Кровать.*не поместил/)
   })
 
   it('второй предмет на том же месте отклоняется', () => {
@@ -65,7 +65,7 @@ describe('проверка расстановки от ИИ', () => {
     )
     expect(checks[0].ok).toBe(true)
     expect(checks[1].ok).toBe(false)
-    expect(checks[1].reason).toMatch(/накладывается/)
+    expect(checks[1].reason).toMatch(/Шкаф.*мешает другому/)
   })
 
   it('предмет в створе двери отклоняется', () => {

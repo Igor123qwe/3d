@@ -29,6 +29,8 @@ interface Props {
   aiHint?: string
   onRun: (o: FurnishOptions, progress: (text: string) => void) => Promise<FurnishReport | null>
   onClose: () => void
+  /** «Отменить» в отчёте: убрать расстановку одной отменой */
+  onUndo?: () => void
 }
 
 const readWishes = () => {
@@ -39,7 +41,7 @@ const readWishes = () => {
   }
 }
 
-export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled, aiHint, onRun, onClose }) => {
+export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled, aiHint, onRun, onClose, onUndo }) => {
   const [scope, setScope] = useState<'all' | string>(initialScope)
   const [wishes, setWishes] = useState(readWishes)
   const [replace, setReplace] = useState(false)
@@ -91,7 +93,8 @@ export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled,
         <h2 id="pl-furnish-title">✨ Расставить мебель с ИИ</h2>
         {report ? (
           <>
-            <p>{placed ? `Поставлено предметов: ${placed}. Всё легло одной правкой — Ctrl+Z уберёт разом.` : 'Ничего не встало: проверка отбросила всё предложенное.'}</p>
+            <p>{placed ? `Поставлено предметов: ${placed}. Всё легло одной правкой — кнопка «Отменить» или Ctrl+Z уберёт разом.` : 'Ничего не встало: проверка отбросила всё предложенное.'}</p>
+            {placed > 0 && placed <= 2 && <p className="pl-furnish-warn">Встало совсем мало — модель предложила слишком мало или почти всё не прошло проверку. Посмотрите план и, если не нравится, отмените.</p>}
             {report.zoningFailed && <p className="pl-furnish-warn">Назначения комнат подобрать не вышло ({report.zoningFailed}) — обставлено по их именам.</p>}
             <ul className="pl-furnish-report">
               {report.rooms.map((r) => (
@@ -104,8 +107,19 @@ export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled,
               ))}
             </ul>
             <div className="pl-ask-foot">
+              {placed > 0 && onUndo && (
+                <button
+                  className="pl-btn ghost"
+                  onClick={() => {
+                    onUndo()
+                    onClose()
+                  }}
+                >
+                  Отменить расстановку
+                </button>
+              )}
               <button className="pl-btn primary" onClick={onClose} autoFocus>
-                Готово
+                Оставить
               </button>
             </div>
           </>

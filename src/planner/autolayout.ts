@@ -7,7 +7,7 @@
 import type { AiPlacement } from './aicontract'
 import type { Furniture, Plan, Pt, Room, Wall } from './types'
 import { uid } from './types'
-import { CATALOG_MAP, type CatalogItem } from './catalog'
+import { CATALOG, CATALOG_MAP, type CatalogItem } from './catalog'
 import { furnitureBody, openingGeom } from './checks'
 import { convexOverlap, dist, pointInPoly } from './geometry'
 
@@ -104,6 +104,8 @@ export function vetLayout(
   // мебель, которая уже стоит в этой комнате
   const taken: Pt[][] = plan.furniture.filter((f) => pointInPoly({ x: f.x, y: f.y }, room.polygon)).map(furnitureBody)
 
+  // журнальный стол в санузле геометрию пройдёт, а смысл — нет: только уместные в комнате типы
+  const fitting = new Set(catalogForRoom(room.meta.name, CATALOG).map((c) => c.type))
   const out: PlacementCheck[] = []
   for (const item of items) {
     const cat: CatalogItem | undefined = CATALOG_MAP[item.type]
@@ -111,26 +113,30 @@ export function vetLayout(
       out.push({ item, ok: false, reason: `в каталоге нет типа «${item.type}»` })
       continue
     }
+    if (!fitting.has(item.type)) {
+      out.push({ item, ok: false, reason: `${cat.name}: не к месту в этой комнате` })
+      continue
+    }
     // пояснение идёт в note: подпись на чертеже должна оставаться короткой
     let f: Furniture = { id: uid('f'), type: item.type, x: item.x, y: item.y, w: cat.w, d: cat.d, rot: item.rot, note: item.why || undefined }
     if (!pointInPoly({ x: f.x, y: f.y }, room.polygon)) {
-      out.push({ item, ok: false, reason: 'центр предмета вне комнаты' })
+      out.push({ item, ok: false, reason: `${cat.name}: не поместился в комнате` })
       continue
     }
     f = snapToWall(f, walls, o.snapCm)
     const body = furnitureBody(f)
     if (!insideRoom(body, room, o.outTolerance)) {
-      out.push({ item, ok: false, reason: 'предмет выходит за стены' })
+      out.push({ item, ok: false, reason: `${cat.name}: не поместился в комнате` })
       continue
     }
     const hitsDoor = swings.some((s) => convexOverlap(s, body, 2))
     if (hitsDoor) {
-      out.push({ item, ok: false, reason: 'мешает открыванию двери' })
+      out.push({ item, ok: false, reason: `${cat.name}: мешает двери` })
       continue
     }
     const hitsOther = taken.some((t) => convexOverlap(t, body, 2))
     if (hitsOther) {
-      out.push({ item, ok: false, reason: 'накладывается на другой предмет' })
+      out.push({ item, ok: false, reason: `${cat.name}: мешает другому предмету` })
       continue
     }
     taken.push(body)
