@@ -529,7 +529,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   }, [plan.furniture, topViews, photoMode])
 
   useEffect(() => {
-    if (view3d) setHint('3D-вид: вращайте сцену мышью или пальцем, клик по предмету — выбрать, Delete — удалить, Ctrl+Z — отмена. AR: на Android — «AR через камеру» в Chrome, на iPhone — «AR на iPhone» в Safari')
+    if (view3d) setHint('3D-вид: вращайте сцену мышью или пальцем; клик по предмету — выбрать, тянуть — передвинуть, R — повернуть, Delete — удалить, Ctrl+Z — отмена. AR: на Android — «AR через камеру» в Chrome, на iPhone — «AR на iPhone» в Safari')
   }, [view3d])
 
   // план из ссылки (#mode=ar&plan=...)
@@ -989,6 +989,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           e.preventDefault()
           history.apply((p) => deleteSelection(p, selection))
           setSelection(null)
+          return
+        }
+        if (e.code === 'KeyR' && !ctrl && selection?.kind === 'furniture') {
+          e.preventDefault()
+          history.apply((p) => rotateFurniture(p, selection.id, e.shiftKey ? -90 : 90))
           return
         }
       }
@@ -3895,7 +3900,16 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
 
       {view3d ? (
         <Suspense fallback={<div className="pl-canvas-wrap pl3d-loading">Загружаем 3D…</div>}>
-          <View3D plan={plan} rooms={rooms} selection={selection} onSelect={onSelect} onExit={() => setView3d(false)} onToast={setToast} onShare={shareForPhone} />
+          <View3D
+            plan={plan}
+            rooms={rooms}
+            selection={selection}
+            onSelect={onSelect}
+            onExit={() => setView3d(false)}
+            onToast={setToast}
+            onShare={shareForPhone}
+            onMoveFurniture={(id, x, y) => history.apply((p) => updateFurniture(p, id, { x, y }))}
+          />
         </Suspense>
       ) : (
         <PlannerCanvas

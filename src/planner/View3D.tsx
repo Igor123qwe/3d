@@ -29,6 +29,8 @@ export interface View3DProps {
   onExit: () => void
   onToast: (t: string) => void
   onShare: () => void
+  /** предмет передвинули прямо в 3D: новые координаты в сантиметрах плана */
+  onMoveFurniture?: (id: string, x: number, y: number) => void
 }
 
 interface ThreeState {
@@ -71,7 +73,7 @@ function currentHeading(renderer: THREE.WebGLRenderer): number {
   return yawOf(dir.x, dir.z)
 }
 
-export const View3D: React.FC<View3DProps> = ({ plan, rooms, selection, onSelect, onExit, onToast, onShare }) => {
+export const View3D: React.FC<View3DProps> = ({ plan, rooms, selection, onSelect, onExit, onToast, onShare, onMoveFurniture }) => {
   const wrapRef = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<HTMLDivElement>(null)
   const arControlsRef = useRef<HTMLDivElement>(null)
@@ -96,6 +98,8 @@ export const View3D: React.FC<View3DProps> = ({ plan, rooms, selection, onSelect
   const [busy, setBusy] = useState<string | null>(null)
   const fitted = useRef(false)
   const pointer = useRef<{ x: number; y: number; t: number } | null>(null)
+  /** перетаскивание предмета по полу прямо в 3D */
+  const drag3 = useRef<{ id: string; obj: THREE.Object3D; offset: THREE.Vector3; moved: boolean } | null>(null)
 
   useEffect(() => {
     anchorRef.current = findAnchor(plan, rooms)
@@ -441,13 +445,71 @@ export const View3D: React.FC<View3DProps> = ({ plan, rooms, selection, onSelect
   }, [arUi.active])
 
   // ---------- выбор кликом ----------
+  /** луч из точки экрана */
+  const rayAt = (e: { clientX: number; clientY: number }, t: ThreeState): THREE.Raycaster => {
+    const rect = t.renderer.domElement.getBoundingClientRect()
+    const ndc = new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1)
+    const ray = new THREE.Raycaster()
+    ray.setFromCamera(ndc, t.camera)
+    return ray
+  }
+  /** предмет под курсором: группа item с furnitureId */
+  const pickItem = (e: { clientX: number; clientY: number }, t: ThreeState): THREE.Object3D | null => {
+    const furn = t.group?.getObjectByName('furniture')
+    if (!furn) return null
+    for (const h of rayAt(e, t).intersectObjects(furn.children, true)) {
+      let o: THREE.Object3D | null = h.object
+      while (o && !o.userData?.furnitureId) o = o.parent
+      if (o?.userData?.furnitureId) return o
+    }
+    return null
+  }
+  /** точка пола под курсором в координатах группы плана */
+  const floorAt = (e: { clientX: number; clientY: number }, t: ThreeState): THREE.Vector3 | null => {
+    const hit = new THREE.Vector3()
+    if (!rayAt(e, t).ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), hit)) return null
+    return t.group ? t.group.worldToLocal(hit) : hit
+  }
+
   const onPointerDown = (e: React.PointerEvent) => {
     pointer.current = { x: e.clientX, y: e.clientY, t: Date.now() }
+    const t = three.current
+    if (!t?.group || xr.current.active || walkRef.current.active || e.button !== 0 || !onMoveFurniture) return
+    // предмет под курсором берём в руку: тянем по полу, орбита на это время выключена
+    const item = pickItem(e, t)
+    const at = item ? floorAt(e, t) : null
+    if (!item || !at) return
+    drag3.current = { id: item.userData.furnitureId as string, obj: item, offset: item.position.clone().sub(at), moved: false }
+    t.controls.enabled = false
+    highlightSelection(t.group, null)
+    ;(e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId)
+  }
+  const onPointerMove = (e: React.PointerEvent) => {
+    const d = drag3.current
+    const t = three.current
+    if (!d || !t) return
+    const at = floorAt(e, t)
+    if (!at) return
+    const nx = at.x + d.offset.x
+    const nz = at.z + d.offset.z
+    if (!d.moved && Math.hypot(nx - d.obj.position.x, nz - d.obj.position.z) > 0.02) d.moved = true
+    if (d.moved) d.obj.position.set(nx, d.obj.position.y, nz)
   }
   const onPointerUp = (e: React.PointerEvent) => {
     const p = pointer.current
     pointer.current = null
     const t = three.current
+    const d = drag3.current
+    drag3.current = null
+    if (d && t) {
+      t.controls.enabled = !walkRef.current.active
+      if (d.moved) {
+        onMoveFurniture?.(d.id, Math.round(d.obj.position.x / M), Math.round(d.obj.position.z / M))
+        if (selRef.current?.kind !== 'furniture' || selRef.current.id !== d.id) onSelect({ kind: 'furniture', id: d.id })
+        return
+      }
+      if (t.group) highlightSelection(t.group, selId())
+    }
     if (!p || !t?.group || xr.current.active) return
     if (Math.hypot(e.clientX - p.x, e.clientY - p.y) > 6 || Date.now() - p.t > 600) return
     const rect = t.renderer.domElement.getBoundingClientRect()
@@ -613,7 +675,7 @@ export const View3D: React.FC<View3DProps> = ({ plan, rooms, selection, onSelect
   )
 
   return (
-    <div className="pl3d-wrap" ref={wrapRef} onPointerDown={onPointerDown} onPointerUp={onPointerUp}>
+    <div className="pl3d-wrap" ref={wrapRef} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}>
       <div className="pl3d-overlay" ref={overlayRef}>
         {!arUi.active && (
           <>
