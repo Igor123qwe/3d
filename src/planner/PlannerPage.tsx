@@ -62,13 +62,14 @@ import { modelKey } from './polyhaven'
 import { Icon, type IconName } from './icons'
 import { Dropdown, MenuChoice, MenuGroup, MenuItem, MenuSep } from './Menu'
 import { StartDialog } from './StartDialog'
+import { ProjectsDialog } from './ProjectsDialog'
+import { createProject, currentProjectId, deleteProject, duplicateProject, listProjects, loadProject, newProjectId, renameProject, saveProject, setCurrentProject } from './projects'
 import { AskDialog, type AskOption } from './AskDialog'
 import { isEditable, useFileIntake } from './intake'
 import './planner.css'
 
 const View3D = lazy(() => import('./View3D'))
 
-const LS_PLAN = 'boop.planner.plan.v1'
 const LS_UI = 'boop.planner.ui.v1'
 
 const DEFAULT_LAYERS: Layers = { grid: true, underlay: true, rooms: true, furniture: true, electric: true, dims: true, ergo: false, labels: true }
@@ -135,23 +136,13 @@ const loadPrefs = (): UiPrefs => {
 }
 
 /** был ли в этом браузере сохранённый план — чтобы не затирать работу планом из ссылки */
-const hasSavedPlan = (): boolean => {
-  try {
-    return !!localStorage.getItem(LS_PLAN)
-  } catch {
-    return false
-  }
-}
+const hasSavedPlan = (): boolean => listProjects().length > 0
 
 const loadInitialPlan = (): Plan => {
-  try {
-    const raw = localStorage.getItem(LS_PLAN)
-    if (raw) return normalizePlan(JSON.parse(raw))
-  } catch {
-    /* ignore */
-  }
+  const id = currentProjectId()
+  const p = id ? loadProject(id) : null
   // без сохранённого плана показываем стартовый экран, а под ним — чистый лист
-  return TEMPLATES[0].build()
+  return p ?? TEMPLATES[0].build()
 }
 
 type PanelTab = 'props' | 'catalog' | 'electric' | 'checks' | 'help'
@@ -357,22 +348,24 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const badItems = useMemo(() => new Set(check.issues.filter((i) => i.level === 'error' && i.target?.kind === 'furniture').map((i) => i.target!.id)), [check])
   const problems = check.issues.filter((i) => i.level !== 'info').length
 
-  // автосохранение
+  // автосохранение — в текущий проект списка «Мои проекты»
   const saveFailed = useRef(false)
+  const projectId = useRef<string | null>(currentProjectId())
+  const [projectsOpen, setProjectsOpen] = useState(false)
+  const [projectsTick, setProjectsTick] = useState(0)
+  const saveNow = (p: Plan) => {
+    if (!projectId.current) projectId.current = newProjectId()
+    const rs = buildRooms(p).rooms
+    return saveProject(projectId.current, p, { rooms: rs.length, areaM2: rs.reduce((s, r) => s + r.area, 0) })
+  }
   useEffect(() => {
     setSaveState('saving')
     const t = setTimeout(() => {
-      try {
-        try {
-          localStorage.setItem(LS_PLAN, JSON.stringify(plan))
-        } catch (e) {
-          // исходное фото рядом с очищенным удваивает размер: без него план ещё может поместиться
-          if (!plan.underlay?.original) throw e
-          localStorage.setItem(LS_PLAN, JSON.stringify({ ...plan, underlay: { ...plan.underlay, original: undefined } }))
-        }
+      if (saveNow(plan)) {
         saveFailed.current = false
         setSaveState('saved')
-      } catch {
+        setProjectsTick((n) => n + 1)
+      } else {
         // чаще всего это переполнение хранилища из-за картинки-подложки
         setSaveState('error')
         if (!saveFailed.current) {
@@ -382,7 +375,27 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       }
     }, 400)
     return () => clearTimeout(t)
-  }, [plan])
+  }, [plan]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** открыть другой проект из списка: текущий дописывается, история начинается заново */
+  const switchProject = (id: string) => {
+    if (id === projectId.current) return
+    const p = loadProject(id)
+    if (!p) {
+      setToast('Проект не читается — возможно, хранилище браузера очищено')
+      return
+    }
+    saveNow(plan)
+    projectId.current = id
+    setCurrentProject(id)
+    history.replace(p)
+    untouched.current = null
+    setSelection(null)
+    setStart(false)
+    setProjectsOpen(false)
+    setTimeout(() => canvasRef.current?.fit(), 30)
+    setToast(`Открыт проект «${p.name}»`)
+  }
   useEffect(() => {
     try {
       localStorage.setItem(LS_UI, JSON.stringify({ layers, unit, ortho, wallThickness, mode, wallRef }))
@@ -694,9 +707,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     return !u || u.walls !== plan.walls || u.openings !== plan.openings || u.furniture !== plan.furniture || u.dims !== plan.dims
   }
 
-  /** новый проект (из шаблона или схемы) — через историю, чтобы Ctrl+Z вернул прежний */
+  /** новый проект (из шаблона или схемы): прежний остаётся в «Моих проектах» */
   const openFresh = (next: Plan) => {
-    history.apply(() => next)
+    if (!isEmptyPlan(plan)) saveNow(plan)
+    projectId.current = createProject(next)
+    history.replace(next)
     untouched.current = next
     setSelection(null)
     setMenu(null)
@@ -707,17 +722,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const newFromTemplate = (key: string) => {
     const t = TEMPLATES.find((x) => x.key === key)
     if (!t) return
-    const go = () => openFresh(t.build())
-    if (!hasOwnWork()) return go()
-    setAsk({
-      title: 'Заменить текущий план?',
-      text: `Проект «${plan.name}» закроется. Ctrl+Z вернёт его, а Ctrl+S заранее сохранит в файл.`,
-      options: [{ key: 'replace', label: `Открыть «${t.name}»`, hint: 'вместо текущего плана', icon: 'template', primary: true }],
-      onPick: () => {
-        setAsk(null)
-        go()
-      },
-    })
+    // прежний проект никуда не денется: он в «Моих проектах»
+    openFresh(t.build())
+    if (hasOwnWork()) setToast(`Новый проект «${t.name}». Прежний — в «Проект» → «Мои проекты»`)
   }
 
   // экспорт: рендерим сцену в скрытый SVG и сериализуем его
@@ -3408,6 +3415,15 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                     setStart(true)
                   }}
                 />
+                <MenuItem
+                  icon="history"
+                  label="Мои проекты…"
+                  hint={`в этом браузере: ${listProjects().length}`}
+                  onSelect={() => {
+                    setMenu(null)
+                    setProjectsOpen(true)
+                  }}
+                />
                 <MenuSep />
                 <MenuGroup title="Загрузить" />
                 <MenuItem
@@ -3705,6 +3721,45 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         onPickFile={() => anyInput.current?.click()}
         onPaste={() => void intake.pasteFromClipboard()}
       />
+      {projectsOpen && (
+        <ProjectsDialog
+          key={projectsTick}
+          projects={listProjects()}
+          currentId={projectId.current}
+          onOpen={switchProject}
+          onNew={() => {
+            setProjectsOpen(false)
+            setStart(true)
+          }}
+          onRename={(id, name) => {
+            renameProject(id, name)
+            if (id === projectId.current) history.silent((p) => ({ ...p, name }))
+            setProjectsTick((n) => n + 1)
+          }}
+          onDuplicate={(id) => {
+            saveNow(plan)
+            const nid = duplicateProject(id)
+            if (nid) switchProject(nid)
+          }}
+          onDelete={(id) => {
+            deleteProject(id)
+            if (id !== projectId.current) {
+              setProjectsTick((n) => n + 1)
+              return
+            }
+            const next = listProjects()[0]
+            if (next) switchProject(next.id)
+            else {
+              projectId.current = null
+              history.replace(TEMPLATES[0].build())
+              setSelection(null)
+              setProjectsOpen(false)
+              setStart(true)
+            }
+          }}
+          onClose={() => setProjectsOpen(false)}
+        />
+      )}
       {ask && (
         <AskDialog
           title={ask.title}

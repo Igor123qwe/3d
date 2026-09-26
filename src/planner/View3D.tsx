@@ -5,6 +5,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { USDZExporter } from 'three/examples/jsm/exporters/USDZExporter.js'
 import type { Plan, Room, Selection } from './types'
 import { buildPlanGroup, disposeGroup, findAnchor, highlightSelection, yawOf, M, type AnchorInfo, type WallsMode } from './scene3d'
+import { downloadBlob } from './exporters'
 
 export interface View3DProps {
   plan: Plan
@@ -493,6 +494,22 @@ export const View3D: React.FC<View3DProps> = ({ plan, rooms, selection, onSelect
               </button>
               <button className="pl-btn" onClick={() => fitCamera('top')}>
                 Сверху
+              </button>
+              <button
+                className="pl-btn"
+                title="Сохранить картинку 3D-вида"
+                onClick={() => {
+                  const t = three.current
+                  if (!t) return
+                  // кадр рендерится прямо перед снимком: буфер после кадра не хранится
+                  t.renderer.render(t.scene, t.camera)
+                  t.renderer.domElement.toBlob((b) => {
+                    if (b) downloadBlob(`${plan.name || 'план'} 3D.png`, b)
+                    else onToast('Не удалось сделать снимок')
+                  }, 'image/png')
+                }}
+              >
+                Снимок
               </button>
               {wallsBtn}
               {arSupported && (
