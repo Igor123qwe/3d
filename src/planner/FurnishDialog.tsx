@@ -3,6 +3,7 @@
 // отчёт по комнатам: что поставлено, что отброшено проверкой и почему.
 import React, { useEffect, useRef, useState } from 'react'
 import { ROOM_PURPOSES } from './aicontract'
+import { useFocusTrap } from './focus'
 import type { FurnishOptions, FurnishReport } from './furnish'
 
 const LS_WISHES = 'boop.planner.wishes'
@@ -49,6 +50,8 @@ export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled,
   const [report, setReport] = useState<FurnishReport | null>(null)
   const [error, setError] = useState('')
   const area = useRef<HTMLTextAreaElement>(null)
+  const box = useRef<HTMLDivElement>(null)
+  useFocusTrap(box, area)
 
   useEffect(() => {
     area.current?.focus()
@@ -84,7 +87,7 @@ export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled,
   const placed = report?.rooms.reduce((s, r) => s + r.placed, 0) ?? 0
   return (
     <div className="pl-ask-backdrop" onClick={() => !busy && onClose()}>
-      <div className="pl-ask pl-furnish" role="dialog" aria-modal="true" aria-labelledby="pl-furnish-title" onClick={(e) => e.stopPropagation()}>
+      <div ref={box} className="pl-ask pl-furnish" role="dialog" aria-modal="true" aria-labelledby="pl-furnish-title" onClick={(e) => e.stopPropagation()}>
         <h2 id="pl-furnish-title">✨ Расставить мебель с ИИ</h2>
         {report ? (
           <>

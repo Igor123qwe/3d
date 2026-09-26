@@ -8,6 +8,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import type { Layers, Plan } from './types'
 import type { Template } from './templates'
 import { buildRooms } from './rooms'
+import { useFocusTrap } from './focus'
 import { runChecks } from './checks'
 import { Scene, planBounds } from './Scene'
 import { fmtArea } from './geometry'
@@ -63,6 +64,8 @@ const Thumb: React.FC<{ plan: Plan }> = ({ plan }) => {
 export const StartDialog: React.FC<Props> = ({ open, canClose, templates, recent, aiEnabled, onClose, onTemplate, onPickFile, onPaste }) => {
   const [over, setOver] = useState(false)
   const zoneRef = useRef<HTMLDivElement>(null)
+  const box = useRef<HTMLDivElement>(null)
+  useFocusTrap(box, undefined, open)
   // шаблоны строим один раз: их геометрия не меняется
   const built = useMemo(() => templates.filter((t) => t.key !== 'empty').map((t) => ({ t, plan: t.build() })), [templates])
 
@@ -79,7 +82,7 @@ export const StartDialog: React.FC<Props> = ({ open, canClose, templates, recent
 
   return (
     <div className="pl-start-backdrop" onClick={canClose ? onClose : undefined}>
-      <div className="pl-start" role="dialog" aria-modal="true" aria-labelledby="pl-start-title" onClick={(e) => e.stopPropagation()}>
+      <div ref={box} className="pl-start" role="dialog" aria-modal="true" aria-labelledby="pl-start-title" onClick={(e) => e.stopPropagation()}>
         <header className="pl-start-head">
           <div>
             <h1 id="pl-start-title">С чего начнём?</h1>

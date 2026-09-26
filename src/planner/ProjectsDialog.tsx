@@ -1,6 +1,7 @@
 // «Мои проекты»: список планов в этом браузере — открыть, переименовать,
 // скопировать, удалить. Текущий проект отмечен.
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
+import { useFocusTrap } from './focus'
 import { Icon } from './icons'
 import { fmtArea } from './geometry'
 import { whenText, type ProjectMeta } from './projects'
@@ -19,6 +20,8 @@ interface Props {
 export const ProjectsDialog: React.FC<Props> = ({ projects, currentId, onOpen, onNew, onRename, onDuplicate, onDelete, onClose }) => {
   const [editing, setEditing] = useState<{ id: string; name: string } | null>(null)
   const [confirm, setConfirm] = useState<string | null>(null)
+  const box = useRef<HTMLDivElement>(null)
+  useFocusTrap(box)
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -38,7 +41,7 @@ export const ProjectsDialog: React.FC<Props> = ({ projects, currentId, onOpen, o
 
   return (
     <div className="pl-ask-backdrop" onClick={onClose}>
-      <div className="pl-ask pl-projects" role="dialog" aria-modal="true" aria-labelledby="pl-projects-title" onClick={(e) => e.stopPropagation()}>
+      <div ref={box} className="pl-ask pl-projects" role="dialog" aria-modal="true" aria-labelledby="pl-projects-title" onClick={(e) => e.stopPropagation()}>
         <h2 id="pl-projects-title">Мои проекты</h2>
         <div className="pl-ask-text">Планы хранятся в этом браузере. Чтобы перенести на другое устройство — «Сохранить план в файл» или «Ссылка для телефона».</div>
         {projects.length === 0 && <div className="pl-note">Пока пусто.</div>}

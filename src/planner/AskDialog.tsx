@@ -3,6 +3,7 @@
 // и HomeByMe, когда новый файл может затереть открытый проект.
 import React, { useEffect, useRef } from 'react'
 import { Icon, type IconName } from './icons'
+import { useFocusTrap } from './focus'
 
 export interface AskOption {
   key: string
@@ -26,6 +27,8 @@ interface Props {
 
 export const AskDialog: React.FC<Props> = ({ title, text, options, cancelLabel = 'Отмена', passive, onPick, onCancel }) => {
   const primary = useRef<HTMLButtonElement>(null)
+  const box = useRef<HTMLDivElement>(null)
+  useFocusTrap(box, primary)
   useEffect(() => {
     primary.current?.focus()
     const onKey = (e: KeyboardEvent) => {
@@ -38,7 +41,7 @@ export const AskDialog: React.FC<Props> = ({ title, text, options, cancelLabel =
   const primaryIndex = Math.max(0, options.findIndex((o) => o.primary))
   return (
     <div className={`pl-ask-backdrop ${passive ? 'passive' : ''}`} onClick={passive ? undefined : onCancel}>
-      <div className="pl-ask" role="dialog" aria-modal="true" aria-labelledby="pl-ask-title" onClick={(e) => e.stopPropagation()}>
+      <div ref={box} className="pl-ask" role="dialog" aria-modal="true" aria-labelledby="pl-ask-title" onClick={(e) => e.stopPropagation()}>
         <h2 id="pl-ask-title">{title}</h2>
         {text && <div className="pl-ask-text">{text}</div>}
         <div className="pl-ask-options">

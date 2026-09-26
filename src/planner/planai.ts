@@ -19,7 +19,7 @@ import { sizeFromText } from './aicontract'
 import type { Opening, Plan, Pt, RoomMeta, Underlay, Wall } from './types'
 import { uid } from './types'
 import { MIN_WALL_LENGTH, WALL_THICKNESSES } from './ops'
-import { buildRooms } from './rooms'
+import { buildRooms, nameByArea } from './rooms'
 import { bboxOf, closestOnSeg, dist, lerp, norm, pointInPoly, sub } from './geometry'
 import { canRebuildFrom, DEFAULT_RECONSTRUCT, pointOnSide, reconstructFromRooms, scaleSamplesFromRooms, type AreaFit } from './reconstruct'
 import { detectOpenings, flattenLabelledSteps, pointOnOutline, wallsFromPicture } from './picture'
@@ -721,6 +721,20 @@ export function applyAiPlan(plan: Plan, result: ConvertResult): ApplyResult {
   }
   const { rooms } = buildRooms(next)
   if (!rooms.length) return { plan: next, furnitureDropped: 0 }
+  // «Помещение 3» и номера БТИ («5ж», «1», «6») — не имена: назначение по площади, номер с плана — в скобках
+  const taken = new Set(rooms.map((r) => r.meta.name).filter((n) => !GENERIC_NAME.test(n)))
+  const metas = next.rooms.map((m) => {
+    if (!GENERIC_NAME.test(m.name)) return m
+    const room = rooms.find((r) => r.meta.id === m.id)
+    if (!room) return m
+    const base = nameByArea(room.area, taken)
+    taken.add(base)
+    const bti = /^Помещение/.test(m.name) ? '' : ` (${m.name})`
+    return { ...m, name: `${base}${bti}` }
+  })
   const kept = plan.furniture.filter((f) => rooms.some((r) => pointInPoly({ x: f.x, y: f.y }, r.polygon)))
-  return { plan: { ...next, furniture: kept }, furnitureDropped: plan.furniture.length - kept.length }
+  return { plan: { ...next, rooms: metas, furniture: kept }, furnitureDropped: plan.furniture.length - kept.length }
 }
+
+/** имя-заглушка или номер помещения с плана БТИ: «Помещение 3», «5ж», «1», «6», «II» */
+const GENERIC_NAME = /^(Помещение\s*\d+|\d+\s*[а-яё]?|[IVX]+)$/i

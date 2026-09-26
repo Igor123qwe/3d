@@ -1065,7 +1065,9 @@
     max-height: 44vh;
   }
   .pl-panel.closed {
-    max-height: 40px;
+    /* ровно высота вкладок: свёрнутая панель не наезжает на статус */
+    max-height: 54px;
+    overflow: hidden;
   }
   .pl-tab-toggle {
     display: block;

@@ -709,6 +709,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
 
   /** новый проект (из шаблона или схемы): прежний остаётся в «Моих проектах» */
   const openFresh = (next: Plan) => {
+    setToast(null)
     if (!isEmptyPlan(plan)) saveNow(plan)
     projectId.current = createProject(next)
     history.replace(next)
@@ -3637,7 +3638,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       )}
 
       <aside className={`pl-panel ${panelOpen ? 'open' : 'closed'}`}>
-        <div className="pl-panel-tabs">
+        <div className="pl-panel-tabs" role="tablist" aria-label="Панель">
           {(
             [
               ['props', 'Свойства', 'list'],
@@ -3648,6 +3649,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           ).map(([k, name, icon]) => (
             <button
               key={k}
+              role="tab"
+              aria-selected={panel === k}
               className={`pl-tab ${panel === k ? 'active' : ''}`}
               onClick={() => {
                 if (k === 'catalog' && mode !== 'furnish') switchMode('furnish')
@@ -3662,7 +3665,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
               {k === 'checks' && problems > 0 && <span className="pl-badge">{problems}</span>}
             </button>
           ))}
-          <button className="pl-tab pl-tab-toggle" onClick={() => setPanelOpen((o) => !o)} aria-label="Свернуть панель">
+          <button className="pl-tab pl-tab-toggle" onClick={() => setPanelOpen((o) => !o)} aria-label={panelOpen ? 'Свернуть панель' : 'Развернуть панель'} aria-expanded={panelOpen}>
             {panelOpen ? '▾' : '▴'}
           </button>
         </div>

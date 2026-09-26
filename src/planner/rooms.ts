@@ -171,7 +171,7 @@ function cleanFace(face: Face): Face | null {
 const DEFAULT_NAMES = ['Гостиная', 'Спальня', 'Кухня', 'Детская', 'Кабинет']
 
 /** имя новой комнаты по площади (м²) с учётом уже занятых имён */
-function defaultName(areaM2: number, taken: Set<string>): string {
+export function nameByArea(areaM2: number, taken: Set<string>): string {
   const pick = (candidates: string[]) => {
     for (const c of candidates) if (!taken.has(c)) return c
     const b = candidates[0]
@@ -209,7 +209,7 @@ export function buildRooms(plan: Plan): { rooms: Room[]; metas: RoomMeta[] } {
       // занятыми считаем только имена уже найденных комнат: метаданные исчезнувших
       // комнат не должны превращать следующую «Гостиную» в «Гостиную 2»
       const taken = new Set(rooms.map((r) => r.meta.name))
-      meta = { id: uid('room'), anchor, name: defaultName(areaM2, taken), floor: areaM2 < 5 ? 'tile' : 'laminate' }
+      meta = { id: uid('room'), anchor, name: nameByArea(areaM2, taken), floor: areaM2 < 5 ? 'tile' : 'laminate' }
       metas.push(meta)
     }
     used.add(meta.id)

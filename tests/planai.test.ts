@@ -503,3 +503,24 @@ describe('место вдоль стены — из вырезки в рамку
     expect(got.openings![0].at).toBe(0)
   })
 })
+
+describe('имена комнат после распознавания', () => {
+  it('«Помещение N» и номера БТИ получают назначение по площади, номер с плана — в скобках', async () => {
+    const { applyAiPlan } = await import('../src/planner/planai')
+    const { addRect } = await import('../src/planner/ops')
+    const { buildRooms } = await import('../src/planner/rooms')
+    const { emptyPlan } = await import('../src/planner/types')
+    const p0 = addRect(emptyPlan(), { x: 0, y: 0 }, { x: 410, y: 410 }, 10)
+    const p1 = addRect(p0, { x: 410, y: 0 }, { x: 610, y: 210 }, 10)
+    const { metas, rooms } = buildRooms(p1)
+    const big = metas.find((m) => rooms.find((r) => r.meta.id === m.id)!.area > 10)!
+    const small = metas.find((m) => m.id !== big.id)!
+    const result = { walls: p1.walls, openings: [], rooms: [{ ...big, name: '5ж' }, { ...small, name: 'Помещение 2' }], underlay: undefined } as never
+    const { plan } = applyAiPlan(p1, result)
+    const names = plan.rooms.map((m) => m.name).sort()
+    expect(names).toEqual(['Гостиная (5ж)', 'Санузел'])
+    // настоящее имя не трогаем
+    const { plan: kept } = applyAiPlan(p1, { ...result, rooms: [{ ...big, name: 'Кухня' }, { ...small, name: 'Санузел' }] } as never)
+    expect(kept.rooms.map((m) => m.name).sort()).toEqual(['Кухня', 'Санузел'])
+  })
+})
