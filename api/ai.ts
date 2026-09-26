@@ -1,6 +1,6 @@
 // Состояние ИИ: включён ли, какие модели на какую задачу и сколько потрачено.
 // Ключ наружу не отдаётся никогда — только факт его наличия.
-import { aiConfig, chainFor, clientIp, fail, json, rateLimit, specFor, spentToday, TASK_NAMES } from './_lib'
+import { aiConfig, chainFor, clientIp, fail, json, rateLimit, resolveChain, specFor, spentToday, TASK_NAMES } from './_lib'
 
 export const config = { runtime: 'edge' }
 
@@ -25,12 +25,14 @@ export default async function handler(req: Request): Promise<Response> {
   const spent = spentToday()
   // подсказка, почему ключа нет: её кладёт плагин разработки, прочитав .env
   const hint = !cfg && process.env.AI_ENV_HINT ? process.env.AI_ENV_HINT : undefined
+  // цепочки, сверенные с роутером: какие модели на самом деле ответят
+  const chains = await Promise.all(TASK_NAMES.map((t) => (cfg ? resolveChain(cfg, t) : Promise.resolve(chainFor(t)))))
   return json({
     enabled: !!cfg,
     hint,
-    tasks: TASK_NAMES.map((t) => {
+    tasks: TASK_NAMES.map((t, i) => {
       const spec = specFor(t)
-      return { task: t, about: spec.about, vision: spec.vision, maxTokens: spec.maxTokens, models: chainFor(t) }
+      return { task: t, about: spec.about, vision: spec.vision, maxTokens: spec.maxTokens, models: chains[i] }
     }),
     spentToday: cfg ? { rub: Number(spent.rub.toFixed(4)), calls: spent.calls, limitRub: cfg.dailyLimitRub } : null,
   })

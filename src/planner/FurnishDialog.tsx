@@ -3,7 +3,7 @@
 // отчёт по комнатам: что поставлено, что отброшено проверкой и почему.
 import React, { useEffect, useRef, useState } from 'react'
 import { ROOM_PURPOSES } from './aicontract'
-import { friendlyAiError } from './ai'
+import { shortModel, friendlyAiError } from './ai'
 import { useFocusTrap } from './focus'
 import type { FurnishOptions, FurnishReport } from './furnish'
 
@@ -32,6 +32,8 @@ interface Props {
   onClose: () => void
   /** «Отменить» в отчёте: убрать расстановку одной отменой */
   onUndo?: () => void
+  /** какие модели ответят: цепочки, сверенные сервером с роутером */
+  models?: { best?: string[]; fast?: string[] }
 }
 
 /** выбор модели запоминается: тщательно — сильная, быстро — дешёвая */
@@ -52,7 +54,7 @@ const readWishes = () => {
   }
 }
 
-export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled, aiHint, onRun, onClose, onUndo }) => {
+export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled, aiHint, onRun, onClose, onUndo, models }) => {
   const [scope, setScope] = useState<'all' | string>(initialScope)
   const [wishes, setWishes] = useState(readWishes)
   const [replace, setReplace] = useState(false)
@@ -127,6 +129,12 @@ export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled,
                   {r.error ? !commonError && <div className="pl-furnish-warn">Не вышло: {friendlyAiError(r.error)}</div> : <div>{r.summary}</div>}
                   {r.why && <small>{r.why}</small>}
                   {r.idea && <small className="pl-furnish-idea">Замысел: {r.idea}</small>}
+                  {r.model && (
+                    <small className="pl-furnish-model">
+                      Расставила {shortModel(r.model)}
+                      {r.tried?.length ? ` — до неё не ответили: ${r.tried.map((t) => friendlyAiError(`ни одна модель не справилась. ${t}`).replace(/^ни одна модель не ответила: /, '')).join('; ')}` : ''}
+                    </small>
+                  )}
                 </li>
               ))}
             </ul>
@@ -209,7 +217,13 @@ export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled,
                 </button>
               </div>
             </div>
-            <p className="pl-furnish-note">{quality === 'best' ? 'Сильная модель: сначала продумывает замысел комнаты, потом расставляет. Около 3–4 ₽ за комнату, до пары минут.' : 'Дешёвая модель: быстро и почти бесплатно, но продумывает меньше.'}</p>
+            <p className="pl-furnish-note">
+              {quality === 'best' ? 'Сильная модель: сначала продумывает замысел комнаты, потом расставляет. Около 3–4 ₽ за комнату, до пары минут.' : 'Дешёвая модель: быстро и почти бесплатно, но продумывает меньше.'}
+              {(() => {
+                const chain = quality === 'best' ? models?.best : models?.fast
+                return chain?.length ? ` Модель: ${shortModel(chain[0])}${chain.length > 1 ? `, запасная — ${shortModel(chain[1])}` : ''}.` : ''
+              })()}
+            </p>
             <label className="pl-furnish-check">
               <input type="checkbox" checked={replace} onChange={() => setReplace((v) => !v)} disabled={!!busy} />
               <span>Убрать мебель, что уже стоит (иначе ИИ дополнит расстановку и не тронет её). Электрика остаётся</span>

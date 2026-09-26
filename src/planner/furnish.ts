@@ -46,6 +46,9 @@ export interface FurnishRoomReport {
   why?: string
   /** замысел комнаты от модели */
   idea?: string
+  /** какая модель расставила и какие до неё не ответили */
+  model?: string
+  tried?: string[]
   error?: string
 }
 
@@ -188,7 +191,7 @@ export async function furnish(plan: Plan, rooms: Room[], o: FurnishOptions, deps
     const checks = vetLayout(a.res.items, r, acc, { purpose: p.purpose })
     acc = applyLayout(acc, checks)
     const placed = checks.filter((c) => c.ok).length
-    report.push({ ...base, placed, rejected: checks.length - placed, summary: layoutSummary(checks), idea: a.res.plan })
+    report.push({ ...base, placed, rejected: checks.length - placed, summary: layoutSummary(checks), idea: a.res.plan, model: a.res.ai?.model, tried: a.res.ai?.tried })
     // имя меняем только если в комнате что-то встало: пустая «Детская» вводит в заблуждение
     if (o.rename && o.scope === 'all' && placed > 0 && p.purpose !== r.meta.name && !isFixedPurpose(r.meta.name)) acc = updateRoomMeta(acc, r.meta.id, { name: p.purpose })
   })

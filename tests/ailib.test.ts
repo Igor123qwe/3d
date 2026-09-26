@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { addSpent, askJson, chainFor, chainFrom, rateLimit, spentToday, type AiConfig } from '../api/_lib'
+import { addSpent, askJson, chainFor, chainFrom, rateLimit, resetModelCache, resolveChain, spentToday, type AiConfig } from '../api/_lib'
 
 const cfg: AiConfig = { base: 'https://router.test/v1', key: 'sk-secret-do-not-leak', dailyLimitRub: 0 }
 
@@ -181,5 +181,52 @@ describe('счётчик запросов по назначению', () => {
     expect(rateLimit(ip, { limit: 2, windowMs: 60_000, bucket: 'layout' })).toBe(false)
     // а у фрагментов плана — нет
     expect(rateLimit(ip, { limit: 200, windowMs: 60_000, bucket: 'plan-part' })).toBe(true)
+  })
+})
+
+describe('модели, которых нет у роутера', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    resetModelCache()
+    delete process.env.AI_MODEL_LAYOUT_PRO
+  })
+
+  /** роутер: список моделей и ответ на запрос */
+  function router(ids: string[], answer: (model: string) => Response | Promise<Response>) {
+    const asked: string[] = []
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/models')) return new Response(JSON.stringify({ data: ids.map((id) => ({ id })) }), { status: 200 })
+      const body = JSON.parse(String(init?.body)) as { model: string; temperature?: number }
+      asked.push(`${body.model}${body.temperature === undefined ? ' без температуры' : ''}`)
+      return answer(body.model)
+    })
+    return asked
+  }
+
+  it('нет нужной — берётся ближайшая того же семейства, а неизвестные пропускаются', async () => {
+    resetModelCache()
+    process.env.AI_MODEL_LAYOUT_PRO = 'anthropic/claude-sonnet-5,vendor/unknown-model,deepseek/deepseek-v4-flash'
+    router(['anthropic/claude-sonnet-4.5', 'anthropic/claude-sonnet-4', 'deepseek/deepseek-v4-flash'], () => reply('{}'))
+    expect(await resolveChain(cfg, 'layout_pro')).toEqual(['anthropic/claude-sonnet-4.5', 'deepseek/deepseek-v4-flash'])
+  })
+
+  it('список не получили — цепочка как есть', async () => {
+    resetModelCache()
+    process.env.AI_MODEL_LAYOUT_PRO = 'anthropic/claude-sonnet-5,deepseek/deepseek-v4-flash'
+    vi.stubGlobal('fetch', async () => new Response('нет', { status: 500 }))
+    expect(await resolveChain(cfg, 'layout_pro')).toEqual(['anthropic/claude-sonnet-5', 'deepseek/deepseek-v4-flash'])
+  })
+
+  it('модель не уложилась во время — так и сказано, а не «отменено»; gpt-5 — без температуры', async () => {
+    resetModelCache()
+    process.env.AI_MODEL_LAYOUT_PRO = 'openai/gpt-5-mini,deepseek/deepseek-v4-flash'
+    const asked = router(['openai/gpt-5-mini', 'deepseek/deepseek-v4-flash'], (model) => {
+      if (model === 'openai/gpt-5-mini') return new Response('{}', { status: 400 })
+      return reply('{"ok":true}')
+    })
+    const r = await askJson<{ ok: boolean }>({ ...cfg }, { task: 'layout_pro', messages: [{ role: 'user', content: 'x' }], check: (d) => d as { ok: boolean } })
+    expect(r.model).toBe('deepseek/deepseek-v4-flash')
+    expect(r.tried[0]).toMatch(/gpt-5-mini: роутер отказал \(400\)/)
+    expect(asked[0]).toBe('openai/gpt-5-mini без температуры')
   })
 })

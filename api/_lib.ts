@@ -64,7 +64,7 @@ const TASKS: Record<AiTask, TaskSpec> = {
   layout_pro: {
     vision: false,
     maxTokens: 6000,
-    timeoutMs: 150_000,
+    timeoutMs: 180_000,
     chain: ['anthropic/claude-sonnet-5', 'openai/gpt-5-mini', 'deepseek/deepseek-v4-flash'],
     about: 'Тщательно расставляет мебель: сильная модель продумывает зоны, проходы и свет',
   },
@@ -217,9 +217,68 @@ export interface AiAnswer<T> {
  * Цепочка идёт от дешёвой модели к дорогой: следующая берётся, только если
  * предыдущая упала или вернула то, что не прошло проверку.
  */
+// ---------- какие модели есть у роутера ----------
+// Имя модели в цепочке может не совпасть с тем, что знает роутер (переименовали,
+// убрали, у другого шлюза свои имена). Тогда запрос уходит в пустоту, а человек
+// видит «ничего не встало». Список моделей спрашиваем раз в полчаса и цепочку
+// сверяем с ним: чего нет — заменяем ближайшей из того же семейства или пропускаем.
+
+let modelCache: { base: string; at: number; ids: Set<string> } | null = null
+const MODEL_TTL = 30 * 60_000
+
+/** для проверок: забыть список моделей */
+export function resetModelCache(): void {
+  modelCache = null
+}
+
+/** модели роутера; null — список не получили, тогда цепочку не трогаем */
+export async function availableModels(cfg: AiConfig): Promise<Set<string> | null> {
+  if (modelCache && modelCache.base === cfg.base && Date.now() - modelCache.at < MODEL_TTL) return modelCache.ids
+  try {
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 10_000)
+    const res = await fetch(`${cfg.base}/models`, { headers: { authorization: `Bearer ${cfg.key}` }, signal: ctrl.signal }).finally(() => clearTimeout(timer))
+    if (!res.ok) return null
+    const data = (await res.json()) as { data?: { id?: unknown }[] }
+    const ids = new Set((data.data ?? []).map((m) => m.id).filter((id): id is string => typeof id === 'string'))
+    if (!ids.size) return null
+    modelCache = { base: cfg.base, at: Date.now(), ids }
+    return ids
+  } catch {
+    return null
+  }
+}
+
+/** семейство модели: чем заменить, если именно этой у роутера нет */
+function familyOf(model: string): RegExp | null {
+  const m = /^([^/]+)\/(claude-(?:sonnet|opus|haiku)|gpt-5(?:\.\d+)?-(?:mini|nano)|gpt-5|gemini-[\d.]+-flash-lite|gemini-[\d.]+-flash|gemini-[\d.]+-pro|deepseek-v\d+-flash|glm-[\d.]+-flash|qwen\d*-vl)/.exec(model)
+  if (!m) return null
+  const head = m[2].replace(/[\d.]+/g, '[\\d.]+')
+  return new RegExp(`^${m[1]}/${head}`)
+}
+
+/** цепочка задачи, сверенная с роутером */
+export async function resolveChain(cfg: AiConfig, task: AiTask): Promise<string[]> {
+  const chain = chainFor(task)
+  const ids = await availableModels(cfg)
+  if (!ids) return chain
+  const out: string[] = []
+  for (const model of chain) {
+    if (ids.has(model)) {
+      if (!out.includes(model)) out.push(model)
+      continue
+    }
+    const fam = familyOf(model)
+    // новее — дальше по алфавиту: claude-sonnet-5 после claude-sonnet-4.5
+    const alt = fam ? [...ids].filter((id) => fam.test(id) && !out.includes(id)).sort().pop() : undefined
+    if (alt) out.push(alt)
+  }
+  return out.length ? out : chain
+}
+
 export async function askJson<T>(cfg: AiConfig, o: AskOptions<T>): Promise<AiAnswer<T>> {
   const spec = specFor(o.task)
-  const chain = chainFrom(o.task, o.startAt ?? 0).slice(0, o.maxTries ?? 99)
+  const chain = (await resolveChain(cfg, o.task)).slice(o.startAt ?? 0).slice(0, o.maxTries ?? 99)
   if (!chain.length) throw new Error(`для задачи «${o.task}» не задано ни одной модели`)
   const budget = spentToday()
   if (cfg.dailyLimitRub > 0 && budget.rub >= cfg.dailyLimitRub) {
@@ -258,13 +317,14 @@ async function callModel(cfg: AiConfig, model: string, spec: TaskSpec, messages:
         model,
         messages,
         max_tokens: spec.maxTokens,
-        temperature: 0,
+        // рассуждающие модели OpenAI (gpt-5, o-серия) принимают только температуру по умолчанию
+        ...(/^openai\/(gpt-5|o\d)/.test(model) ? {} : { temperature: 0 }),
         response_format: { type: 'json_object' },
       }),
     })
     if (!res.ok) {
       // текст ошибки роутера наружу не отдаём: в нём может оказаться ключ
-      throw new Error(`ответ ${res.status}`)
+      throw new Error(res.status === 404 ? 'нет у роутера (404)' : res.status === 429 ? 'роутер просит подождать (429)' : `роутер отказал (${res.status})`)
     }
     const payload = (await res.json()) as {
       choices?: { message?: { content?: string } }[]
@@ -275,6 +335,10 @@ async function callModel(cfg: AiConfig, model: string, spec: TaskSpec, messages:
     if (!text) throw new Error('пустой ответ')
     const costRub = Number(payload.cost_rub ?? payload.usage?.cost_rub ?? payload.usage?.total_cost ?? 0) || 0
     return { text, costRub }
+  } catch (e) {
+    // обрыв по нашему таймеру — не «отменено», а «не уложилась»
+    if (ctrl.signal.aborted) throw new Error(`не ответила за ${Math.round(spec.timeoutMs / 1000)} с`)
+    throw e
   } finally {
     clearTimeout(timer)
   }

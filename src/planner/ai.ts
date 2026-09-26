@@ -62,7 +62,25 @@ async function post<T>(endpoint: string, body: unknown, signal?: AbortSignal): P
 }
 
 /** сетевые и серверные ошибки — коротко и по-русски */
+/** короткое имя модели: anthropic/claude-sonnet-5 → claude-sonnet-5 */
+export const shortModel = (m: string): string => m.replace(/^[^/]+\//, '')
+
 export function friendlyAiError(msg: string): string {
+  // перебор моделей не удался: по каждой — что случилось, иначе не понять, в чём дело
+  const chain = /ни одна модель не справилась\.\s*(.+)$/s.exec(msg)
+  if (chain) {
+    const parts = chain[1].split(/;\s*/).map((p) => {
+      const i = p.indexOf(': ')
+      if (i < 0) return p
+      const model = shortModel(p.slice(0, i))
+      let why = p.slice(i + 2)
+      if (/abort/i.test(why)) why = 'оборвалось'
+      else if (/Failed to fetch|fetch failed|ECONN|network/i.test(why)) why = 'нет связи'
+      else if (/JSON|не прошёл|пуст|Unexpected/i.test(why)) why = 'ответила не по формату'
+      return `${model} — ${why}`
+    })
+    return `ни одна модель не ответила: ${parts.join('; ')}`
+  }
   if (/Failed to fetch|NetworkError|Load failed|ECONN|fetch failed|network/i.test(msg)) return 'нет связи с сервером ИИ'
   if (/abort/i.test(msg)) return 'запрос отменён'
   if (/timeout|timed out/i.test(msg)) return 'сервер ИИ не ответил вовремя'

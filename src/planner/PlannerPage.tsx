@@ -4095,6 +4095,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           aiHint={ai.hint}
           onRun={runFurnish}
           onUndo={history.undo}
+          models={{ best: ai.tasks.find((t) => t.task === 'layout_pro')?.models, fast: ai.tasks.find((t) => t.task === 'layout')?.models }}
           onClose={() => setFurnishFor(null)}
         />
       )}
