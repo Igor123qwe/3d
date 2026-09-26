@@ -34,6 +34,16 @@ interface Props {
   onUndo?: () => void
 }
 
+/** выбор модели запоминается: тщательно — сильная, быстро — дешёвая */
+const LS_QUALITY = 'boop.planner.furnishQuality'
+const readQuality = (): 'fast' | 'best' => {
+  try {
+    return localStorage.getItem(LS_QUALITY) === 'fast' ? 'fast' : 'best'
+  } catch {
+    return 'best'
+  }
+}
+
 const readWishes = () => {
   try {
     return localStorage.getItem(LS_WISHES) ?? ''
@@ -47,6 +57,15 @@ export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled,
   const [wishes, setWishes] = useState(readWishes)
   const [replace, setReplace] = useState(false)
   const [rename, setRename] = useState(true)
+  const [quality, setQualityRaw] = useState<'fast' | 'best'>(readQuality)
+  const setQuality = (q: 'fast' | 'best') => {
+    setQualityRaw(q)
+    try {
+      localStorage.setItem(LS_QUALITY, q)
+    } catch {
+      /* без хранилища выбор просто не запомнится */
+    }
+  }
   const room = rooms.find((r) => r.id === scope)
   const [purpose, setPurpose] = useState(room?.name ?? '')
   const [busy, setBusy] = useState('')
@@ -78,7 +97,7 @@ export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled,
     setError('')
     setBusy('Отправляю…')
     try {
-      const rep = await onRun({ scope, wishes, replace, rename, purpose: scope === 'all' ? undefined : purpose }, setBusy)
+      const rep = await onRun({ scope, wishes, replace, rename, purpose: scope === 'all' ? undefined : purpose, quality }, setBusy)
       setReport(rep)
     } catch (e) {
       setError((e as Error).message)
@@ -107,6 +126,7 @@ export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled,
                   {!r.name.toLowerCase().startsWith(r.purpose.toLowerCase()) && <span className="pl-furnish-was"> (была «{r.name}»)</span>}
                   {r.error ? !commonError && <div className="pl-furnish-warn">Не вышло: {friendlyAiError(r.error)}</div> : <div>{r.summary}</div>}
                   {r.why && <small>{r.why}</small>}
+                  {r.idea && <small className="pl-furnish-idea">Замысел: {r.idea}</small>}
                 </li>
               ))}
             </ul>
@@ -178,6 +198,18 @@ export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled,
                 </button>
               ))}
             </div>
+            <div className="pl-furnish-row">
+              <span className="pl-furnish-label">Как расставлять</span>
+              <div className="pl-segment" role="radiogroup" aria-label="Модель для расстановки">
+                <button role="radio" aria-checked={quality === 'best'} className={quality === 'best' ? 'active' : ''} onClick={() => setQuality('best')} disabled={!!busy} title="Сильная модель продумывает зоны, проходы и свет. Около 3–4 ₽ за комнату">
+                  Тщательно
+                </button>
+                <button role="radio" aria-checked={quality === 'fast'} className={quality === 'fast' ? 'active' : ''} onClick={() => setQuality('fast')} disabled={!!busy} title="Дешёвая быстрая модель: копейки за комнату, но думает меньше">
+                  Быстро
+                </button>
+              </div>
+            </div>
+            <p className="pl-furnish-note">{quality === 'best' ? 'Сильная модель: сначала продумывает замысел комнаты, потом расставляет. Около 3–4 ₽ за комнату, до пары минут.' : 'Дешёвая модель: быстро и почти бесплатно, но продумывает меньше.'}</p>
             <label className="pl-furnish-check">
               <input type="checkbox" checked={replace} onChange={() => setReplace((v) => !v)} disabled={!!busy} />
               <span>Убрать мебель, что уже стоит (иначе ИИ дополнит расстановку и не тронет её). Электрика остаётся</span>

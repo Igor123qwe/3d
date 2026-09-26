@@ -24,6 +24,8 @@ export interface FurnishOptions {
   rename: boolean
   /** назначение одной комнаты, если его задали руками */
   purpose?: string
+  /** 'fast' — дешёвая быстрая модель, иначе сильная (тщательно) */
+  quality?: 'fast' | 'best'
 }
 
 export interface FurnishDeps {
@@ -42,6 +44,8 @@ export interface FurnishRoomReport {
   rejected: number
   summary: string
   why?: string
+  /** замысел комнаты от модели */
+  idea?: string
   error?: string
 }
 
@@ -148,6 +152,7 @@ export async function furnish(plan: Plan, rooms: Room[], o: FurnishOptions, deps
       const res = await deps.layout({
         polygon: (r.inner.length >= 3 ? r.inner : r.polygon).map((q) => loc({ x: q.x, y: q.y })),
         size: bbox(r),
+        quality: o.quality,
         openings: openingsNear(plan, r).map(loc),
         room: r.meta.name,
         purpose: p,
@@ -183,7 +188,7 @@ export async function furnish(plan: Plan, rooms: Room[], o: FurnishOptions, deps
     const checks = vetLayout(a.res.items, r, acc, { purpose: p.purpose })
     acc = applyLayout(acc, checks)
     const placed = checks.filter((c) => c.ok).length
-    report.push({ ...base, placed, rejected: checks.length - placed, summary: layoutSummary(checks) })
+    report.push({ ...base, placed, rejected: checks.length - placed, summary: layoutSummary(checks), idea: a.res.plan })
     // имя меняем только если в комнате что-то встало: пустая «Детская» вводит в заблуждение
     if (o.rename && o.scope === 'all' && placed > 0 && p.purpose !== r.meta.name && !isFixedPurpose(r.meta.name)) acc = updateRoomMeta(acc, r.meta.id, { name: p.purpose })
   })

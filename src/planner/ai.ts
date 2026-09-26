@@ -312,6 +312,8 @@ export const lookupProductViaServer = (url: string, signal?: AbortSignal): Promi
 // ---------- расстановка мебели ----------
 export interface LayoutResult {
   items: AiPlacement[]
+  /** замысел комнаты от модели: 2–4 предложения */
+  plan?: string
   ai: AiCost
 }
 
@@ -319,6 +321,8 @@ export interface LayoutAsk {
   polygon: { x: number; y: number }[]
   /** ширина и глубина комнаты по чистовым граням, см */
   size?: [number, number]
+  /** 'fast' — дешёвая быстрая модель, иначе сильная */
+  quality?: 'fast' | 'best'
   openings: { kind: string; x: number; y: number; width: number }[]
   room: string
   areaM2: number

@@ -13,7 +13,7 @@ import { extractJson } from '../src/planner/aicontract'
 const DEFAULT_BASE = 'https://routerai.ru/api/v1'
 
 /** что мы просим у модели */
-export type AiTask = 'plan' | 'product' | 'layout' | 'classify' | 'critique'
+export type AiTask = 'plan' | 'product' | 'layout' | 'layout_pro' | 'classify' | 'critique'
 
 export interface TaskSpec {
   /** нужна ли модель, читающая картинки */
@@ -58,6 +58,15 @@ const TASKS: Record<AiTask, TaskSpec> = {
     timeoutMs: 90_000,
     chain: ['deepseek/deepseek-v4-flash', 'z-ai/glm-5.3-flash', 'openai/gpt-5-mini'],
     about: 'Расставляет мебель в комнате по правилам эргономики',
+  },
+  // Тщательная расстановка: сильная модель продумывает зоны, проходы и свет.
+  // 218,9/1094,6 → 27,4/218,9 → 4,5/9,0: около 3–4 ₽ за комнату у первой
+  layout_pro: {
+    vision: false,
+    maxTokens: 6000,
+    timeoutMs: 150_000,
+    chain: ['anthropic/claude-sonnet-5', 'openai/gpt-5-mini', 'deepseek/deepseek-v4-flash'],
+    about: 'Тщательно расставляет мебель: сильная модель продумывает зоны, проходы и свет',
   },
   // Отнести товар к типу каталога — самая дешёвая модель из возможных. 2,2/4,4 → 5,5/8,8.
   classify: {

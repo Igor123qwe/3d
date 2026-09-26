@@ -1937,3 +1937,11 @@
   font-size: 12.5px;
   cursor: pointer;
 }
+
+/* замысел комнаты от модели в отчёте расстановки */
+.pl-furnish-idea {
+  display: block;
+  margin-top: 4px;
+  color: #4b5563;
+  font-style: italic;
+}

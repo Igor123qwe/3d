@@ -27,6 +27,8 @@ export interface PlacementCheck {
   replaced?: string
   /** модель этого не предлагала — добавлено по правилу (тумбы к кровати) */
   added?: boolean
+  /** шкаф растянут на всю нишу: новая ширина, см */
+  widened?: number
 }
 
 export interface LayoutOptions {
@@ -133,7 +135,8 @@ function penalty(f: Furniture, cat: CatalogItem, c: Ctx): number {
   let p = 0
   for (const z of zonesOf(f, cat)) {
     const blocked = c.walls.some((w) => convexOverlap(z.poly, w, 1.5)) || c.taken.some((t) => convexOverlap(z.poly, t, 1.5)) || c.swings.some((s) => convexOverlap(z.poly, s, 2))
-    if (blocked) p += 80
+    // дверцы шкафа и ящики комода, упёртые в кровать, — не открыть: это дороже узкого прохода
+    if (blocked) p += z.side === 'front' && (cat.glyph === 'wardrobe' || cat.glyph === 'drawers') ? 160 : 80
   }
   const body = furnitureBody(f)
   for (const z of c.takenZones) if (convexOverlap(body, z, 1.5)) p += 80
@@ -222,7 +225,7 @@ const angleGap = (a: number, b: number) => {
  * Лучшее честное место для предмета cat рядом с предложенным want.
  * null — нигде в комнате не встаёт; fail — что мешало чаще всего
  */
-function findSpot(cat: CatalogItem, want: Spot, c: Ctx): { spot: Spot; moved: number } | { fail: Fail } {
+function findSpot(cat: CatalogItem, want: Spot, c: Ctx): { spot: Spot; moved: number; cost: number } | { fail: Fail } {
   const make = (s: Spot): Furniture => ({ id: 'probe', type: cat.type, x: s.x, y: s.y, w: cat.w, d: cat.d, rot: s.rot })
   const fails: Record<Fail, number> = { room: 0, wall: 0, door: 0, other: 0 }
   let best: { spot: Spot; cost: number } | null = null
@@ -256,7 +259,7 @@ function findSpot(cat: CatalogItem, want: Spot, c: Ctx): { spot: Spot; moved: nu
   }
   if (best) {
     const b = best as { spot: Spot; cost: number }
-    return { spot: b.spot, moved: dist(b.spot, want) }
+    return { spot: b.spot, moved: dist(b.spot, want), cost: b.cost }
   }
   const order: Fail[] = ['other', 'door', 'wall', 'room']
   const top = order.reduce((m, k) => (fails[k] > fails[m] ? k : m), order[0])
@@ -281,6 +284,54 @@ export function readPlacements(items: AiPlacement[], c: { inner: Pt[]; walls: Pt
     }, 0)
   const corners = items.map(cornerToCenter)
   return misses(corners) < misses(items) ? corners : items
+}
+
+/** цена места, как её считает findSpot: близость к предложенному плюс неудобства */
+function spotCost(f: Furniture, cat: CatalogItem, want: Spot, c: Ctx): number {
+  return Math.min(dist(f, want), 300) + (angleGap(f.rot, want.rot) > 1 ? 40 : 0) + penalty(f, cat, c)
+}
+
+/** чем заменить, если так удобнее: распашному шкафу перед кроватью не хватает места на дверцы — купе */
+const ALTERNATIVES: Record<string, string[]> = { wardrobe: ['wardrobe-slide'] }
+
+/** шкафы растягиваются на всю нишу или стену, где встали */
+const FILLS = new Set(['wardrobe', 'wardrobe-slide'])
+const FILL_MAX = 300
+
+/**
+ * Растянуть шкаф вдоль стены на всё свободное место: до угла, выступа,
+ * двери, окна или соседа — как встроенный шкаф в нишу. Не больше 3 м;
+ * новых закрытых проходов соседям не добавлять
+ */
+function fillAlongWall(f: Furniture, cat: CatalogItem, c: Ctx): Furniture {
+  const dir = rotate({ x: 1, y: 0 }, f.rot)
+  // и чужие проходы, и свой фронт: дверцы у края шкафа тоже должны открываться
+  const zonesHit = (g: Furniture) => {
+    const body = furnitureBody(g)
+    const others = c.takenZones.filter((z) => convexOverlap(body, z, 1.5)).length
+    const own = zonesOf(g, cat).filter((z) => c.taken.some((t) => convexOverlap(z.poly, t, 1.5)) || c.swings.some((s) => convexOverlap(z.poly, s, 2))).length
+    return others + own
+  }
+  const nearWindow = (g: Furniture) => {
+    const near = obbCorners(g.x, g.y, g.w + 8, g.d + 8, g.rot)
+    return c.windowPts.some((q) => pointInPoly(q, near))
+  }
+  const base = zonesHit(f)
+  let cur = f
+  for (let k = 0; k < 80; k++) {
+    let grew = false
+    for (const side of [-1, 1] as const) {
+      if (cur.w + 5 > FILL_MAX) break
+      const ctr = add({ x: cur.x, y: cur.y }, mul(dir, side * 2.5))
+      const next: Furniture = { ...cur, x: ctr.x, y: ctr.y, w: cur.w + 5 }
+      if (fits(next, c) || zonesHit(next) > base || nearWindow(next)) continue
+      cur = next
+      grew = true
+    }
+    if (!grew) break
+  }
+  if (cur.w - f.w < 10) return f
+  return { ...cur, x: Math.round(cur.x * 10) / 10, y: Math.round(cur.y * 10) / 10, w: Math.round(cur.w) }
 }
 
 /** тот же предмет поменьше: кровать 140 вместо 160 */
@@ -347,64 +398,152 @@ export function vetLayout(proposed: AiPlacement[], room: Room, plan: Plan, optio
   // Крупное — первым: кровать и шкаф выбирают стену, мелочь встаёт в оставшееся.
   // При равных размерах — как предложила модель. Отчёт — в её порядке
   const area = (it: AiPlacement) => (CATALOG_MAP[it.type] ? CATALOG_MAP[it.type].w * CATALOG_MAP[it.type].d : 0)
-  const order = items.map((it, i) => i).sort((a, b) => area(items[b]) - area(items[a]) || a - b)
+  const order = items.map((_, i) => i).sort((a, b) => area(items[b]) - area(items[a]) || a - b)
   const done = new Map<number, PlacementCheck>()
+  interface Placed {
+    idx: number
+    want: Spot
+    cat: CatalogItem
+    used: CatalogItem
+    f: Furniture
+  }
+  const placed: Placed[] = []
+  const standingZones = [...takenZones]
+  const standingBodies = [...taken]
+  /** собрать занятое заново: без предметов skip — их место пересматривается */
+  const rebuild = (skip: Set<number> = new Set()) => {
+    const others = placed.filter((p) => !skip.has(p.idx))
+    ctx.taken = [...standingBodies, ...others.map((p) => furnitureBody(p.f))]
+    ctx.takenZones = [...standingZones, ...others.flatMap((p) => zonesOf(p.f, p.used).map((z) => z.poly))]
+    ctx.beds = others.filter((p) => isDoubleBed(p.used)).map((p) => p.f)
+  }
+  const kinds = (cat: CatalogItem) => [cat, ...(ALTERNATIVES[cat.type] ?? []).map((t) => CATALOG_MAP[t]).filter((c): c is CatalogItem => !!c && fitting.has(c.type))]
+  /** лучшее место среди самого предмета и его замен (купе вместо распашного) */
+  const bestOf = (cat: CatalogItem, want: Spot) => {
+    let best: { used: CatalogItem; spot: Spot; moved: number; cost: number } | null = null
+    let fail: Fail | null = null
+    for (const k of kinds(cat)) {
+      const r = findSpot(k, want, ctx)
+      if ('fail' in r) {
+        if (k === cat) fail = r.fail
+        continue
+      }
+      const cost = r.cost + (k === cat ? 0 : 30)
+      if (!best || cost < best.cost) best = { used: k, spot: r.spot, moved: r.moved, cost }
+    }
+    return { best, fail }
+  }
+  const toFurniture = (used: CatalogItem, spot: Spot, id = uid('f')): Furniture => ({ id, type: used.type, x: Math.round(spot.x * 10) / 10, y: Math.round(spot.y * 10) / 10, w: used.w, d: used.d, rot: spot.rot })
+
   for (const idx of order) {
     const item = items[idx]
-    const out = { push: (c: PlacementCheck) => done.set(idx, c) }
     const cat: CatalogItem | undefined = CATALOG_MAP[item.type]
     if (!cat) {
-      out.push({ item, ok: false, reason: `в каталоге нет типа «${item.type}»` })
+      done.set(idx, { item, ok: false, reason: `в каталоге нет типа «${item.type}»` })
       continue
     }
     if (!fitting.has(item.type)) {
-      out.push({ item, ok: false, reason: `${cat.name}: не к месту в этой комнате` })
+      done.set(idx, { item, ok: false, reason: `${cat.name}: не к месту в этой комнате` })
       continue
     }
     const want: Spot = { x: item.x, y: item.y, rot: normDeg(item.rot) }
-    let used = cat
-    let found = findSpot(cat, want, ctx)
-    if ('fail' in found) {
+    let { best, fail } = bestOf(cat, want)
+    if (!best) {
       for (const smaller of smallerOf(cat)) {
         const r = findSpot(smaller, want, ctx)
         if (!('fail' in r)) {
-          used = smaller
-          found = r
+          best = { used: smaller, spot: r.spot, moved: r.moved, cost: r.cost }
           break
         }
       }
     }
-    if ('fail' in found) {
-      out.push({ item, ok: false, reason: `${cat.name}: ${FAIL_TEXT[found.fail]}` })
+    if (!best) {
+      done.set(idx, { item, ok: false, reason: `${cat.name}: ${FAIL_TEXT[fail ?? 'room']}` })
       continue
     }
-    const moved = Math.round(found.moved)
-    const notes = [item.why || '']
-    if (used !== cat) notes.push(`${used.name} вместо ${cat.name.toLowerCase()}: большой не помещается`)
-    else if (moved > 20) notes.push(`место поправлено на ${moved} см: предложенное не подходило`)
-    // пояснение идёт в note: подпись на чертеже должна оставаться короткой
-    const f: Furniture = { id: uid('f'), type: used.type, x: Math.round(found.spot.x * 10) / 10, y: Math.round(found.spot.y * 10) / 10, w: used.w, d: used.d, rot: found.spot.rot, note: notes.filter(Boolean).join(' · ') || undefined }
-    ctx.taken.push(furnitureBody(f))
-    ctx.takenZones.push(...zonesOf(f, used).map((z) => z.poly))
-    if (isDoubleBed(used)) ctx.beds = [...(ctx.beds ?? []), f]
-    out.push({ item, ok: true, furniture: f, moved, replaced: used !== cat ? cat.name : undefined })
+    placed.push({ idx, want, cat, used: best.used, f: toFurniture(best.used, best.spot) })
+    rebuild()
   }
-  // в отчёте — предложение модели как было
-  const result = items.map((_, i) => ({ ...done.get(i)!, item: proposed[i] }))
+
+  // Второй проход — как дизайнер, который отходит и смотрит на комнату целиком:
+  // каждый предмет пересматривается с учётом всех соседей (кровать сдвинется,
+  // чтобы шкафу хватило прохода; распашной станет купе, если дверцам тесно)
+  for (let round = 0; round < 3; round++) {
+    let changed = false
+    for (const p of placed) {
+      // тумбы у изголовья едут вместе с кроватью: иначе они держат её на месте
+      const attached = isDoubleBed(p.used) ? placed.filter((q) => q.used.type === 'nightstand' && nightstandSpots(p.f, q.used.w, q.used.d).some((s) => dist(s, q.f) < 40)) : []
+      rebuild(new Set([p.idx, ...attached.map((q) => q.idx)]))
+      const now = spotCost(p.f, p.used, p.want, ctx) + (p.used === p.cat ? 0 : 30)
+      const { best } = bestOf(p.cat, p.want)
+      if (!best || best.cost >= now - 10) continue
+      const moved = toFurniture(best.used, best.spot, p.f.id)
+      // тумбы — к новым бокам изголовья; не встают — кровать остаётся где была
+      const follow: Furniture[] = []
+      const occupied = [...ctx.taken, furnitureBody(moved)]
+      let okAll = true
+      for (const q of attached) {
+        const spots = nightstandSpots(moved, q.used.w, q.used.d).sort((a, b) => dist(a, q.f) - dist(b, q.f))
+        const next = spots.map((s) => toFurniture(q.used, s, q.f.id)).find((g) => !fits(g, { ...ctx, taken: occupied }) && !follow.some((h) => convexOverlap(furnitureBody(h), furnitureBody(g), 1.5)))
+        if (!next) {
+          okAll = false
+          break
+        }
+        follow.push(next)
+        occupied.push(furnitureBody(next))
+      }
+      if (!okAll) continue
+      p.used = best.used
+      p.f = moved
+      attached.forEach((q, k) => (q.f = follow[k]))
+      changed = true
+    }
+    rebuild()
+    if (!changed) break
+  }
+
   // Двуспальная кровать без тумб выглядит недоделанной: если модель их не
   // предложила, а у изголовья есть место — ставим по бокам и говорим об этом
+  const added: PlacementCheck[] = []
   const nightCat = CATALOG_MAP.nightstand
   if (nightCat && fitting.has('nightstand') && ctx.beds?.length && !items.some((it) => it.type === 'nightstand')) {
     for (const bed of ctx.beds) {
       for (const s of nightstandSpots(bed, nightCat.w, nightCat.d)) {
-        const f: Furniture = { id: uid('f'), type: 'nightstand', x: Math.round(s.x * 10) / 10, y: Math.round(s.y * 10) / 10, w: nightCat.w, d: nightCat.d, rot: s.rot, note: 'у изголовья: к двуспальной кровати — тумбы с двух сторон' }
+        const f: Furniture = { ...toFurniture(nightCat, s), note: 'у изголовья: к двуспальной кровати — тумбы с двух сторон' }
         if (fits(f, ctx)) continue
         ctx.taken.push(furnitureBody(f))
-        result.push({ item: { type: 'nightstand', x: f.x, y: f.y, rot: f.rot, why: 'добавлено к кровати' }, ok: true, furniture: f, moved: 0, added: true })
+        ctx.takenZones.push(...zonesOf(f, nightCat).map((z) => z.poly))
+        added.push({ item: { type: 'nightstand', x: f.x, y: f.y, rot: f.rot, why: 'добавлено к кровати' }, ok: true, furniture: f, moved: 0, added: true })
       }
     }
   }
-  return result
+
+  // сдвиг от предложенного — до растяжки шкафа: растяжка не «поправка места»
+  const movedOf = new Map(placed.map((p) => [p.idx, Math.round(dist(p.f, p.want))]))
+  // шкаф — на всю нишу или стену, где встал: встроенный шкаф без щелей по краям
+  for (const p of placed) {
+    if (!FILLS.has(p.used.type) || p.used.resizable === false) continue
+    const i = ctx.taken.findIndex((t) => JSON.stringify(t) === JSON.stringify(furnitureBody(p.f)))
+    if (i >= 0) ctx.taken.splice(i, 1)
+    const grown = fillAlongWall(p.f, p.used, ctx)
+    p.f = grown
+    ctx.taken.push(furnitureBody(grown))
+  }
+
+  for (const p of placed) {
+    const item = items[p.idx]
+    const moved = movedOf.get(p.idx) ?? 0
+    const notes = [item.why || '']
+    const bigger = p.f.w - p.used.w
+    if (p.used !== p.cat && ALTERNATIVES[p.cat.type]?.includes(p.used.type)) notes.push(`${p.used.name} вместо ${p.cat.name.toLowerCase()}: дверцам распашного здесь не хватает места`)
+    else if (p.used !== p.cat) notes.push(`${p.used.name} вместо ${p.cat.name.toLowerCase()}: большой не помещается`)
+    else if (moved > 20) notes.push(`место поправлено на ${moved} см: предложенное не подходило`)
+    if (bigger >= 10) notes.push(`во всю нишу: ${Math.round(p.f.w)} см вместо ${p.used.w}`)
+    p.f = { ...p.f, note: notes.filter(Boolean).join(' · ') || undefined }
+    done.set(p.idx, { item, ok: true, furniture: p.f, moved, replaced: p.used !== p.cat ? p.cat.name : undefined, widened: bigger >= 10 ? Math.round(p.f.w) : undefined })
+  }
+  // в отчёте — предложение модели как было
+  return [...items.map((_, i) => ({ ...done.get(i)!, item: proposed[i] })), ...added]
 }
 
 function pointSegDistPoly(p: Pt, poly: Pt[]): number {
@@ -427,9 +566,10 @@ export function applyLayout(plan: Plan, checks: PlacementCheck[]): Plan {
 export function layoutSummary(checks: PlacementCheck[]): string {
   const ok = checks.filter((c) => c.ok).length
   const bad = checks.length - ok
-  const movedN = checks.filter((c) => c.ok && !c.replaced && (c.moved ?? 0) > 20).length
+  const movedN = checks.filter((c) => c.ok && !c.replaced && !c.added && (c.moved ?? 0) > 20).length
   const smaller = checks.filter((c) => c.ok && c.replaced).length
-  const fixes = [movedN ? `место поправлено у ${movedN}` : '', smaller ? `поменьше вместо большого — ${smaller}` : ''].filter(Boolean).join(', ')
+  const widened = checks.filter((c) => c.ok && c.widened).length
+  const fixes = [movedN ? `место поправлено у ${movedN}` : '', smaller ? `замена на подходящий — ${smaller}` : '', widened ? `шкаф во всю нишу` : ''].filter(Boolean).join(', ')
   const names = checks.filter((c) => c.ok && c.furniture).map((c) => CATALOG_MAP[c.furniture!.type]?.name ?? c.furniture!.type)
   const head = `Поставлено предметов: ${ok}${names.length ? ` — ${names.join(', ')}` : ''}${fixes ? ` (${fixes})` : ''}`
   if (!bad) return head
@@ -462,6 +602,8 @@ export function catalogForRoom(name: string, all: CatalogItem[]): { type: string
   const extra = new Set<string>()
   if (cats.has('kids')) for (const t of ['bed-90', 'bed-140', 'nightstand', 'wardrobe', 'desk', 'office-chair', 'office-shelf']) extra.add(t)
   if (cats.has('office')) for (const t of ['armchair', 'sofa-2']) extra.add(t)
+  // в спальне часто и работают: стол со стулом у окна
+  if (cats.has('bedroom') && !cats.has('living')) for (const t of ['desk', 'office-chair']) extra.add(t)
   // радиатор и колонна — часть здания, «произвольный объект» — заготовка: их не расставляют;
   // пианино — только там, где гостиная
   const never = new Set(['radiator', 'column', 'box'])

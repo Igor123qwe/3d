@@ -156,10 +156,10 @@ describe('проверка расстановки от ИИ', () => {
     )
     for (const c of checks) honest(c, r, plan, checks)
     const bed = checks.find((c) => c.furniture?.type === 'bed-160')!.furniture!
-    // по центру своей стены: слева и справа поровну (±20 см)
+    // к кровати подходят с двух сторон: не меньше 60 см и слева, и справа
     const left = bed.x - bed.w / 2
     const right = 371 - (bed.x + bed.w / 2)
-    expect(Math.abs(left - right), `слева ${left}, справа ${right}`).toBeLessThanOrEqual(20)
+    expect(Math.min(left, right), `слева ${left}, справа ${right}`).toBeGreaterThanOrEqual(60)
     // тумбы добавлены с двух сторон изголовья
     const stands = checks.filter((c) => c.added && c.furniture?.type === 'nightstand').map((c) => c.furniture!)
     expect(stands).toHaveLength(2)
@@ -264,6 +264,33 @@ describe('каталог под комнату', () => {
       const types = catalogForRoom(name, CATALOG)
       expect(types.every((t) => CATALOG.find((c) => c.type === t.type)?.category !== 'electric')).toBe(true)
     }
+  })
+
+  it('шкаф встаёт во всю нишу, а распашной перед кроватью становится купе', () => {
+    // комната 300 × 420: кровать изголовьем к верхней стене, шкаф у правой — перед ним мало места
+    const plan = addRect(empty, { x: 0, y: 0 }, { x: 310, y: 430 }, 10)
+    const r = buildRooms(plan).rooms[0]
+    const checks = vetLayout(
+      [
+        { type: 'bed-160', x: 150, y: 110, rot: 0, why: 'к верхней стене' },
+        { type: 'wardrobe', x: 270, y: 320, rot: 90, why: 'у правой стены' },
+      ],
+      r,
+      plan,
+      { purpose: 'Спальня' },
+    )
+    for (const c of checks) honest(c, r, plan, checks)
+    const wardrobe = checks.find((c) => /wardrobe/.test(c.furniture?.type ?? ''))!
+    // растянут вдоль своей стены больше каталожного и помечен
+    expect(wardrobe.furniture!.w).toBeGreaterThan(CATALOG.find((c) => c.type === wardrobe.furniture!.type)!.w)
+    expect(wardrobe.widened).toBeGreaterThan(0)
+    expect(wardrobe.furniture!.note).toMatch(/во всю нишу/)
+    expect(layoutSummary(checks)).toMatch(/шкаф во всю нишу/)
+  })
+
+  it('в спальне есть стол со стулом, в гостиной — нет лишнего', () => {
+    const bed = catalogForRoom('Спальня', CATALOG).map((c) => c.type)
+    expect(bed).toEqual(expect.arrayContaining(['desk', 'office-chair']))
   })
 
   it('детской — и обычная кровать со столом; радиатор, колонна и заготовка не расставляются', () => {
