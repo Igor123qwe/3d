@@ -17,6 +17,47 @@ export function downloadJson(plan: Plan): void {
   downloadBlob(`${safeName(plan.name)}.plan.json`, new Blob([JSON.stringify(plan, null, 2)], { type: 'application/json' }))
 }
 
+/**
+ * Печать в масштабе: чертёж w × h см ложится на бумагу в мм как w·10/scale.
+ * Печатаем из скрытого iframe — всплывающее окно браузер мог бы заблокировать
+ */
+export function printMarkup(name: string, svgMarkup: string, wCm: number, hCm: number, scale: number): string {
+  const wMm = (wCm * 10) / scale
+  const hMm = (hCm * 10) / scale
+  const svg = svgMarkup.replace(/^<svg([^>]*?)\swidth="[^"]*"\sheight="[^"]*"/, `<svg$1 width="${wMm.toFixed(1)}mm" height="${hMm.toFixed(1)}mm"`)
+  const landscape = wMm > hMm
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(name || 'План')} — 1:${scale}</title>
+<style>@page{size:${landscape ? 'A4 landscape' : 'A4'};margin:10mm}body{margin:0;font:11px system-ui,sans-serif;color:#111}
+.cap{margin:0 0 4mm}.cap b{font-size:13px}svg{display:block}.bar{margin-top:3mm;display:flex;align-items:center;gap:4mm}
+.bar i{display:inline-block;width:${(100 * 10) / scale}mm;height:2mm;border:1px solid #111;border-top:none}</style></head>
+<body><p class="cap"><b>${escapeHtml(name || 'План')}</b> · масштаб 1:${scale} · размеры в чистоте, см</p>${svg}
+<div class="bar"><i></i><span>1 м</span></div></body></html>`
+}
+
+export function printToScale(name: string, svgMarkup: string, wCm: number, hCm: number, scale: number): void {
+  const html = printMarkup(name, svgMarkup, wCm, hCm, scale)
+  const frame = document.createElement('iframe')
+  frame.setAttribute('aria-hidden', 'true')
+  frame.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;opacity:0'
+  document.body.appendChild(frame)
+  const doc = frame.contentDocument
+  if (!doc) return
+  doc.open()
+  doc.write(html)
+  doc.close()
+  const win = frame.contentWindow
+  const done = () => setTimeout(() => frame.remove(), 1000)
+  if (win) {
+    win.addEventListener('afterprint', done)
+    setTimeout(() => {
+      win.focus()
+      win.print()
+    }, 150)
+  } else done()
+}
+
+const escapeHtml = (v: string) => v.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] ?? c)
+
 /** таблица для Excel: имя файла — из названия плана */
 export function downloadCsv(name: string, csv: string): void {
   downloadBlob(`${safeName(name)}.csv`, new Blob([csv], { type: 'text/csv;charset=utf-8' }))

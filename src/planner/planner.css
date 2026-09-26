@@ -1775,3 +1775,20 @@
 .pl-panel-tabs {
   user-select: none;
 }
+
+/* диалог без затемнения: чертёж под ним виден и двигается */
+.pl-ask-backdrop.passive {
+  background: transparent;
+  backdrop-filter: none;
+  pointer-events: none;
+  justify-items: end;
+  align-items: start;
+}
+.pl-ask-backdrop.passive .pl-ask {
+  pointer-events: auto;
+  box-shadow: var(--pl-shadow-lg), 0 0 0 1px var(--pl-line);
+  max-height: calc(100% - 32px);
+}
+.pl-cat-item[draggable='true'] {
+  cursor: grab;
+}

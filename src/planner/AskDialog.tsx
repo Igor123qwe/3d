@@ -18,11 +18,13 @@ interface Props {
   text?: React.ReactNode
   options: AskOption[]
   cancelLabel?: string
+  /** без затемнения и у края: чертёж под диалогом виден и его можно двигать */
+  passive?: boolean
   onPick: (key: string) => void
   onCancel: () => void
 }
 
-export const AskDialog: React.FC<Props> = ({ title, text, options, cancelLabel = 'Отмена', onPick, onCancel }) => {
+export const AskDialog: React.FC<Props> = ({ title, text, options, cancelLabel = 'Отмена', passive, onPick, onCancel }) => {
   const primary = useRef<HTMLButtonElement>(null)
   useEffect(() => {
     primary.current?.focus()
@@ -35,7 +37,7 @@ export const AskDialog: React.FC<Props> = ({ title, text, options, cancelLabel =
 
   const primaryIndex = Math.max(0, options.findIndex((o) => o.primary))
   return (
-    <div className="pl-ask-backdrop" onClick={onCancel}>
+    <div className={`pl-ask-backdrop ${passive ? 'passive' : ''}`} onClick={passive ? undefined : onCancel}>
       <div className="pl-ask" role="dialog" aria-modal="true" aria-labelledby="pl-ask-title" onClick={(e) => e.stopPropagation()}>
         <h2 id="pl-ask-title">{title}</h2>
         {text && <div className="pl-ask-text">{text}</div>}

@@ -107,3 +107,15 @@ describe('нормализация плана из файла', () => {
     expect(decoded!.furniture[0].w).toBeGreaterThan(0)
   })
 })
+
+describe('печать в масштабе', () => {
+  it('чертёж 980 × 700 см в 1:50 — 196 × 140 мм, метровая линейка 20 мм, лист альбомный', async () => {
+    const { printMarkup } = await import('../src/planner/exporters')
+    const html = printMarkup('Двушка <1>', '<svg xmlns="http://www.w3.org/2000/svg" width="1960" height="1400" viewBox="0 0 980 700"><rect/></svg>', 980, 700, 50)
+    expect(html).toContain('width="196.0mm" height="140.0mm"')
+    expect(html).toContain('width:20mm')
+    expect(html).toContain('A4 landscape')
+    expect(html).toContain('Двушка &lt;1&gt;')
+    expect(html).toContain('масштаб 1:50')
+  })
+})

@@ -8,7 +8,7 @@ import { PlannerCanvas, dialogOpen, type CanvasHandle, type View } from './Plann
 import { Scene, planBounds } from './Scene'
 import { Glyph } from './Glyph'
 import { TEMPLATES } from './templates'
-import { downloadCsv, downloadJson, downloadPng, downloadSvg, normalizePlan, readPlanFile } from './exporters'
+import { downloadCsv, downloadJson, downloadPng, downloadSvg, normalizePlan, printToScale, readPlanFile } from './exporters'
 import type { Area } from './ops'
 import {
   addOpening,
@@ -276,7 +276,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const [start, setStart] = useState(() => !hasSavedPlan() && !parseHash(location.hash).plan)
   const [saveState, setSaveState] = useState<'saved' | 'saving' | 'error'>('saved')
   /** вопрос с вариантами поверх холста: заменить проект, подложить схему и т. п. */
-  const [ask, setAsk] = useState<{ title: string; text?: React.ReactNode; options: AskOption[]; onPick: (key: string) => void } | null>(null)
+  const [ask, setAsk] = useState<{ title: string; text?: React.ReactNode; options: AskOption[]; onPick: (key: string) => void; passive?: boolean; onCancel?: () => void } | null>(null)
   /** план, который только что построили из шаблона или схемы, чтобы отличать его от своей работы */
   const untouched = useRef<Plan | null>(null)
   /** диалог «Расставить мебель с ИИ»: для всей квартиры или комнаты */
@@ -412,6 +412,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     const t = setTimeout(() => setToast(null), Math.min(9000, Math.max(3500, 1500 + toast.length * 45)))
     return () => clearTimeout(t)
   }, [toast])
+
+  // диалог открылся — старый тост под ним только сбивает с толку
+  useEffect(() => {
+    if (ask) setToast(null)
+  }, [ask])
 
   // Esc закрывает открытое меню — иначе только щелчком мимо
   useEffect(() => {
@@ -716,9 +721,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   }
 
   // экспорт: рендерим сцену в скрытый SVG и сериализуем его
-  const [exportJob, setExportJob] = useState<{ kind: 'png' | 'svg'; x: number; y: number; w: number; h: number; z: number } | null>(null)
+  const [exportJob, setExportJob] = useState<{ kind: 'png' | 'svg' | 'print'; x: number; y: number; w: number; h: number; z: number; scale?: number } | null>(null)
   const exportSvgRef = useRef<SVGSVGElement>(null)
-  const doExport = (kind: 'png' | 'svg') => {
+  const doExport = (kind: 'png' | 'svg' | 'print', scale = 50) => {
     setMenu(null)
     const b = planBounds(plan)
     if (!b) {
@@ -726,7 +731,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       return
     }
     const pad = 120
-    setExportJob({ kind, x: b.minX - pad, y: b.minY - pad, w: b.maxX - b.minX + pad * 2, h: b.maxY - b.minY + pad * 2, z: 2 })
+    setExportJob({ kind, x: b.minX - pad, y: b.minY - pad, w: b.maxX - b.minX + pad * 2, h: b.maxY - b.minY + pad * 2, z: 2, scale })
   }
   useEffect(() => {
     if (!exportJob) return
@@ -740,9 +745,12 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     const run = async () => {
       try {
         const markup = new XMLSerializer().serializeToString(el)
-        if (job.kind === 'svg') downloadSvg(plan.name, markup)
+        if (job.kind === 'print') {
+          printToScale(plan.name, markup, job.w, job.h, job.scale ?? 50)
+          setToast(`Печать в масштабе 1:${job.scale ?? 50}: ${Math.round((job.w * 10) / (job.scale ?? 50))} × ${Math.round((job.h * 10) / (job.scale ?? 50))} мм на бумаге`)
+        } else if (job.kind === 'svg') downloadSvg(plan.name, markup)
         else await downloadPng(plan.name, markup, job.w * job.z, job.h * job.z)
-        setToast(job.kind === 'svg' ? `SVG сохранён: ${plan.name || 'план'}.svg` : `PNG ${Math.round(job.w * job.z)}×${Math.round(job.h * job.z)} сохранён: ${plan.name || 'план'}.png`)
+        if (job.kind !== 'print') setToast(job.kind === 'svg' ? `SVG сохранён: ${plan.name || 'план'}.svg` : `PNG ${Math.round(job.w * job.z)}×${Math.round(job.h * job.z)} сохранён: ${plan.name || 'план'}.png`)
       } catch {
         setToast('Не удалось экспортировать')
       } finally {
@@ -1845,8 +1853,13 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       const verdict = lines[lines.length - 1]
       const head = lines.slice(0, 3)
       const detail = lines.slice(3, -1)
+      // распознанные стены сразу видны поверх фото: решение принимают глазами, а не по тексту
+      history.preview((prev) => applyAiPlan(prev, fitted).plan)
+      setSelection(null)
       setAsk({
         title: 'Распознано',
+        passive: true,
+        onCancel: () => history.cancelPreview(),
         text: (
           <>
             <div className="pl-report-head">{head.join('\n')}</div>
@@ -1877,6 +1890,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             return
           }
           setAsk(null)
+          history.cancelPreview()
           let lost = 0
           const chosen = key === 'plain' ? result : fitted
           history.apply((prev) => {
@@ -2874,7 +2888,17 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         {filteredCatalog.map((c) => {
           const vb = c.symbol ? '-14 -14 28 28' : `${-c.w / 2 - 4} ${-c.d / 2 - 4} ${c.w + 8} ${c.d + 8}`
           return (
-            <button key={c.type} className={`pl-cat-item ${placing?.type === c.type ? 'active' : ''}`} onClick={() => pick(c)} title={c.hint}>
+            <button
+              key={c.type}
+              className={`pl-cat-item ${placing?.type === c.type ? 'active' : ''}`}
+              onClick={() => pick(c)}
+              title={c.hint ?? 'Щёлкните и укажите место на плане — или перетащите на план'}
+              draggable={c.category !== 'electric'}
+              onDragStart={(e) => {
+                e.dataTransfer.setData('application/x-planner-item', c.type)
+                e.dataTransfer.effectAllowed = 'copy'
+              }}
+            >
               <svg viewBox={vb} width={84} height={56} preserveAspectRatio="xMidYMid meet">
                 <Glyph item={{ id: 'p', type: c.type, x: 0, y: 0, w: c.w, d: c.d, rot: 0 }} cat={c} zoom={1} />
               </svg>
@@ -3428,6 +3452,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                 />
                 <MenuItem icon="download" label="Экспорт картинки (PNG)" onSelect={() => doExport('png')} />
                 <MenuItem icon="download" label="Экспорт вектора (SVG)" onSelect={() => doExport('svg')} />
+                <MenuItem icon="file" label="Печать в масштабе 1:50…" onSelect={() => doExport('print', 50)} />
+                <MenuItem icon="file" label="Печать в масштабе 1:100…" onSelect={() => doExport('print', 100)} />
                 <MenuItem
                   icon="phone"
                   label="Ссылка для телефона"
@@ -3679,7 +3705,19 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         onPickFile={() => anyInput.current?.click()}
         onPaste={() => void intake.pasteFromClipboard()}
       />
-      {ask && <AskDialog title={ask.title} text={ask.text} options={ask.options} onPick={ask.onPick} onCancel={() => setAsk(null)} />}
+      {ask && (
+        <AskDialog
+          title={ask.title}
+          text={ask.text}
+          options={ask.options}
+          passive={ask.passive}
+          onPick={ask.onPick}
+          onCancel={() => {
+            ask.onCancel?.()
+            setAsk(null)
+          }}
+        />
+      )}
       {furnishFor && (
         <FurnishDialog
           rooms={rooms.map((r) => ({ id: r.meta.id, name: r.meta.name, area: r.area }))}

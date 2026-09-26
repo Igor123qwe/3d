@@ -1224,7 +1224,30 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   }
 
   return (
-    <div ref={wrapRef} className="pl-canvas-wrap" style={{ cursor: cursorStyle }}>
+    <div
+      ref={wrapRef}
+      className="pl-canvas-wrap"
+      style={{ cursor: cursorStyle }}
+      onDragOver={(e) => {
+        if (!e.dataTransfer.types.includes('application/x-planner-item')) return
+        e.preventDefault()
+        e.dataTransfer.dropEffect = 'copy'
+      }}
+      onDrop={(e) => {
+        // карточку каталога перетащили на план: предмет встаёт под курсором с магнитом к стене
+        const type = e.dataTransfer.getData('application/x-planner-item')
+        const cat = type ? CATALOG_MAP[type] : undefined
+        if (!cat) return
+        e.preventDefault()
+        const raw = toWorld(e.clientX, e.clientY)
+        const p = planRef.current
+        const temp: Furniture = { id: 'ghost', type: cat.type, x: raw.x, y: raw.y, w: cat.w, d: cat.d, rot: 0 }
+        const s = snapFurniture(temp, raw, p, { grid: 5, tol: Math.max(tol, 12) })
+        const r = addFurniture(p, cat, s.x, s.y, s.rot)
+        history.apply(() => r.plan)
+        onSelect({ kind: 'furniture', id: r.id })
+      }}
+    >
       <svg
         ref={svgRef}
         width={size.w}
