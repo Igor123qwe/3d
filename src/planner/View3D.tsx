@@ -135,6 +135,7 @@ export const View3D: React.FC<View3DProps> = ({ plan, rooms, selection, onSelect
     const build = ++buildId.current
     const built = buildPlanGroup(planRef.current, roomsRef.current, {
       wallsMode: wallsRef.current,
+      wallHeight: planRef.current.electric?.ceiling,
       ar: xr.current.active,
       alive: () => buildId.current === build,
       onModelLoaded: () => {
@@ -434,6 +435,7 @@ export const View3D: React.FC<View3DProps> = ({ plan, rooms, selection, onSelect
     try {
       let pending = planRef.current.furniture.filter((f) => f.model).length
       const built = buildPlanGroup(planRef.current, roomsRef.current, {
+        wallHeight: planRef.current.electric?.ceiling,
         wallsMode: 'ghost',
         ar: true,
         onModelLoaded: () => (pending -= 1),

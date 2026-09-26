@@ -20,6 +20,8 @@ export type WallsMode = 'solid' | 'ghost' | 'hidden'
 
 export interface SceneOpts {
   wallsMode: WallsMode
+  /** высота стен, см — из исходных данных плана (потолок); по умолчанию 270 */
+  wallHeight?: number
   /** AR: без пола-подложки, стены полупрозрачные */
   ar?: boolean
   onModelLoaded?: () => void
@@ -59,6 +61,7 @@ function edgesOf(geom: THREE.BufferGeometry, color = 0x3a3d44, opacity = 1): THR
 
 // ---------- стены ----------
 function buildWalls(plan: Plan, opts: SceneOpts): THREE.Group {
+  const H = opts.wallHeight ?? WALL_H
   const g = new THREE.Group()
   g.name = 'walls'
   if (opts.wallsMode === 'hidden') return g
@@ -104,10 +107,10 @@ function buildWalls(plan: Plan, opts: SceneOpts): THREE.Group {
       .sort((p, q) => p.s - q.s)
     let cursor = -extA
     for (const { o, s, e } of ops) {
-      if (s > cursor) addBox(cursor, s, 0, WALL_H)
+      if (s > cursor) addBox(cursor, s, 0, H)
       if (o.kind === 'window') {
         addBox(s, e, 0, WINDOW_SILL)
-        addBox(s, e, WINDOW_TOP, WALL_H)
+        addBox(s, e, WINDOW_TOP, H)
         const c = add(w.a, mul(dir, (s + e) / 2))
         const glass = new THREE.Mesh(new THREE.PlaneGeometry((e - s) * M, (WINDOW_TOP - WINDOW_SILL) * M), glassMat)
         glass.position.set(c.x * M, ((WINDOW_SILL + WINDOW_TOP) / 2) * M, c.y * M)
@@ -119,7 +122,7 @@ function buildWalls(plan: Plan, opts: SceneOpts): THREE.Group {
         frameEdges.rotation.copy(glass.rotation)
         g.add(frameEdges)
       } else {
-        addBox(s, e, DOOR_H, WALL_H)
+        addBox(s, e, DOOR_H, H)
         if (o.kind === 'door') {
           // открытое полотно двери
           const geo = openingGeom(o, w)
@@ -134,7 +137,7 @@ function buildWalls(plan: Plan, opts: SceneOpts): THREE.Group {
       }
       cursor = Math.max(cursor, e)
     }
-    if (cursor < L + extB) addBox(cursor, L + extB, 0, WALL_H)
+    if (cursor < L + extB) addBox(cursor, L + extB, 0, H)
   }
   return g
 }

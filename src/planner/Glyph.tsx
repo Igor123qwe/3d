@@ -29,7 +29,7 @@ interface Props {
 }
 
 /** Условное обозначение объекта в локальных координатах (центр в 0,0; спинка сверху) */
-export const Glyph: React.FC<Props> = ({ item, cat = CATALOG_MAP[item.type], zoom }) => {
+const GlyphImpl: React.FC<Props> = ({ item, cat = CATALOG_MAP[item.type], zoom }) => {
   const w = item.w
   const d = item.d
   const hw = w / 2
@@ -384,3 +384,6 @@ export const Glyph: React.FC<Props> = ({ item, cat = CATALOG_MAP[item.type], zoo
       return body(2)
   }
 }
+
+/** значок зависит только от предмета и масштаба: сотни предметов не перерисовываются на каждое движение */
+export const Glyph = React.memo(GlyphImpl)

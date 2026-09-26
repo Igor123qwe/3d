@@ -56,7 +56,7 @@ import { furnish, type FurnishOptions } from './furnish'
 import { FurnishDialog } from './FurnishDialog'
 import { DEFAULT_AUTO, DEFAULT_ELECTRIC, ELECTRIC_NAMES, FEED_HEIGHT, FEED_NAMES, MOUNT_HEIGHT, autoElectrics, catalogTypeOf, type AutoElectricOptions } from './electrics'
 import { designCsv, designElectrics, feedOf, powerOf } from './electricplan'
-import type { ElectricKind, ElectricSettings, Feed, ProductRef } from './types'
+import { emptyPlan, type ElectricKind, type ElectricSettings, type Feed, type ProductRef } from './types'
 import { fetchProduct, formatPrice, typeForProduct, type ProductInfo } from './products'
 import { modelKey } from './polyhaven'
 import { Icon, type IconName } from './icons'
@@ -193,6 +193,9 @@ const MODES: { mode: EditMode; icon: IconName; name: string; hint: string }[] = 
   { mode: 'furnish', icon: 'furniture', name: 'Мебель', hint: 'Только мебель: стены и электрика не сдвинутся случайно' },
   { mode: 'electric', icon: 'bolt', name: 'Электрика', hint: 'Только точки электрики: розетки, выключатели, свет, щит' },
 ]
+
+/** пустой проект электрики — пока он не нужен на экране */
+const NO_DESIGN = designElectrics(emptyPlan(), [], DEFAULT_ELECTRIC)
 
 const WALL_REFS: { ref: WallRef; name: string; long: string }[] = [
   { ref: 'axis', name: 'по оси', long: 'по оси' },
@@ -397,9 +400,20 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
 
   useEffect(() => {
     if (!toast) return
-    const t = setTimeout(() => setToast(null), 3500)
+    // длинное сообщение висит дольше: ~45 мс на символ, но не дольше 9 с
+    const t = setTimeout(() => setToast(null), Math.min(9000, Math.max(3500, 1500 + toast.length * 45)))
     return () => clearTimeout(t)
   }, [toast])
+
+  // Esc закрывает открытое меню — иначе только щелчком мимо
+  useEffect(() => {
+    if (!menu) return
+    const f = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenu(null)
+    }
+    window.addEventListener('keydown', f)
+    return () => window.removeEventListener('keydown', f)
+  }, [menu])
 
   // фотореалистичный план: виды сверху моделей
   useEffect(() => {
@@ -463,10 +477,26 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         const p = await decodePlan(h.plan)
         if (!alive) return
         if (!p) setToast('Не удалось прочитать план из ссылки')
-        else if (!hadSavedPlan || window.confirm('Открыть план из ссылки? План, сохранённый в этом браузере, будет заменён.')) {
-          history.replace(p)
-          setSelection(null)
-          setTimeout(() => canvasRef.current?.fit(), 30)
+        else {
+          const openIt = () => {
+            history.replace(p)
+            setSelection(null)
+            setTimeout(() => canvasRef.current?.fit(), 30)
+          }
+          if (!hadSavedPlan) openIt()
+          else
+            setAsk({
+              title: 'Открыть план из ссылки?',
+              text: 'План, сохранённый в этом браузере, будет заменён. Прежний план вернёт Ctrl+Z.',
+              options: [
+                { key: 'open', label: 'Открыть план из ссылки', icon: 'link', primary: true },
+                { key: 'keep', label: 'Оставить мой план', icon: 'file' },
+              ],
+              onPick: (k) => {
+                setAsk(null)
+                if (k === 'open') openIt()
+              },
+            })
         }
       }
       if (alive && (h.mode === '3d' || h.mode === 'ar')) {
@@ -547,6 +577,8 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   }
 
   const pick = (item: CatalogItem) => {
+    // ставить можно только на чертеже: из 3D возвращаемся в 2D
+    setView3d(false)
     setPlacing(item)
     setToolRaw('place')
     setSelection(null)
@@ -1543,16 +1575,29 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         setToast('Стены не найдены: попробуйте поднять чувствительность или уменьшить минимальную длину')
         return
       }
-      const replace =
-        plan.walls.length > 0 &&
-        window.confirm(`Найдено стен: ${walls.length}, проёмов: ${openings.length}. Заменить нарисованные стены? «Отмена» — добавить к ним.`)
-      history.apply((p) => ({
-        ...p,
-        walls: replace ? walls : [...p.walls, ...walls],
-        openings: replace ? openings : [...p.openings, ...openings],
-      }))
-      setSelection(null)
-      setToast(`Распознано: стен ${walls.length}, проёмов ${openings.length}. Проверьте и поправьте вручную`)
+      const put = (replace: boolean) => {
+        history.apply((p) => ({
+          ...p,
+          walls: replace ? walls : [...p.walls, ...walls],
+          openings: replace ? openings : [...p.openings, ...openings],
+        }))
+        setSelection(null)
+        setToast(`Распознано: стен ${walls.length}, проёмов ${openings.length}. Проверьте и поправьте вручную`)
+      }
+      if (!plan.walls.length) put(false)
+      else
+        setAsk({
+          title: `Найдено стен: ${walls.length}, проёмов: ${openings.length}`,
+          text: 'На чертеже уже есть стены. Заменить их найденными или добавить к ним?',
+          options: [
+            { key: 'replace', label: 'Заменить нарисованные стены', icon: 'wall', primary: true },
+            { key: 'add', label: 'Добавить к нарисованным', icon: 'plus' },
+          ],
+          onPick: (k) => {
+            setAsk(null)
+            put(k === 'replace')
+          },
+        })
     } catch (err) {
       setToast((err as Error).message)
     } finally {
@@ -1836,7 +1881,10 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const electricItems = plan.furniture.filter((f) => f.electric)
   const electricSettings = plan.electric ?? DEFAULT_ELECTRIC
   // проект электрики: группы, трассы, ведомость и нормы — заново на каждую правку
-  const design = useMemo(() => designElectrics(plan, rooms, electricSettings), [plan, rooms, electricSettings])
+  // проект электрики нужен в режиме электрики, на её вкладке, в «Проверке» и у выбранной точки;
+  // в остальное время его не считаем — иначе каждый кадр перетаскивания перекладывал бы щит
+  const needDesign = mode === 'electric' || panel === 'electric' || panel === 'checks' || (selection?.kind === 'furniture' && !!plan.furniture.find((f) => f.id === selection.id)?.electric)
+  const design = useMemo(() => (needDesign ? designElectrics(plan, rooms, electricSettings) : NO_DESIGN), [plan, rooms, electricSettings, needDesign])
   const setElectric = (patch: Partial<ElectricSettings>) => history.apply((p) => ({ ...p, electric: { ...(p.electric ?? DEFAULT_ELECTRIC), ...patch } }))
 
   const runAutoElectrics = () => {
@@ -1849,21 +1897,46 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       setToast('Нечего ставить: включите хотя бы одно правило')
       return
     }
-    const hadElectrics = electricItems.length > 0
-    if (hadElectrics && !window.confirm(`Заменить текущую электрику (${electricItems.length} точек) на ${items.length} новых?`)) return
-    history.apply((p) => ({ ...p, furniture: [...p.furniture.filter((f) => !f.electric), ...items] }))
-    setSelection(null)
-    setLayers((l) => ({ ...l, electric: true }))
-    setModeRaw('electric')
-    setElTab('panel')
-    setToast(`Расставлено точек: ${items.length}. Группы щита, кабель и нормы — в панели «Электрика»`)
+    const put = () => {
+      history.apply((p) => ({ ...p, furniture: [...p.furniture.filter((f) => !f.electric), ...items] }))
+      setSelection(null)
+      setLayers((l) => ({ ...l, electric: true }))
+      setModeRaw('electric')
+      setElTab('panel')
+      setToast(`Расставлено точек: ${items.length}. Группы щита, кабель и нормы — в панели «Электрика»`)
+    }
+    if (!electricItems.length) put()
+    else
+      setAsk({
+        title: 'Заменить текущую электрику?',
+        text: `Сейчас на плане ${electricItems.length} точек, по нормам встанет ${items.length}. Прежние точки вернёт Ctrl+Z.`,
+        options: [
+          { key: 'replace', label: 'Заменить', icon: 'bolt', primary: true },
+          { key: 'keep', label: 'Оставить как есть' },
+        ],
+        onPick: (k) => {
+          setAsk(null)
+          if (k === 'replace') put()
+        },
+      })
   }
 
   const clearElectrics = () => {
     if (!electricItems.length) return
-    if (!window.confirm(`Убрать всю электрику (${electricItems.length} точек)?`)) return
-    history.apply((p) => ({ ...p, furniture: p.furniture.filter((f) => !f.electric) }))
-    setSelection(null)
+    setAsk({
+      title: `Убрать всю электрику (${electricItems.length} точек)?`,
+      text: 'Розетки, выключатели, свет и датчики уйдут с плана. Вернуть — Ctrl+Z.',
+      options: [
+        { key: 'clear', label: 'Убрать', icon: 'trash', primary: true },
+        { key: 'keep', label: 'Оставить' },
+      ],
+      onPick: (k) => {
+        setAsk(null)
+        if (k !== 'clear') return
+        history.apply((p) => ({ ...p, furniture: p.furniture.filter((f) => !f.electric) }))
+        setSelection(null)
+      },
+    })
   }
 
   const pickElectric = (kind: ElectricKind, why: string) => {
@@ -3171,13 +3244,13 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           </button>
           <span className="pl-zoom">
             <span className="pl-sep" />
-            <button className="pl-ibtn ghost" onClick={() => canvasRef.current?.zoomBy(1 / 1.25)} title="Отдалить" aria-label="Отдалить">
+            <button className="pl-ibtn ghost" disabled={view3d} onClick={() => canvasRef.current?.zoomBy(1 / 1.25)} title="Отдалить" aria-label="Отдалить">
               <Icon name="zoomOut" />
             </button>
-            <button className="pl-ibtn ghost wide" onClick={() => canvasRef.current?.fit()} title="Показать весь план">
+            <button className="pl-ibtn ghost wide" disabled={view3d} onClick={() => canvasRef.current?.fit()} title="Показать весь план">
               {Math.round(view.zoom * 100)}%
             </button>
-            <button className="pl-ibtn ghost" onClick={() => canvasRef.current?.zoomBy(1.25)} title="Приблизить" aria-label="Приблизить">
+            <button className="pl-ibtn ghost" disabled={view3d} onClick={() => canvasRef.current?.zoomBy(1.25)} title="Приблизить" aria-label="Приблизить">
               <Icon name="zoomIn" />
             </button>
           </span>
@@ -3565,7 +3638,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           {fmtArea(totalArea)} · {rooms.length} {rooms.length === 1 ? 'комната' : rooms.length >= 2 && rooms.length <= 4 ? 'комнаты' : 'комнат'} · сетка {fmtNum(plan.settings.grid)} см
         </span>
       </footer>
-      {toast && <div className="pl-toast">{toast}</div>}
+      {toast && (
+        <div className="pl-toast" role="status" aria-live="polite" onClick={() => setToast(null)} title="Закрыть">
+          {toast}
+        </div>
+      )}
       {exportJob && (
         <div style={{ position: 'absolute', left: -100000, top: 0, width: 10, height: 10, overflow: 'hidden' }} aria-hidden>
           <svg ref={exportSvgRef} xmlns="http://www.w3.org/2000/svg" width={exportJob.w * exportJob.z} height={exportJob.h * exportJob.z} viewBox={`${exportJob.x} ${exportJob.y} ${exportJob.w} ${exportJob.h}`}>

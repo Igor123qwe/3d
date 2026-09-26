@@ -143,7 +143,7 @@ export interface SceneProps {
   mode?: EditMode
 }
 
-export const Scene: React.FC<SceneProps> = ({ plan, rooms, check, layers, unit, zoom, selection = null, hover = null, badItems, photos, mode }) => {
+const SceneImpl: React.FC<SceneProps> = ({ plan, rooms, check, layers, unit, zoom, selection = null, hover = null, badItems, photos, mode }) => {
   const wallPolys = useMemo(() => plan.walls.map((w) => ({ w, poly: wallPolygon(w, plan.walls) })), [plan.walls])
   const wallMap = useMemo(() => new Map(plan.walls.map((w) => [w.id, w])), [plan.walls])
   const furniture = useMemo(() => sortedFurniture(plan), [plan])
@@ -401,6 +401,9 @@ export const Scene: React.FC<SceneProps> = ({ plan, rooms, check, layers, unit, 
     </g>
   )
 }
+
+/** при панораме меняется только transform группы — сцену не перерисовываем */
+export const Scene = React.memo(SceneImpl)
 
 /** Габариты содержимого плана (см) */
 export function planBounds(plan: Plan): { minX: number; minY: number; maxX: number; maxY: number } | null {

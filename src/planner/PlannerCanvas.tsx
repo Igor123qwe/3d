@@ -659,7 +659,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
   }
   const applySide = () => {
     if (!sideEdit) return
-    const v = Number(sideEdit.value.replace(',', '.'))
+    const v = Number(sideEdit.value.replace(',', '.')) * UNIT_CM[unit]
     const before = planRef.current
     const next = setRoomSide(before, sideEdit.a, sideEdit.b, v, sideEdit.end)
     if (touchesLocked(before, next)) {
@@ -688,7 +688,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         return Math.abs(dot(v, d)) <= 22 / z && Math.abs(dot(v, perp(d))) <= 8 / z
       })
       if (lab) {
-        setSideEdit({ a: lab.a, b: lab.b, value: String(Math.round(lab.L)), end: sideDefaultEnd(lab.a, lab.b), at: lab.p })
+        setSideEdit({ a: lab.a, b: lab.b, value: String(Math.round((lab.L / UNIT_CM[unit]) * 100) / 100), end: sideDefaultEnd(lab.a, lab.b), at: lab.p })
         return
       }
     }
@@ -1234,6 +1234,14 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerCancel}
+        onPointerLeave={() => {
+          // курсор ушёл на панель — подсветка стены не должна висеть
+          if (!drag.current) {
+            setHover(null)
+            setHoverPart(null)
+            setOverLabel(false)
+          }
+        }}
         onContextMenu={(e) => {
           e.preventDefault()
           if (draft.length) finishDraft()
@@ -1563,9 +1571,9 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         (() => {
           const m = lerp(calibEdit.a, calibEdit.b, 0.5)
           const commit = () => {
-            const cm = Number(calibEdit.value.replace(',', '.'))
+            const cm = Number(calibEdit.value.replace(',', '.')) * UNIT_CM[unit]
             if (!Number.isFinite(cm) || cm <= 0) {
-              onNotice?.('Нужно число больше нуля, например 372')
+              onNotice?.(`Нужно число больше нуля, например ${unit === 'm' ? '3,72' : unit === 'mm' ? '3720' : '372'}`)
               return
             }
             onCalibrate?.(calibEdit.a, calibEdit.b, cm)
@@ -1578,7 +1586,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
                 <input
                   autoFocus
                   inputMode="decimal"
-                  placeholder="372"
+                  placeholder={unit === 'm' ? '3,72' : unit === 'mm' ? '3720' : '372'}
                   value={calibEdit.value}
                   onChange={(e) => setCalibEdit({ ...calibEdit, value: e.target.value })}
                   onKeyDown={(e) => {
@@ -1587,7 +1595,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
                     if (e.key === 'Escape') setCalibEdit(null)
                   }}
                 />
-                <span>см</span>
+                <span>{UNIT_NAME[unit]}</span>
                 <button className="pl-btn primary" onClick={commit}>
                   OK
                 </button>
@@ -1619,7 +1627,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
                     if (e.key === 'Escape') setSideEdit(null)
                   }}
                 />
-                <span>см</span>
+                <span>{UNIT_NAME[unit]}</span>
                 <button className="pl-btn primary" onClick={applySide}>
                   OK
                 </button>

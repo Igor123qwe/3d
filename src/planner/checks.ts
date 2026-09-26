@@ -1,25 +1,9 @@
 // Проверка планировки по правилам эргономики, которыми пользуются дизайнеры интерьера.
-import { isLiving, isWet } from './roomkind'
+import { isLiving, isWet, roomKind } from './roomkind'
 import type { Furniture, Issue, Opening, Plan, Pt, Room, Wall } from './types'
 import { CATALOG_MAP, type CatalogItem, type Clearance } from './catalog'
 import { findGaps } from './walledit'
-import {
-  add,
-  angleDeg,
-  angleDiff,
-  convexOverlap,
-  dist,
-  lerp,
-  localRect,
-  mul,
-  norm,
-  obbCorners,
-  perp,
-  pointInPoly,
-  pointSegDist,
-  rotate,
-  sub,
-} from './geometry'
+import { add, angleDeg, angleDiff, bboxOf, convexOverlap, dist, lerp, localRect, mul, norm, obbCorners, perp, pointInPoly, pointSegDist, rotate, sub } from './geometry'
 
 export interface Triangle {
   pts: Pt[]
@@ -194,6 +178,21 @@ export function runChecks(plan: Plan, rooms: Room[]): CheckResult {
     if (isLiving(r.meta.name) && openingsOnRoom(r, ['window']).length === 0) {
       push({ id: `nowin-${r.meta.id}`, level: 'info', text: `В «${r.meta.name}» нет окна — жилой комнате нужен естественный свет`, target: { kind: 'room', id: r.meta.id } })
     }
+    // минимальные площади и ширины жилых помещений (СП 54.13330.2022, п. 5.7–5.9)
+    const kind = roomKind(r.meta.name)
+    const bb = r.inner.length >= 3 ? bboxOf(r.inner) : null
+    const minSide = bb ? Math.min(bb.maxX - bb.minX, bb.maxY - bb.minY) : Infinity
+    const area = Math.round(r.area * 10) / 10
+    const minArea: Partial<Record<ReturnType<typeof roomKind>, [number, string]>> = {
+      bedroom: [8, 'спальня — от 8 м² (на двоих — от 10)'],
+      kids: [8, 'детская — от 8 м²'],
+      living: [12, 'общая комната — от 12 м² (в квартире с двумя и более комнатами — от 16)'],
+      kitchen: [8, 'кухня — от 8 м² (кухня-ниша — от 5)'],
+    }
+    const rule = minArea[kind]
+    if (rule && area < rule[0]) push({ id: `small-${r.meta.id}`, level: 'info', text: `«${r.meta.name}» ${area} м² — по СП 54.13330 ${rule[1]}`, target: { kind: 'room', id: r.meta.id } })
+    if (kind === 'hall' && minSide < 85) push({ id: `narrow-${r.meta.id}`, level: 'warn', text: `«${r.meta.name}» шириной ${Math.round(minSide)} см — коридор не уже 85 см, прихожая от 140 (СП 54.13330)`, target: { kind: 'room', id: r.meta.id } })
+    if (kind === 'wet' && minSide < 80) push({ id: `narrow-${r.meta.id}`, level: 'warn', text: `«${r.meta.name}» шириной ${Math.round(minSide)} см — туалет не уже 80 см (СП 54.13330)`, target: { kind: 'room', id: r.meta.id } })
   }
 
   // 5. правила для кроватей
