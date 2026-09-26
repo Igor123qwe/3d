@@ -486,6 +486,14 @@ function electricIssues(plan: Plan, rooms: Room[], d: ElectricDesign): ElectricI
     else if (c.kind === 'sockets' && c.points.length > 10) out.push({ level: 'info', text: `${c.id} «${c.name}»: ${c.points.length} розеток в одной группе — удобнее разделить` })
   }
   if (d.demandKw > d.settings.allottedKw) out.push({ level: 'warn', text: `Расчётная нагрузка ${d.demandKw} кВт больше выделенной ${d.settings.allottedKw} кВт — нужно больше мощности или меньше одновременной техники` })
+  // связь «выключатель ↔ светильник»: свет без выключателя и выключатель вхолостую
+  const epts = plan.furniture.filter((f) => f.electric)
+  const controlled = new Set(epts.flatMap((f) => f.electric?.controls ?? []))
+  for (const f of epts) {
+    const e = f.electric!
+    if (LIGHTS.includes(e.kind) && !controlled.has(f.id)) out.push({ level: 'warn', pointId: f.id, text: `${name(f)}: не привязан ни к одному выключателю — отметьте его в свойствах выключателя («Управляет»)` })
+    if (SWITCHES.includes(e.kind) && e.kind !== 'switch-master' && !e.controls?.length) out.push({ level: 'info', pointId: f.id, text: `${name(f)}: ничем не управляет — выберите светильники в свойствах` })
+  }
   return out
 }
 

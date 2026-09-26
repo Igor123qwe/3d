@@ -2258,6 +2258,52 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                     <span>Высота от пола, {UNIT_NAME[unit]}</span>
                     <LenField unit={unit} value={e.height} min={0} max={400} step={5} onCommit={(v) => updE({ height: v })} />
                   </label>
+                  {['switch', 'smart-switch', 'dimmer', 'switch-master'].includes(e.kind) &&
+                    (() => {
+                      const lights = plan.furniture
+                        .filter((x) => x.electric && ['light', 'spot', 'wall-lamp'].includes(x.electric.kind))
+                        .map((l) => ({ l, d: dist({ x: l.x, y: l.y }, { x: f.x, y: f.y }), room: rooms.find((r) => pointInPoly({ x: l.x, y: l.y }, r.polygon))?.meta.name ?? 'вне комнат' }))
+                        .sort((a, b) => a.d - b.d)
+                      const cur = new Set(e.controls ?? [])
+                      return (
+                        <div className="pl-field pl-field-col">
+                          <span>Управляет светом</span>
+                          {!lights.length ? (
+                            <div className="pl-note">Светильников на плане нет.</div>
+                          ) : (
+                            <div className="pl-ctl-list">
+                              {lights.slice(0, 14).map(({ l, room, d }) => (
+                                <label key={l.id} className="pl-ctl-item">
+                                  <input
+                                    type="checkbox"
+                                    checked={cur.has(l.id)}
+                                    onChange={() => {
+                                      const next = new Set(cur)
+                                      if (next.has(l.id)) next.delete(l.id)
+                                      else next.add(l.id)
+                                      updE({ controls: [...next] })
+                                    }}
+                                  />
+                                  {ELECTRIC_NAMES[l.electric!.kind]} · {room} · {fmtLen(d, unit)}
+                                </label>
+                              ))}
+                            </div>
+                          )}
+                          <div className="pl-note">Пунктир на плане ведёт от выключателя к его светильникам. Проходные: отметьте один и тот же свет у двух выключателей.</div>
+                        </div>
+                      )
+                    })()}
+                  {['light', 'spot', 'wall-lamp'].includes(e.kind) &&
+                    (() => {
+                      const sws = plan.furniture.filter((x) => x.electric?.controls?.includes(f.id))
+                      return sws.length ? (
+                        <div className="pl-note">
+                          Включается: {sws.map((x) => `${ELECTRIC_NAMES[x.electric!.kind].toLowerCase()} (${x.electric!.why})`).join('; ')}
+                        </div>
+                      ) : (
+                        <div className="pl-note pl-note-warn">Не привязан к выключателю: выберите выключатель и отметьте этот свет в «Управляет светом».</div>
+                      )
+                    })()}
                   {outlet && (
                     <label className="pl-field">
                       <span>Назначение</span>

@@ -489,7 +489,40 @@ export function autoElectrics(plan: Plan, rooms: Room[], o: AutoElectricOptions,
     const p = at?.p ?? { x: entry.meta.anchor.x, y: entry.meta.anchor.y - 60 }
     out.push(place('panel', p.x, p.y, at?.rot ?? 0, 'щит: ввод, реле напряжения, автоматы и УЗО групп', undefined, { height: 170 }))
   }
-  return out
+  return linkSwitches(out, rooms)
+}
+
+const LINK_SWITCHES: ElectricKind[] = ['switch', 'smart-switch', 'dimmer']
+const LINK_LIGHTS: ElectricKind[] = ['light', 'spot', 'wall-lamp']
+
+/**
+ * Связь «выключатель ↔ светильник»: выключатель управляет светом своей
+ * комнаты; тот, что стоит снаружи санузла, — светом за дверью (ближайший
+ * чужой светильник в пределах 3 м); мастер-выключатель — всем светом.
+ * Уже заданные вручную связи не трогаем
+ */
+export function linkSwitches(items: Furniture[], rooms: Room[]): Furniture[] {
+  const lights = items.filter((f) => f.electric && LINK_LIGHTS.includes(f.electric.kind))
+  const roomOf = (f: Furniture) => rooms.find((r) => pointInPoly({ x: f.x, y: f.y }, r.polygon))
+  const lightRoom = new Map(lights.map((l) => [l.id, roomOf(l)?.meta.id]))
+  const inRoomIds = (roomId: string | undefined) => lights.filter((l) => lightRoom.get(l.id) === roomId).map((l) => l.id)
+  return items.map((f) => {
+    const e = f.electric
+    if (!e || e.controls?.length) return f
+    if (e.kind === 'switch-master') return { ...f, electric: { ...e, controls: lights.map((l) => l.id) } }
+    if (!LINK_SWITCHES.includes(e.kind)) return f
+    const own = roomOf(f)
+    let ids = own ? inRoomIds(own.meta.id) : []
+    if (/снаружи/.test(e.why) || !ids.length) {
+      const near = lights
+        .filter((l) => lightRoom.get(l.id) !== own?.meta.id)
+        .map((l) => ({ l, d: dist({ x: f.x, y: f.y }, { x: l.x, y: l.y }) }))
+        .filter((x) => x.d < 300)
+        .sort((a, b) => a.d - b.d)
+      if (near.length) ids = inRoomIds(lightRoom.get(near[0].l.id))
+    }
+    return ids.length ? { ...f, electric: { ...e, controls: ids } } : f
+  })
 }
 
 /**

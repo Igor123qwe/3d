@@ -1923,3 +1923,17 @@
     display: none;
   }
 }
+
+/* список «Управляет светом» у выключателя */
+.pl-ctl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pl-ctl-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  cursor: pointer;
+}

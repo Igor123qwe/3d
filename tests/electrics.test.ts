@@ -148,3 +148,18 @@ describe('отображение', () => {
     }
   })
 })
+
+describe('связь выключатель ↔ светильник', () => {
+  it('после расстановки выключатели управляют светом своей комнаты, мастер — всем', () => {
+    const base = twoRoom()
+    const plan: Plan = { ...base, openings: [{ id: 'd', kind: 'door', wallId: base.walls[0].id, t: 0.5, width: 80, hinge: 'a', side: 1 }] }
+    const { items } = run(plan, { ...DEFAULT_AUTO, smart: true })
+    const lights = items.filter((i) => ['light', 'spot', 'wall-lamp'].includes(i.electric!.kind))
+    const switches = items.filter((i) => ['switch', 'smart-switch', 'dimmer'].includes(i.electric!.kind))
+    expect(lights.length).toBeGreaterThan(0)
+    expect(switches.length).toBeGreaterThan(0)
+    expect(switches.some((sw) => (sw.electric!.controls?.length ?? 0) > 0)).toBe(true)
+    const master = items.find((i) => i.electric!.kind === 'switch-master')
+    if (master) expect(master.electric!.controls?.length).toBe(lights.length)
+  })
+})

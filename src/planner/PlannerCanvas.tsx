@@ -1787,6 +1787,26 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
               )
             })()}
 
+          {/* связь «выключатель ↔ светильник» у выбранной точки: пунктир от выключателя к его свету */}
+          {mode === 'electric' &&
+            selFurn?.electric &&
+            (() => {
+              const e = selFurn.electric
+              const pairs: [Furniture, Furniture][] = []
+              if (e.controls?.length) {
+                for (const id of e.controls) {
+                  const l = plan.furniture.find((x) => x.id === id)
+                  if (l) pairs.push([selFurn, l])
+                }
+              } else for (const sw of plan.furniture) if (sw.electric?.controls?.includes(selFurn.id)) pairs.push([sw, selFurn])
+              return pairs.map(([a, b]) => (
+                <g key={`ctl-${a.id}-${b.id}`} pointerEvents="none">
+                  <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#7c3aed" strokeWidth={1.4 / zoom} strokeDasharray={`${5 / zoom} ${4 / zoom}`} />
+                  <circle cx={b.x} cy={b.y} r={5 / zoom} fill="none" stroke="#7c3aed" strokeWidth={1.4 / zoom} />
+                </g>
+              ))
+            })()}
+
           {/* группа выделенных предметов и рамка выделения */}
           {multi.length > 0 &&
             groupIds().map((id) => {
