@@ -50,7 +50,8 @@ describe('расстановка с ИИ по пожеланиям', () => {
     expect(log.layout.every((a) => a.wishes === 'двое взрослых и ребёнок' && a.apartment?.length === 2)).toBe(true)
     // в каждой комнате встала кровать, мусорный тип отсеян
     expect(rep.plan.furniture.filter((f) => /bed/.test(f.type))).toHaveLength(2)
-    expect(rep.rooms.every((r) => r.placed === 1 && r.rejected === 1)).toBe(true)
+    // кровать и то, что встало к ней (тумбы у изголовья), мусорный тип отклонён
+    expect(rep.rooms.every((r) => r.placed >= 1 && r.rejected === 1)).toBe(true)
     // комнаты переименованы по назначению
     expect(rep.plan.rooms.map((m) => m.name).sort()).toEqual(['Детская', 'Спальня'])
     expect(rep.costs).toHaveLength(3)
@@ -115,7 +116,7 @@ describe('расстановка с ИИ по пожеланиям', () => {
     const rep = await furnish(plan, rooms, { scope: 'all', wishes: 'кабинет', replace: false, rename: true }, deps)
     expect(rep.zoningFailed).toBe('сеть')
     expect(rep.rooms.filter((r) => r.error)).toHaveLength(1)
-    expect(rep.rooms.filter((r) => r.placed === 1)).toHaveLength(1)
+    expect(rep.rooms.filter((r) => r.placed >= 1)).toHaveLength(1)
     // без зонирования имена не трогаем
     expect(rep.plan.rooms.map((m) => m.name).sort()).toEqual(['Комната', 'Комната 2'])
   })

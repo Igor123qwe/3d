@@ -111,6 +111,68 @@ describe('проверка расстановки от ИИ', () => {
     expect(checks[0].reason).toMatch(/Шкаф.*не помещается/)
   })
 
+  it('модель дала левые верхние углы вместо центров — ответ читается как углы, ничего не «поправлено»', () => {
+    const { plan, room: r } = room()
+    // чистовые грани: 10…490 × 10…390
+    const checks = vetLayout(
+      [
+        { type: 'bed-160', x: 170, y: 10, rot: 0, why: 'изголовьем к верхней стене' },
+        // шкаф 180 × 60 спинкой к левой стене: рамка 60 по x, 180 по y — от y 200 до 380
+        { type: 'wardrobe', x: 10, y: 200, rot: 270, why: 'к левой стене' },
+      ],
+      r,
+      plan,
+      { purpose: 'Спальня' },
+    )
+    for (const c of checks) honest(c, r, plan, checks)
+    const bed = checks[0].furniture!
+    // угол (170; 10) → центр (250; 115)
+    expect(Math.abs(bed.x - 250)).toBeLessThan(2)
+    expect(Math.abs(bed.y - 115)).toBeLessThan(2)
+    expect(checks.filter((c) => !c.added).every((c) => (c.moved ?? 0) <= 20)).toBe(true)
+  })
+
+  it('спальня как у пользователя: кровать по центру, тумбы по бокам, столик не спиной к окну, без красного', () => {
+    // чистовые грани 371 × 409, внизу справа выступ коридора 83 × 151, окно на левой стене, дверь в выступе
+    const W = (id: string, ax: number, ay: number, bx: number, by: number, t: number) => ({ id, a: { x: ax, y: ay }, b: { x: bx, y: by }, thickness: t })
+    let plan: Plan = {
+      ...empty,
+      walls: [W('top', -20, -20, 377, -20, 40), W('right', 377, -20, 377, 264, 12), W('notchH', 294, 264, 377, 264, 12), W('notchV', 294, 264, 294, 415, 12), W('bottom', -20, 415, 294, 415, 12), W('left', -20, -20, -20, 415, 40)],
+    }
+    const rooms0 = buildRooms(plan).rooms
+    plan = addOpening(plan, 'window', 'left', (231 + 20) / 435, 150, rooms0).plan
+    plan = addOpening(plan, 'door', 'notchV', 0.55, 80, rooms0).plan
+    const r = buildRooms(plan).rooms.find((x) => x.area > 12)!
+    // как ответила модель у пользователя: углы вместо центров, кровать не по центру, столик спиной к окну
+    const checks = vetLayout(
+      [
+        { type: 'bed-160', x: 75, y: 0, rot: 0, why: 'изголовьем к глухой стене' },
+        { type: 'vanity', x: 0, y: 200, rot: 270, why: 'у окна' },
+        { type: 'wardrobe', x: 0, y: 349, rot: 180, why: 'у стены' },
+      ],
+      r,
+      plan,
+      { purpose: 'Спальня' },
+    )
+    for (const c of checks) honest(c, r, plan, checks)
+    const bed = checks.find((c) => c.furniture?.type === 'bed-160')!.furniture!
+    // по центру своей стены: слева и справа поровну (±20 см)
+    const left = bed.x - bed.w / 2
+    const right = 371 - (bed.x + bed.w / 2)
+    expect(Math.abs(left - right), `слева ${left}, справа ${right}`).toBeLessThanOrEqual(20)
+    // тумбы добавлены с двух сторон изголовья
+    const stands = checks.filter((c) => c.added && c.furniture?.type === 'nightstand').map((c) => c.furniture!)
+    expect(stands).toHaveLength(2)
+    for (const n of stands) expect(Math.abs(n.y - n.d / 2)).toBeLessThan(3)
+    // столик не спиной к окну (окно на левой стене, y 156…306)
+    const vanity = checks.find((c) => c.furniture?.type === 'vanity')!.furniture!
+    const backToWindow = vanity.rot === 270 && vanity.x < 40 && vanity.y + vanity.w / 2 > 156 && vanity.y - vanity.w / 2 < 306
+    expect(backToWindow, `столик в (${Math.round(vanity.x)}; ${Math.round(vanity.y)}), поворот ${vanity.rot}`).toBe(false)
+    const next = applyLayout(plan, checks)
+    const red = runChecks(next, buildRooms(next).rooms).issues.filter((i) => i.level === 'error')
+    expect(red.map((i) => i.text)).toEqual([])
+  })
+
   it('второй предмет на том же месте встаёт рядом, а не поверх', () => {
     const { plan, room: r } = room()
     const checks = vetLayout(
@@ -174,8 +236,9 @@ describe('проверка расстановки от ИИ', () => {
       plan,
     )
     const next = applyLayout(plan, checks)
-    expect(next.furniture).toHaveLength(1)
-    expect(layoutSummary(checks)).toMatch(/Поставлено предметов: 1\. Отклонено 1/)
+    // кровать и тумбы, что встали к ней; мусора нет
+    expect(next.furniture.map((f) => f.type).sort()).toEqual(['bed-160', 'nightstand', 'nightstand'])
+    expect(layoutSummary(checks)).toMatch(/Поставлено предметов: 3 — Кровать 160×200, Тумба прикроватная, Тумба прикроватная\. Отклонено 1/)
   })
 
   it('объяснение модели попадает в пояснение, а не в подпись', () => {

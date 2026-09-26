@@ -317,6 +317,8 @@ export interface LayoutResult {
 
 export interface LayoutAsk {
   polygon: { x: number; y: number }[]
+  /** ширина и глубина комнаты по чистовым граням, см */
+  size?: [number, number]
   openings: { kind: string; x: number; y: number; width: number }[]
   room: string
   areaM2: number

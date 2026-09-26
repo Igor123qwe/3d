@@ -13,7 +13,7 @@ import type { Furniture, Plan, Pt, Room, Wall } from './types'
 import { uid } from './types'
 import { CATALOG, CATALOG_MAP, dims3d, type CatalogItem } from './catalog'
 import { furnitureBody, openingGeom, wallBody, zonesOf } from './checks'
-import { add, convexOverlap, dist, mul, norm, normDeg, obbCorners, perp, pointInPoly, sub } from './geometry'
+import { add, convexOverlap, dist, mul, norm, normDeg, obbCorners, perp, pointInPoly, rotate, sub } from './geometry'
 
 export interface PlacementCheck {
   item: AiPlacement
@@ -25,6 +25,8 @@ export interface PlacementCheck {
   moved?: number
   /** поставлен предмет поменьше: какой был предложен */
   replaced?: string
+  /** модель этого не предлагала — добавлено по правилу (тумбы к кровати) */
+  added?: boolean
 }
 
 export interface LayoutOptions {
@@ -86,6 +88,31 @@ interface Ctx {
   /** зоны подхода уже стоящих предметов: новый предмет их не перекрывает */
   takenZones: Pt[][]
   tol: number
+  /** двуспальные кровати, что уже встали: к ним — тумбы по бокам */
+  beds?: Furniture[]
+}
+
+/** двуспальная кровать: по центру стены, подход с двух сторон, тумбы по бокам */
+const isDoubleBed = (cat: CatalogItem | undefined) => cat?.glyph === 'bed' && cat.w >= 140
+
+/** Сколько свободно сбоку от предмета: от боковой грани наружу до стены или соседа, см */
+function sideRoom(f: Furniture, side: -1 | 1, c: Ctx, limit = 250): number {
+  const out = rotate({ x: side, y: 0 }, f.rot)
+  // посередине длины кровати: там, где к ней подходят
+  const start = add({ x: f.x, y: f.y }, rotate({ x: (side * f.w) / 2, y: 0 }, f.rot))
+  for (let k = 5; k <= limit; k += 5) {
+    const q = add(start, mul(out, k))
+    if (!pointInPoly(q, c.inner) || c.taken.some((t) => pointInPoly(q, t))) return k - 5
+  }
+  return limit
+}
+
+/** Где встают тумбы у кровати: вплотную к бокам изголовья, спинкой к той же стене */
+function nightstandSpots(bed: Furniture, w: number, d: number): Spot[] {
+  return ([-1, 1] as const).map((side) => {
+    const c = add({ x: bed.x, y: bed.y }, rotate({ x: side * (bed.w / 2 + w / 2 + 2), y: -bed.d / 2 + d / 2 }, bed.rot))
+    return { x: c.x, y: c.y, rot: bed.rot }
+  })
 }
 
 /** Встаёт ли предмет честно; нет — что мешает */
@@ -110,9 +137,31 @@ function penalty(f: Furniture, cat: CatalogItem, c: Ctx): number {
   }
   const body = furnitureBody(f)
   for (const z of c.takenZones) if (convexOverlap(body, z, 1.5)) p += 80
-  if (dims3d(f).h >= 120 && c.windowPts.length) {
-    const body = obbCorners(f.x, f.y, f.w + 8, f.d + 8, f.rot)
-    if (c.windowPts.some((q) => pointInPoly(q, body))) p += 250
+  // окно: высокое его не закрывает; изголовье не под окном; зеркало столика — не спиной к свету
+  if (c.windowPts.length) {
+    const near = obbCorners(f.x, f.y, f.w + 8, f.d + 8, f.rot)
+    const atWindow = c.windowPts.some((q) => pointInPoly(q, near))
+    if (atWindow && dims3d(f).h >= 90) p += 250
+    const bc = add({ x: f.x, y: f.y }, rotate({ x: 0, y: -f.d / 2 }, f.rot))
+    const backToWindow = atWindow && c.windowPts.some((q) => pointInPoly(q, obbCorners(bc.x, bc.y, f.w + 8, 30, f.rot)))
+    // изголовье под окном — дует и светит в глаза; зеркало и стол спиной к окну — сам себе тень.
+    // Дороже переноса через всю комнату: такое место берётся, только если другого нет
+    if (backToWindow && (cat.glyph === 'bed' || f.type === 'vanity')) p += 320
+    // столик и стол — рядом с окном боком к нему: свет сбоку
+    if (!backToWindow && (f.type === 'vanity' || cat.glyph === 'desk') && c.windowPts.some((q) => dist(q, f) < Math.max(f.w, f.d) / 2 + 90)) p -= 40
+  }
+  // двуспальная кровать: к ней подходят с двух сторон — по центру стены, не меньше 60 см с каждой
+  if (isDoubleBed(cat)) {
+    const l = sideRoom(f, -1, c)
+    const r = sideRoom(f, 1, c)
+    if (Math.min(l, r) < 60) p += (60 - Math.min(l, r)) * 3
+    p += Math.min(Math.abs(l - r), 200) * 0.8
+  }
+  // тумба — у изголовья кровати, а не где пришлось
+  if (f.type === 'nightstand' && c.beds?.length) {
+    let best = Infinity
+    for (const b of c.beds) for (const s of nightstandSpots(b, f.w, f.d)) best = Math.min(best, dist(s, f))
+    p += Math.min(best, 200)
   }
   return p
 }
@@ -195,8 +244,9 @@ function findSpot(cat: CatalogItem, want: Spot, c: Ctx): { spot: Spot; moved: nu
   let gapToWall = Infinity
   for (const p of furnitureBody(make(want))) gapToWall = Math.min(gapToWall, pointSegDistPoly(p, c.inner))
   consider(want, wallish && gapToWall < 60 ? gapToWall * 1.5 + 1 : 0)
-  // 2. спинкой к стене — для всего, что к стене и ставится
+  // 2. спинкой к стене — для всего, что к стене и ставится; тумбам — места у изголовья
   if (wallish) for (const s of wallSpots(cat.w, cat.d, c.inner)) consider(s)
+  if (cat.type === 'nightstand') for (const b of c.beds ?? []) for (const s of nightstandSpots(b, cat.w, cat.d)) consider(s)
   // 3. рядом с предложенным, потом по всей комнате
   if (!best) for (const s of gridSpots(want, 250, 10)) consider(s)
   if (!best) {
@@ -211,6 +261,26 @@ function findSpot(cat: CatalogItem, want: Spot, c: Ctx): { spot: Spot; moved: nu
   const order: Fail[] = ['other', 'door', 'wall', 'room']
   const top = order.reduce((m, k) => (fails[k] > fails[m] ? k : m), order[0])
   return { fail: top }
+}
+
+/** центр предмета, если x, y у модели — левый верхний угол его рамки */
+function cornerToCenter(it: AiPlacement): AiPlacement {
+  const cat = CATALOG_MAP[it.type]
+  if (!cat) return it
+  const side = Math.round(normDeg(it.rot) / 90) % 2 === 1
+  return { ...it, x: it.x + (side ? cat.d : cat.w) / 2, y: it.y + (side ? cat.w : cat.d) / 2 }
+}
+
+/** Прочесть ответ как центры (как просили) или как углы — что честнее встаёт */
+export function readPlacements(items: AiPlacement[], c: { inner: Pt[]; walls: Pt[][]; swings: Pt[][]; windowPts: Pt[]; taken: Pt[][]; takenZones: Pt[][]; tol: number }): AiPlacement[] {
+  const misses = (list: AiPlacement[]) =>
+    list.reduce((n, it) => {
+      const cat = CATALOG_MAP[it.type]
+      if (!cat) return n
+      return n + (fits({ id: 'probe', type: it.type, x: it.x, y: it.y, w: cat.w, d: cat.d, rot: normDeg(it.rot) }, c) ? 1 : 0)
+    }, 0)
+  const corners = items.map(cornerToCenter)
+  return misses(corners) < misses(items) ? corners : items
 }
 
 /** тот же предмет поменьше: кровать 140 вместо 160 */
@@ -229,7 +299,8 @@ const FAIL_TEXT: Record<Fail, string> = {
  * Проверить предложенную расстановку, поправить места и превратить её в предметы плана.
  * Порядок важен: что модель назвала первым, то и приоритетнее при конфликте.
  */
-export function vetLayout(items: AiPlacement[], room: Room, plan: Plan, options: LayoutOptions = {}): PlacementCheck[] {
+export function vetLayout(proposed: AiPlacement[], room: Room, plan: Plan, options: LayoutOptions = {}): PlacementCheck[] {
+  let items = proposed
   const o = { ...DEFAULT_LAYOUT, ...options }
   const walls = plan.walls
   const inner = room.inner.length >= 3 ? room.inner : room.polygon
@@ -268,6 +339,11 @@ export function vetLayout(items: AiPlacement[], room: Room, plan: Plan, options:
   // журнальный стол в санузле геометрию пройдёт, а смысл — нет: только уместные в комнате типы
   // список тот же, что ушёл модели: по назначению, а не по старому имени комнаты
   const fitting = new Set(catalogForRoom(options.purpose || room.meta.name, CATALOG).map((c) => c.type))
+  // Модель могла дать не центр, а левый верхний угол предмета — так рисуют
+  // прямоугольники в вёрстке, и тогда мимо ушло бы всё. Ответ одной модели
+  // единообразен: читаем его целиком так, как он лучше ложится в комнату
+  items = readPlacements(items, ctx)
+
   // Крупное — первым: кровать и шкаф выбирают стену, мелочь встаёт в оставшееся.
   // При равных размерах — как предложила модель. Отчёт — в её порядке
   const area = (it: AiPlacement) => (CATALOG_MAP[it.type] ? CATALOG_MAP[it.type].w * CATALOG_MAP[it.type].d : 0)
@@ -310,9 +386,25 @@ export function vetLayout(items: AiPlacement[], room: Room, plan: Plan, options:
     const f: Furniture = { id: uid('f'), type: used.type, x: Math.round(found.spot.x * 10) / 10, y: Math.round(found.spot.y * 10) / 10, w: used.w, d: used.d, rot: found.spot.rot, note: notes.filter(Boolean).join(' · ') || undefined }
     ctx.taken.push(furnitureBody(f))
     ctx.takenZones.push(...zonesOf(f, used).map((z) => z.poly))
+    if (isDoubleBed(used)) ctx.beds = [...(ctx.beds ?? []), f]
     out.push({ item, ok: true, furniture: f, moved, replaced: used !== cat ? cat.name : undefined })
   }
-  return items.map((_, i) => done.get(i)!)
+  // в отчёте — предложение модели как было
+  const result = items.map((_, i) => ({ ...done.get(i)!, item: proposed[i] }))
+  // Двуспальная кровать без тумб выглядит недоделанной: если модель их не
+  // предложила, а у изголовья есть место — ставим по бокам и говорим об этом
+  const nightCat = CATALOG_MAP.nightstand
+  if (nightCat && fitting.has('nightstand') && ctx.beds?.length && !items.some((it) => it.type === 'nightstand')) {
+    for (const bed of ctx.beds) {
+      for (const s of nightstandSpots(bed, nightCat.w, nightCat.d)) {
+        const f: Furniture = { id: uid('f'), type: 'nightstand', x: Math.round(s.x * 10) / 10, y: Math.round(s.y * 10) / 10, w: nightCat.w, d: nightCat.d, rot: s.rot, note: 'у изголовья: к двуспальной кровати — тумбы с двух сторон' }
+        if (fits(f, ctx)) continue
+        ctx.taken.push(furnitureBody(f))
+        result.push({ item: { type: 'nightstand', x: f.x, y: f.y, rot: f.rot, why: 'добавлено к кровати' }, ok: true, furniture: f, moved: 0, added: true })
+      }
+    }
+  }
+  return result
 }
 
 function pointSegDistPoly(p: Pt, poly: Pt[]): number {
@@ -338,7 +430,8 @@ export function layoutSummary(checks: PlacementCheck[]): string {
   const movedN = checks.filter((c) => c.ok && !c.replaced && (c.moved ?? 0) > 20).length
   const smaller = checks.filter((c) => c.ok && c.replaced).length
   const fixes = [movedN ? `место поправлено у ${movedN}` : '', smaller ? `поменьше вместо большого — ${smaller}` : ''].filter(Boolean).join(', ')
-  const head = `Поставлено предметов: ${ok}${fixes ? ` (${fixes})` : ''}`
+  const names = checks.filter((c) => c.ok && c.furniture).map((c) => CATALOG_MAP[c.furniture!.type]?.name ?? c.furniture!.type)
+  const head = `Поставлено предметов: ${ok}${names.length ? ` — ${names.join(', ')}` : ''}${fixes ? ` (${fixes})` : ''}`
   if (!bad) return head
   const reasons = new Map<string, number>()
   for (const c of checks) if (!c.ok && c.reason) reasons.set(c.reason, (reasons.get(c.reason) ?? 0) + 1)

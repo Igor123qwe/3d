@@ -147,6 +147,7 @@ export async function furnish(plan: Plan, rooms: Room[], o: FurnishOptions, deps
     try {
       const res = await deps.layout({
         polygon: (r.inner.length >= 3 ? r.inner : r.polygon).map((q) => loc({ x: q.x, y: q.y })),
+        size: bbox(r),
         openings: openingsNear(plan, r).map(loc),
         room: r.meta.name,
         purpose: p,
