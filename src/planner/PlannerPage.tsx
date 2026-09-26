@@ -1,6 +1,6 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { EditMode, Layers, LengthUnit, Plan, Pt, Selection, Tool, Underlay, WallRef } from './types'
-import { isElectricItem, CATALOG, CATALOG_MAP, CATEGORIES, FLOORS, ROOM_NAMES, dims3d, itemMode, type CatalogItem, type CategoryKey } from './catalog'
+import { catalogMatches, isElectricItem, CATALOG, CATALOG_MAP, CATEGORIES, FLOORS, ROOM_NAMES, dims3d, itemMode, type CatalogItem, type CategoryKey } from './catalog'
 import { usePlanHistory } from './store'
 import { buildRooms } from './rooms'
 import { runChecks } from './checks'
@@ -42,7 +42,7 @@ import { decodePlan, parseHash, planShareUrl } from './share'
 import { DEFAULT_TRACE, calibrate, detectWalls, grayscaleOf, joinCorners, loadUnderlayImage, makeUnderlay, mergeCollinear, nameFromFile, planFromImage, toPixel, toPlan, tracePlan, type LoadedImage, type TraceOptions } from './underlay'
 import { applyH, cleanRaster, distanceToInk, dominantAngle, floodRoom, grayToImage, groundRoomBox, hatchedStrips, labelBoxes, perspectiveQuad, rectTarget, rotateImage, segmentRooms, segmentRoomsAuto, textHeight, warpToRect, withoutLooseText, type CleanResult, type RoomRegion, type TextBox } from './raster'
 import type { Guide } from './snapping'
-import { aiStatus, askLayout, askNumbers, askZones, askRoomLabel, askSpot, cropForVision, lookupProductViaServer, numberSheet, recognizePlan, type AiCost, type AiStatus, type NumbersResult } from './ai'
+import { friendlyAiError, aiStatus, askLayout, askNumbers, askZones, askRoomLabel, askSpot, cropForVision, lookupProductViaServer, numberSheet, recognizePlan, type AiCost, type AiStatus, type NumbersResult } from './ai'
 import { applyAiPlan, convertAiPlan, fitResultToLabels, marksFromReads, roomLabelInBox, type ConvertResult } from './planai'
 import { evenWalls, rectifyWalls } from './rectify'
 import { followDims, roomDims } from './dims'
@@ -719,6 +719,21 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     })
   }
 
+  /** предметы, взятые из магазинов по ссылке: у них есть цена и адрес страницы */
+  const shopping = plan.furniture.filter((f) => f.product)
+  const downloadShopping = () => {
+    const rows = [['Предмет', 'Товар', 'Ш×Г×В, см', 'Цена', 'Валюта', 'Ссылка']]
+    let total = 0
+    for (const f of shopping) {
+      const pr = f.product!
+      if (pr.price) total += pr.price
+      rows.push([CATALOG_MAP[f.type]?.name ?? f.type, pr.name, `${f.w}×${f.d}×${f.h ?? dims3d(f).h}`, pr.price ? String(pr.price) : '', pr.currency ?? '', pr.url])
+    }
+    rows.push(['Итого', '', '', String(total), shopping[0]?.product?.currency ?? '', ''])
+    downloadCsv(`${plan.name || 'план'} покупки`, rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(';')).join('\n'))
+    setToast(`Список покупок: ${shopping.length} товаров${total ? `, итого ${formatPrice(total, shopping[0]?.product?.currency)}` : ''}`)
+  }
+
   const shareForPhone = async () => {
     try {
       const url = await planShareUrl(plan, 'ar')
@@ -843,7 +858,15 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
 
   /** Картинка плана: с холста, из буфера, из файла — путь один */
   const loadImageFile = async (f: File, mode: ImageMode = 'ask') => {
-    const img = await loadUnderlayImage(f)
+    let img: Awaited<ReturnType<typeof loadUnderlayImage>>
+    try {
+      img = await loadUnderlayImage(f)
+    } catch (e) {
+      // браузер не открывает HEIC с iPhone и PDF: подсказать выход вместо «не удалось прочитать»
+      if (/\.(heic|heif)$/i.test(f.name) || /heic|heif/i.test(f.type)) throw new Error('Фото в формате HEIC (iPhone) браузер не открывает. В настройках камеры iPhone выберите «Наиболее совместимый» или отправьте скриншот плана')
+      if (/\.pdf$/i.test(f.name) || f.type === 'application/pdf') throw new Error('PDF не открывается как картинка: сделайте скриншот страницы техпаспорта и загрузите его')
+      throw e
+    }
     if (mode !== 'ask') return placeImage(f, img, mode)
     if (!hasOwnWork()) return placeImage(f, img, 'new')
     const n = plan.furniture.length
@@ -920,7 +943,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     try {
       await loadImageFile(f, imageMode.current)
     } catch (err) {
-      setToast((err as Error).message)
+      setToast(friendlyAiError((err as Error).message))
     }
   }
 
@@ -1334,7 +1357,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     }
     // подписей меньше половины — фрагменты не помогли, пусть модель посмотрит план целиком
     if (done < Math.ceil(take.length / 2)) return null
-    return { plan: { walls: [], openings, rooms, dimensions: [], note: `подписи прочитаны по ${done} фрагментам комнат` }, ai: { model, costRub, tried }, notRooms }
+    return { plan: { walls: [], openings, rooms, dimensions: [], note: `подписи прочитаны по ${done} фрагментам комнат${regions.length > take.length ? `; помещений больше ${take.length} — у остальных ${regions.length - take.length} подписи не читались, назовите их сами` : ''}` }, ai: { model, costRub, tried }, notRooms }
   }
 
   /**
@@ -1447,7 +1470,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         },
       })
     } catch (err) {
-      setToast((err as Error).message)
+      setToast(friendlyAiError((err as Error).message))
     } finally {
       setTracing(false)
     }
@@ -1516,7 +1539,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       replaceUnderlayImage(img, original)
       setToast(`Повернул на ${(-angle).toFixed(1)}°: линии стен легли по осям`)
     } catch (err) {
-      setToast((err as Error).message)
+      setToast(friendlyAiError((err as Error).message))
     } finally {
       setTracing(false)
     }
@@ -1533,7 +1556,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       replaceUnderlayImage(grayToImage(r.clean.gray, u.px.w, u.px.h), u.original ?? u.src)
       setToast('Фото очищено: фон выровнен, цифры и засечки убраны. Модель читает подписи по исходному. Ctrl+Z вернёт оригинал')
     } catch (err) {
-      setToast((err as Error).message)
+      setToast(friendlyAiError((err as Error).message))
     } finally {
       setTracing(false)
     }
@@ -1556,7 +1579,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       setTimeout(() => canvasRef.current?.fit(), 50)
       setToast('Фото выпрямлено по четырём углам. Теперь задайте масштаб или распознайте план')
     } catch (err) {
-      setToast((err as Error).message)
+      setToast(friendlyAiError((err as Error).message))
     } finally {
       setTracing(false)
     }
@@ -1692,7 +1715,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           : `Комната ${fmtLen(w, unit)} × ${fmtLen(h, unit)}. Кликните в следующую или Esc`,
       )
     } catch (err) {
-      setToast((err as Error).message)
+      setToast(friendlyAiError((err as Error).message))
     }
   }
 
@@ -1732,7 +1755,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           },
         })
     } catch (err) {
-      setToast((err as Error).message)
+      setToast(friendlyAiError((err as Error).message))
     } finally {
       setTracing(false)
     }
@@ -2119,7 +2142,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     try {
       await loadPlanFile(f)
     } catch (err) {
-      setToast((err as Error).message)
+      setToast(friendlyAiError((err as Error).message))
     }
   }
 
@@ -2717,6 +2740,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                     <button className="pl-btn primary" onClick={() => void recognizeWithAi()} disabled={!!aiBusy}>
                       <Icon name="sparkles" size={18} /> {aiBusy === 'Читаю план…' ? 'Читаю план…' : 'Распознать с ИИ'}
                     </button>
+                    <div className="pl-note">Снимок уйдёт на сервер ИИ (routerai.ru и модели Google, Alibaba, Anthropic). Адрес и ФИО в шапке техпаспорта лучше обрезать до загрузки.</div>
                     <span className="pl-note">Читает размеры и площади комнат, двери и окна — и строит чертёж заново по числам с плана. Масштаб встанет сам.</span>
                     <div className="pl-row">
                       <button className="pl-btn small" onClick={() => void roomsFromPicture()} disabled={tracing} title="Найти все замкнутые комнаты на картинке разом, без ИИ">
@@ -2891,7 +2915,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   }
 
   // поиск идёт по всему каталогу, категория — только когда строка пуста
-  const filteredCatalog = CATALOG.filter((c) => (catQuery ? true : catCategory === 'all' || c.category === catCategory) && (!catQuery || c.name.toLowerCase().includes(catQuery.toLowerCase())))
+  const filteredCatalog = CATALOG.filter((c) => (catQuery ? catalogMatches(c, catQuery) : catCategory === 'all' || c.category === catCategory))
 
   const filteredPhoto = phItems.filter((a) => !catQuery || `${a.name} ${a.tags.join(' ')}`.toLowerCase().includes(catQuery.toLowerCase()))
 
@@ -3634,6 +3658,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                 />
                 <MenuItem icon="download" label="Экспорт картинки (PNG)" onSelect={() => doExport('png')} />
                 <MenuItem icon="download" label="Экспорт вектора (SVG)" onSelect={() => doExport('svg')} />
+                <MenuItem icon="download" label="Список покупок (CSV)" hint={shopping.length ? `${shopping.length} тов.` : 'нет товаров'} disabled={!shopping.length} onSelect={downloadShopping} />
                 <MenuItem icon="file" label="Печать в масштабе 1:50…" onSelect={() => doExport('print', 50)} />
                 <MenuItem icon="file" label="Печать в масштабе 1:100…" onSelect={() => doExport('print', 100)} />
                 <MenuItem

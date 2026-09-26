@@ -66,6 +66,8 @@ export function friendlyAiError(msg: string): string {
   if (/Failed to fetch|NetworkError|Load failed|ECONN|fetch failed|network/i.test(msg)) return 'нет связи с сервером ИИ'
   if (/abort/i.test(msg)) return 'запрос отменён'
   if (/timeout|timed out/i.test(msg)) return 'сервер ИИ не ответил вовремя'
+  if (/\b429\b|не больше .* за/i.test(msg)) return 'слишком много запросов к ИИ — подождите несколько минут'
+  if (/ни одна модель не справилась/i.test(msg)) return 'ни одна модель ИИ не справилась с этим снимком — попробуйте ещё раз или более чёткое фото'
   const m = msg.match(/\b5\d\d\b/)
   if (m) return `сервер ИИ ответил ошибкой ${m[0]} — попробуйте позже`
   return msg

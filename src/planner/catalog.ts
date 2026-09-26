@@ -622,3 +622,36 @@ export const CATEGORY_COLORS: Record<CategoryKey, string> = {
   electric: '#ffffff',
   misc: '#ececec',
 }
+
+/** народные и старые названия → слово из каталога: поиск понимает и «софа», и «стиралка» */
+const SEARCH_SYNONYMS: [RegExp, string][] = [
+  [/софа|тахта|кушетк|канапе/, 'диван'],
+  [/стиралк|стиральн/, 'стиральн'],
+  [/посудомо/, 'посудомо'],
+  [/холодос|холодильн/, 'холодильн'],
+  [/унитаз|туалет/, 'унитаз'],
+  [/раковин|умывальн|мойк/, 'раковин'],
+  [/тумбочк/, 'тумба'],
+  [/лампа|торшер|бра\b|светильн|люстр/, 'свет'],
+  [/розетк/, 'розетк'],
+  [/шкаф-купе|гардероб/, 'шкаф'],
+  [/гарнитур/, 'кухон'],
+  [/\bтв\b|телек|телевизор/, 'телевизор'],
+  [/письменн|компьютерн|рабочий стол/, 'стол'],
+  [/кресло-мешок|пуфик/, 'пуф'],
+  [/ковер/, 'ковёр'],
+  [/плита|варочн/, 'плита'],
+  [/духовк/, 'духов'],
+  [/кровать|постель|спальное/, 'кровать'],
+]
+
+/** предмет подходит под запрос: по имени, по категории или по синониму */
+export function catalogMatches(item: CatalogItem, query: string): boolean {
+  const q = query.trim().toLowerCase()
+  if (!q) return true
+  const name = item.name.toLowerCase()
+  if (name.includes(q)) return true
+  const cat = CATEGORIES.find((c) => c.key === item.category)?.name.toLowerCase() ?? ''
+  if (cat.includes(q)) return true
+  return SEARCH_SYNONYMS.some(([re, word]) => re.test(q) && name.includes(word))
+}

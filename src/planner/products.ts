@@ -33,7 +33,9 @@ export function parseDimsTriple(text: string): ProductDims | null {
   if (vals.some((v) => !Number.isFinite(v) || v <= 0 || v > 1000)) return null
   // ищем подпись вида «ШхГхВ» или «ВхШхГ» перед числами
   const label = /([ШВГДшвгд])\s*[x×х*]\s*([ШВГДшвгд])\s*[x×х*]\s*([ШВГДшвгд])/.exec(text.slice(0, Math.max(0, m.index)))
-  const order = label ? [label[1], label[2], label[3]].map((c) => c.toUpperCase()) : ['Ш', 'Г', 'В']
+  // без подписи магазины РФ часто пишут В×Ш×Г (холодильник 185×60×65): высокий первый — это высота
+  const tall = !label && vals[0] > 120 && vals[0] > vals[1] * 1.4 && vals[0] > vals[2] * 1.4 && vals[1] <= 120 && vals[2] <= 120
+  const order = label ? [label[1], label[2], label[3]].map((c) => c.toUpperCase()) : tall ? ['В', 'Ш', 'Г'] : ['Ш', 'Г', 'В']
   const out: ProductDims = { w: 0, d: 0, h: 0 }
   order.forEach((letter, i) => {
     if (letter === 'Ш') out.w = vals[i]

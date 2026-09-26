@@ -93,6 +93,7 @@ export function useFileIntake(h: IntakeHandlers, enabled = true): Intake {
     try {
       if (plan) await handlers.current.onPlanFile(plan)
       else if (image) await handlers.current.onImage(image)
+      else if (files.some((f) => /\.pdf$/i.test(f.name) || f.type === 'application/pdf')) handlers.current.onError('PDF не открывается как картинка: сделайте скриншот страницы техпаспорта и загрузите его')
       else handlers.current.onError('Нужна картинка плана (PNG, JPG) или файл плана (JSON)')
     } catch (e) {
       handlers.current.onError((e as Error).message)

@@ -176,10 +176,25 @@ function placeholderFor(f: Furniture, h: number, elev: number, color: THREE.Colo
   const holder = new THREE.Group()
   holder.name = 'placeholder'
   if (cat?.symbol) {
-    const geom = new THREE.SphereGeometry(Math.max(f.w, f.d, 6) * 0.5 * M, 12, 8)
-    const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ color: 0xffd166, emissive: 0x332200 }))
+    const kind = f.electric?.kind ?? cat.glyph
+    if (kind === 'light' || kind === 'spot') {
+      // плафон под потолком, а не жёлтый шар: тёплый светящийся диск
+      const r = (kind === 'spot' ? 5 : Math.max(f.w, f.d, 20) / 2) * M
+      const geom = new THREE.CylinderGeometry(r, r * 0.9, 4 * M, 24)
+      const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ color: 0xfff7d6, emissive: 0xffe3a0, emissiveIntensity: 0.9, roughness: 0.5 }))
+      mesh.position.y = (elev + h / 2) * M
+      holder.add(mesh)
+      return holder
+    }
+    // розетки, выключатели, датчики, щит — плоские коробочки на стене, лицом в комнату
+    const panel = kind === 'panel'
+    const geom = new THREE.BoxGeometry(Math.max(f.w, 6) * M, (panel ? 40 : Math.max(f.d, 6)) * M, (panel ? 10 : 2) * M)
+    const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ color: panel ? 0xe5e7eb : 0xf9fafb, roughness: 0.6 }))
     mesh.position.y = (elev + h / 2) * M
     holder.add(mesh)
+    const ed = edgesOf(geom, 0x9ca3af, 0.8)
+    ed.position.y = mesh.position.y
+    holder.add(ed)
     return holder
   }
   // параметрическая модель по виду предмета; если её нет — габаритный короб
@@ -211,9 +226,12 @@ export function fitModel(model: THREE.Object3D, w: number, h: number, d: number,
   model.updateMatrixWorld(true)
   const box = new THREE.Box3().setFromObject(model)
   const size = box.getSize(new THREE.Vector3())
-  const sx = size.x > 1e-6 ? (w * M) / size.x : 1
-  const sy = size.y > 1e-6 ? (h * M) / size.y : 1
-  const sz = size.z > 1e-6 ? (d * M) / size.z : 1
+  let sx = size.x > 1e-6 ? (w * M) / size.x : 1
+  let sy = size.y > 1e-6 ? (h * M) / size.y : 1
+  let sz = size.z > 1e-6 ? (d * M) / size.z : 1
+  // растягиваем по габаритам, но не уродуем: если пропорции разошлись больше чем
+  // на четверть (диван сделали шире), масштаб один на все оси — модель вписана целиком
+  if (Math.max(sx, sy, sz) / Math.min(sx, sy, sz) > 1.25) sx = sy = sz = Math.min(sx, sy, sz)
   model.scale.set(sx, sy, sz)
   model.updateMatrixWorld(true)
   const box2 = new THREE.Box3().setFromObject(model)
