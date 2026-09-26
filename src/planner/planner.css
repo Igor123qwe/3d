@@ -885,6 +885,36 @@
   flex-wrap: wrap;
   gap: 6px;
 }
+/* экранные стрелки прогулки — для пальца */
+.pl3d-walk {
+  position: absolute;
+  right: 12px;
+  bottom: 56px;
+  display: grid;
+  grid-template-columns: repeat(3, 40px);
+  grid-template-areas: '. up .' 'left down right';
+  gap: 4px;
+}
+.pl3d-walk button {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  font-size: 16px;
+  touch-action: none;
+  user-select: none;
+}
+.pl3d-walk button:nth-child(1) {
+  grid-area: up;
+}
+.pl3d-walk button:nth-child(2) {
+  grid-area: left;
+}
+.pl3d-walk button:nth-child(3) {
+  grid-area: down;
+}
+.pl3d-walk button:nth-child(4) {
+  grid-area: right;
+}
 .pl3d-hint {
   position: absolute;
   left: 10px;

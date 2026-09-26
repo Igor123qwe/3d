@@ -6,6 +6,20 @@ import { USDZExporter } from 'three/examples/jsm/exporters/USDZExporter.js'
 import type { Plan, Room, Selection } from './types'
 import { buildPlanGroup, disposeGroup, findAnchor, highlightSelection, yawOf, M, type AnchorInfo, type WallsMode } from './scene3d'
 import { downloadBlob } from './exporters'
+import { pointSegDist, projectT, dist } from './geometry'
+
+/** прогулка: глаз на 1,6 м, шаг 1,5 м/с, поворот мышью или пальцем */
+interface WalkState {
+  active: boolean
+  yaw: number
+  pitch: number
+  pos: THREE.Vector3
+  keys: Set<string>
+  last: number
+  drag: { x: number; y: number } | null
+}
+const EYE = 1.6
+const WALK_SPEED = 1.5
 
 export interface View3DProps {
   plan: Plan
@@ -73,6 +87,8 @@ export const View3D: React.FC<View3DProps> = ({ plan, rooms, selection, onSelect
   const selRef = useRef(selection)
   selRef.current = selection
   const [wallsMode, setWallsMode] = useState<WallsMode>('solid')
+  const [walk, setWalk] = useState(false)
+  const walkRef = useRef<WalkState>({ active: false, yaw: 0, pitch: 0, pos: new THREE.Vector3(), keys: new Set(), last: 0, drag: null })
   const wallsRef = useRef(wallsMode)
   wallsRef.current = wallsMode
   const [arSupported, setArSupported] = useState(false)
@@ -108,6 +124,120 @@ export const View3D: React.FC<View3DProps> = ({ plan, rooms, selection, onSelect
     t.controls.target.copy(c)
     t.controls.update()
   }
+
+  /** Прогулка: камера на уровне глаз в первой комнате, смотрит в центр квартиры */
+  const startWalk = () => {
+    const t = three.current
+    if (!t) return
+    const w = walkRef.current
+    const room = roomsRef.current[0]
+    const start = room ? new THREE.Vector3(room.meta.anchor.x * M, EYE, room.meta.anchor.y * M) : new THREE.Vector3(t.center.x, EYE, t.center.z)
+    w.pos.copy(start)
+    const dx = t.center.x - start.x
+    const dz = t.center.z - start.z
+    w.yaw = Math.hypot(dx, dz) > 0.3 ? Math.atan2(-dx, -dz) : 0
+    w.pitch = 0
+    w.keys.clear()
+    w.last = performance.now()
+    w.active = true
+    t.controls.enabled = false
+    t.camera.rotation.order = 'YXZ'
+    setWalk(true)
+  }
+  const stopWalk = () => {
+    const t = three.current
+    walkRef.current.active = false
+    walkRef.current.keys.clear()
+    if (t) {
+      t.controls.enabled = true
+      t.camera.rotation.order = 'XYZ'
+    }
+    setWalk(false)
+    fitCamera('iso')
+  }
+  /** можно ли встать в точку: стены не пускают, дверные проёмы — пускают */
+  const walkable = (x: number, z: number): boolean => {
+    const p = { x: x / M, y: z / M }
+    const plan = planRef.current
+    for (const w of plan.walls) {
+      if (pointSegDist(p, w.a, w.b) >= w.thickness / 2 + 18) continue
+      const L = dist(w.a, w.b)
+      const at = projectT(p, w.a, w.b) * L
+      const door = plan.openings.some((o) => o.wallId === w.id && o.kind !== 'window' && Math.abs(o.t * L - at) < o.width / 2)
+      if (!door) return false
+    }
+    return true
+  }
+  /** кадр прогулки: шаг по нажатым клавишам, поворот из yaw/pitch */
+  const walkFrame = (t: ThreeState, now: number) => {
+    const w = walkRef.current
+    const dt = Math.min(0.05, (now - w.last) / 1000)
+    w.last = now
+    let fwd = 0
+    let side = 0
+    if (w.keys.has('KeyW') || w.keys.has('ArrowUp')) fwd += 1
+    if (w.keys.has('KeyS') || w.keys.has('ArrowDown')) fwd -= 1
+    if (w.keys.has('KeyD') || w.keys.has('ArrowRight')) side += 1
+    if (w.keys.has('KeyA') || w.keys.has('ArrowLeft')) side -= 1
+    if (w.keys.has('KeyQ')) w.yaw += 1.6 * dt
+    if (w.keys.has('KeyE')) w.yaw -= 1.6 * dt
+    if (fwd || side) {
+      const len = Math.hypot(fwd, side)
+      const step = WALK_SPEED * dt
+      const dx = ((-Math.sin(w.yaw) * fwd + Math.cos(w.yaw) * side) / len) * step
+      const dz = ((-Math.cos(w.yaw) * fwd - Math.sin(w.yaw) * side) / len) * step
+      // упёрлись в стену — скользим вдоль неё
+      if (walkable(w.pos.x + dx, w.pos.z + dz)) w.pos.set(w.pos.x + dx, EYE, w.pos.z + dz)
+      else if (walkable(w.pos.x + dx, w.pos.z)) w.pos.x += dx
+      else if (walkable(w.pos.x, w.pos.z + dz)) w.pos.z += dz
+    }
+    t.camera.position.copy(w.pos)
+    t.camera.rotation.set(w.pitch, w.yaw, 0)
+  }
+
+  // клавиши и взгляд в прогулке
+  useEffect(() => {
+    if (!walk) return
+    const w = walkRef.current
+    const isEditable = (el: EventTarget | null) => el instanceof HTMLElement && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
+    const down = (e: KeyboardEvent) => {
+      if (isEditable(e.target)) return
+      if (e.code === 'Escape') {
+        stopWalk()
+        return
+      }
+      if (/^(Key[WASDQE]|Arrow(Up|Down|Left|Right))$/.test(e.code)) {
+        e.preventDefault()
+        w.keys.add(e.code)
+      }
+    }
+    const up = (e: KeyboardEvent) => w.keys.delete(e.code)
+    const el = three.current?.renderer.domElement
+    const pd = (e: PointerEvent) => {
+      w.drag = { x: e.clientX, y: e.clientY }
+    }
+    const pm = (e: PointerEvent) => {
+      if (!w.drag) return
+      w.yaw -= (e.clientX - w.drag.x) * 0.004
+      w.pitch = Math.max(-1.2, Math.min(1.2, w.pitch - (e.clientY - w.drag.y) * 0.003))
+      w.drag = { x: e.clientX, y: e.clientY }
+    }
+    const pu = () => {
+      w.drag = null
+    }
+    window.addEventListener('keydown', down)
+    window.addEventListener('keyup', up)
+    el?.addEventListener('pointerdown', pd)
+    window.addEventListener('pointermove', pm)
+    window.addEventListener('pointerup', pu)
+    return () => {
+      window.removeEventListener('keydown', down)
+      window.removeEventListener('keyup', up)
+      el?.removeEventListener('pointerdown', pd)
+      window.removeEventListener('pointermove', pm)
+      window.removeEventListener('pointerup', pu)
+    }
+  }, [walk]) // eslint-disable-line react-hooks/exhaustive-deps
 
   /** AR: поставить план по якорю (порог входной двери) */
   const placeGroup = () => {
@@ -259,10 +389,11 @@ export const View3D: React.FC<View3DProps> = ({ plan, rooms, selection, onSelect
 
     three.current = { renderer, scene, camera, controls, ground, reticle, marker, markerBar, group: null, center: new THREE.Vector3(), size: 6 }
 
-    renderer.setAnimationLoop((_time: number, frame?: XRFrame) => {
+    renderer.setAnimationLoop((time: number, frame?: XRFrame) => {
       const t = three.current
       if (!t) return
       if (frame && xr.current.active) handleXRFrame(frame)
+      else if (walkRef.current.active) walkFrame(t, time)
       else t.controls.update()
       t.renderer.render(t.scene, t.camera)
     })
@@ -496,6 +627,9 @@ export const View3D: React.FC<View3DProps> = ({ plan, rooms, selection, onSelect
               <button className="pl-btn" onClick={() => fitCamera('top')}>
                 Сверху
               </button>
+              <button className={`pl-btn ${walk ? 'active' : ''}`} onClick={() => (walk ? stopWalk() : startWalk())} title="Пройтись по квартире с уровня глаз">
+                {walk ? 'Выйти из прогулки' : '🚶 Прогулка'}
+              </button>
               <button
                 className="pl-btn"
                 title="Сохранить картинку 3D-вида"
@@ -527,8 +661,40 @@ export const View3D: React.FC<View3DProps> = ({ plan, rooms, selection, onSelect
                 📱 Ссылка для телефона
               </button>
             </div>
+            {walk && (
+              <div className="pl3d-walk" aria-label="Идти">
+                {(
+                  [
+                    ['KeyW', '▲', 'вперёд'],
+                    ['KeyA', '◀', 'влево'],
+                    ['KeyS', '▼', 'назад'],
+                    ['KeyD', '▶', 'вправо'],
+                  ] as const
+                ).map(([code, sym, title]) => (
+                  <button
+                    key={code}
+                    className="pl-btn"
+                    title={title}
+                    onPointerDown={(e) => {
+                      e.preventDefault()
+                      walkRef.current.keys.add(code)
+                    }}
+                    onPointerUp={() => walkRef.current.keys.delete(code)}
+                    onPointerLeave={() => walkRef.current.keys.delete(code)}
+                    onPointerCancel={() => walkRef.current.keys.delete(code)}
+                  >
+                    {sym}
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="pl3d-hint">
-              Вращение — левая кнопка или палец, сдвиг — правая кнопка или два пальца, масштаб — колесо или щипок. Клик по предмету выбирает его. Якорь для AR: {anchor.label.toLowerCase()}.
+              {walk ? (
+                'Прогулка: W A S D или стрелки — идти, Q E — повернуться, тянуть мышью или пальцем — смотреть, Esc — выйти. Двери проходимы, стены — нет'
+              ) : (
+                <>
+              Вращение — левая кнопка или палец, сдвиг — правая кнопка или два пальца, масштаб — колесо или щипок. Клик по предмету выбирает его. Якорь для AR: {anchor.label.toLowerCase()}.</>
+              )}
             </div>
           </>
         )}
