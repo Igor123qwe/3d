@@ -1885,3 +1885,11 @@
   gap: 2px;
   flex: none;
 }
+
+/* на тач-устройстве подсказки про клавиши только путают */
+@media (pointer: coarse) {
+  .pl-start kbd,
+  .pl-menu-hint {
+    display: none;
+  }
+}

@@ -905,7 +905,13 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   }
 
   // перетаскивание на окно, Ctrl+V и кнопка «Вставить из буфера» — всё сюда
-  const intake = useFileIntake({ onImage: loadImageFile, onPlanFile: loadPlanFile, onPlanText: loadPlanText, onError: setToast })
+  const intake = useFileIntake({
+    onImage: loadImageFile,
+    onPlanFile: loadPlanFile,
+    onPlanText: loadPlanText,
+    onError: setToast,
+    onNothing: () => setToast('В буфере нет картинки или плана: скопируйте скриншот плана или JSON файла плана'),
+  })
 
   const onOpenImage = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]
@@ -3105,8 +3111,13 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           </div>
         </div>
 
-        <details className="pl-block pl-el-setup" open={!electricItems.length}>
-          <summary>Исходные данные и расстановка по нормам</summary>
+        <div className="pl-row">
+          <button className="pl-btn active" onClick={runAutoElectrics} title="Розетки, выключатели, свет, щит и группы — по нормам и по мебели на плане">
+            ⚡ Спроектировать по нормам
+          </button>
+        </div>
+        <details className="pl-block pl-el-setup" open={!electricItems.length && !isMobile()}>
+          <summary>Исходные данные: мощность, плита, потолок, что ставить</summary>
           <label className="pl-field">
             <span>Выделенная мощность</span>
             <select value={electricSettings.allottedKw} onChange={(e) => setElectric({ allottedKw: Number(e.target.value) })}>
@@ -3148,9 +3159,6 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             </label>
           ))}
           <div className="pl-row">
-            <button className="pl-btn active" onClick={runAutoElectrics}>
-              ⚡ Спроектировать по нормам
-            </button>
             <button className="pl-btn danger" onClick={clearElectrics} disabled={!electricItems.length}>
               Убрать всю
             </button>
@@ -3353,7 +3361,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         <input type="checkbox" checked={layers.ergo} onChange={() => toggleLayer('ergo')} />
       </label>
       {shownIssues.length === 0 ? (
-        <div className="pl-ok">✅ Замечаний нет. Расставьте мебель — проверки появятся автоматически.</div>
+        <div className="pl-ok">{rooms.length ? '✅ Замечаний нет. Расставьте мебель — проверки появятся автоматически.' : 'Нарисуйте комнату — проверки появятся сами: площади, проходы, двери, окна, мебель.'}</div>
       ) : (
         shownIssues.map((i) => (
           <button key={i.id} className={`pl-issue ${i.level}`} onClick={() => focusIssueTarget(i.target ?? null)}>
@@ -3517,7 +3525,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
               <span className="pl-btn-text">Вид</span>
             </button>
             {menu === 'view' && (
-              <Dropdown width={280}>
+              <Dropdown width={280} onClose={() => setMenu(null)}>
                 <MenuGroup title="Слои" />
                 {(
                   [
@@ -3563,7 +3571,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
               <Icon name="chevronDown" size={14} className="pl-caret" />
             </button>
             {menu === 'project' && (
-              <Dropdown width={310}>
+              <Dropdown width={310} onClose={() => setMenu(null)}>
                 <MenuItem
                   icon="plus"
                   label="Новый…"
@@ -3946,7 +3954,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         />
       )}
       <footer className="pl-status">
-        <span className="pl-status-hint" title={aiBusy ? aiBusy : hint}>
+        <span className="pl-status-hint" role="status" aria-live="polite" title={aiBusy ? aiBusy : hint}>
           {aiBusy ? `✨ ${aiBusy}` : hint}
         </span>
         {aiBusy && (

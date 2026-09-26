@@ -1,6 +1,6 @@
 // Выпадающее меню в духе настольных приложений: иконка, подпись, подсказка
 // с сочетанием клавиш, разделители и пункты-переключатели.
-import React from 'react'
+import React, { useEffect, useRef } from 'react'
 import { Icon, type IconName } from './icons'
 
 interface DropdownProps {
@@ -11,13 +11,49 @@ interface DropdownProps {
   align?: 'right' | 'left'
   /** смещение от правого края, чтобы меню вставало под своей кнопкой */
   offset?: number
+  /** Esc — закрыть; фокус возвращается на кнопку, которая открыла меню */
+  onClose?: () => void
 }
 
-export const Dropdown: React.FC<DropdownProps> = ({ width = 280, children, align = 'right', offset = 10 }) => (
-  <div className="pl-menu" role="menu" style={{ width, [align]: offset }}>
-    {children}
-  </div>
-)
+/** Меню ходит с клавиатуры: ↑ ↓ по пунктам, Home/End, Esc — закрыть */
+export const Dropdown: React.FC<DropdownProps> = ({ width = 280, children, align = 'right', offset = 10, onClose }) => {
+  const box = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const root = box.current
+    if (!root) return
+    const opener = document.activeElement as HTMLElement | null
+    const items = () => [...root.querySelectorAll<HTMLElement>('[role^="menuitem"]:not([disabled])')]
+    const t = setTimeout(() => items()[0]?.focus(), 0)
+    const onKey = (e: KeyboardEvent) => {
+      const list = items()
+      const i = list.indexOf(document.activeElement as HTMLElement)
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        onClose?.()
+      } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault()
+        if (!list.length) return
+        const step = e.key === 'ArrowDown' ? 1 : -1
+        list[(i + step + list.length) % list.length].focus()
+      } else if (e.key === 'Home' || e.key === 'End') {
+        e.preventDefault()
+        list[e.key === 'Home' ? 0 : list.length - 1]?.focus()
+      }
+    }
+    root.addEventListener('keydown', onKey)
+    return () => {
+      clearTimeout(t)
+      root.removeEventListener('keydown', onKey)
+      if (opener && document.contains(opener) && root.contains(document.activeElement)) opener.focus()
+    }
+  }, [onClose])
+  return (
+    <div ref={box} className="pl-menu" role="menu" style={{ width, [align]: offset }}>
+      {children}
+    </div>
+  )
+}
 
 export const MenuGroup: React.FC<{ title: string }> = ({ title }) => <div className="pl-menu-title">{title}</div>
 

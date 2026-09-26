@@ -53,7 +53,22 @@ async function post<T>(endpoint: string, body: unknown, signal?: AbortSignal): P
   }
   const err = (data as { error?: string }).error
   if (!res.ok || err) throw new Error(err || `ошибка ${res.status}`)
+  // ответ без сведений о модели (мусор, чужой сервер) не должен ронять интерфейс на .costRub
+  if (data && typeof data === 'object') {
+    const d = data as { ai?: unknown }
+    if (!d.ai || typeof d.ai !== 'object') d.ai = { model: 'неизвестно', costRub: 0, tried: [] }
+  }
   return data as T
+}
+
+/** сетевые и серверные ошибки — коротко и по-русски */
+export function friendlyAiError(msg: string): string {
+  if (/Failed to fetch|NetworkError|Load failed|ECONN|fetch failed|network/i.test(msg)) return 'нет связи с сервером ИИ'
+  if (/abort/i.test(msg)) return 'запрос отменён'
+  if (/timeout|timed out/i.test(msg)) return 'сервер ИИ не ответил вовремя'
+  const m = msg.match(/\b5\d\d\b/)
+  if (m) return `сервер ИИ ответил ошибкой ${m[0]} — попробуйте позже`
+  return msg
 }
 
 let statusCache: Promise<AiStatus> | null = null

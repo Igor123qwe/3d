@@ -110,6 +110,13 @@ export interface CanvasProps {
   hlCircuit?: string | null
 }
 
+/** на тач-устройстве подсказки про мышь и клавиши только путают: такие куски опускаем */
+const COARSE = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches
+const touchHint = (t: string): string => {
+  const parts = t.split(/;\s*/).filter((seg) => !/Ctrl|Alt|Shift|колес|\bDel\b|Esc|клавиш|\bR —|\bV —|стрелк|Enter|Backspace/i.test(seg))
+  return parts.length ? parts.join('; ') : t
+}
+
 /** точка на середине ломаной по длине */
 function routeMid(pts: Pt[]): Pt | undefined {
   if (!pts.length) return undefined
@@ -446,7 +453,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         text = 'Клик по стене — проём встанет на неё; ещё клик — ещё один. Ширина и петли — в панели справа. Esc — закончить'
         break
       case 'place':
-        text = placing ? `«${placing.name}»: кликните, куда поставить. R — повернуть, Shift+клик — поставить несколько, Esc — отмена. Предмет сам прилипает к стене` : 'Выберите предмет в каталоге'
+        text = placing ? `«${placing.name}»: кликните, куда поставить; Enter — в центр экрана; R — повернуть; Shift+клик — поставить несколько; Esc — отмена. Предмет сам прилипает к стене` : 'Выберите предмет в каталоге'
         break
       case 'dimension':
         text = dimStart
@@ -471,7 +478,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         text = `Угол ${cornerPts.length + 1} из 4: кликайте по углам наружных стен на фото в любом порядке. Esc — сначала`
         break
     }
-    onHint(text)
+    onHint(COARSE ? touchHint(text) : text)
   }, [tool, selection, draft.length, placing, dimStart, measure?.live, calibA, cornerPts.length, onHint, mode])
 
   // ---------- вспомогательные ----------
@@ -704,6 +711,11 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
     if (e.button === 2) return
     const svg = svgRef.current
     svg?.setPointerCapture(e.pointerId)
+    // новый первый палец — новый жест: хвосты прошлого щипка не должны «залипать»
+    if (e.isPrimary) {
+      pointers.current.clear()
+      pinch.current = null
+    }
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
     if (pointers.current.size === 2) {
       const [p1, p2] = [...pointers.current.values()]
@@ -1222,6 +1234,13 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
         finishDraft()
         return
       }
+      // без мыши: Enter ставит выбранный в каталоге предмет в центр видимой части плана
+      if (e.key === 'Enter' && tool === 'place' && placing && !ctrl) {
+        e.preventDefault()
+        const v = viewRef.current
+        handleTap({ x: (size.w / 2 - v.x) / v.zoom, y: (size.h / 2 - v.y) / v.zoom })
+        return
+      }
       // зум с клавиатуры: + / − / 0 — как в графических редакторах; в черновике стены цифры — длина
       if (!ctrl && !(tool === 'wall' && draftRef.current.length) && (e.key === '+' || e.key === '=' || e.key === '-' || e.key === '0')) {
         e.preventDefault()
@@ -1331,10 +1350,24 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       window.removeEventListener('keydown', onKey)
       window.removeEventListener('keyup', onKeyUp)
     }
-  }, [tool, selection, selPart, typed, ortho, unit, wallThickness, history, onSelect, onToolChange, onNotice, finishDraft, dimStart, measure])
+  }, [tool, selection, selPart, typed, ortho, unit, wallThickness, history, onSelect, onToolChange, onNotice, finishDraft, dimStart, measure, placing, handleTap, fit, zoomAt, size])
 
   // ---------- отрисовка ----------
   const drawing = tool !== 'select'
+  // окно потеряло фокус или вкладку свернули посреди жеста: пальцы и щипок забываем
+  useEffect(() => {
+    const reset = () => {
+      pointers.current.clear()
+      pinch.current = null
+    }
+    window.addEventListener('blur', reset)
+    document.addEventListener('visibilitychange', reset)
+    return () => {
+      window.removeEventListener('blur', reset)
+      document.removeEventListener('visibilitychange', reset)
+    }
+  }, [])
+
   // Alt без движения мыши: участок под курсором подсвечивается сразу, отпустили — гаснет
   useEffect(() => {
     const onAlt = (e: KeyboardEvent) => {

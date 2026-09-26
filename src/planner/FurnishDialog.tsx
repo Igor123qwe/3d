@@ -3,6 +3,7 @@
 // отчёт по комнатам: что поставлено, что отброшено проверкой и почему.
 import React, { useEffect, useRef, useState } from 'react'
 import { ROOM_PURPOSES } from './aicontract'
+import { friendlyAiError } from './ai'
 import { useFocusTrap } from './focus'
 import type { FurnishOptions, FurnishReport } from './furnish'
 
@@ -87,13 +88,15 @@ export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled,
   }
 
   const placed = report?.rooms.reduce((s, r) => s + r.placed, 0) ?? 0
+  // все комнаты упали с одной и той же ошибкой — это сбой сервера, а не «проверка отбросила»
+  const commonError = report && report.rooms.length > 0 && report.rooms.every((r) => r.error) && new Set(report.rooms.map((r) => r.error)).size === 1 ? friendlyAiError(report.rooms[0].error!) : null
   return (
     <div className="pl-ask-backdrop" onClick={() => !busy && onClose()}>
       <div ref={box} className="pl-ask pl-furnish" role="dialog" aria-modal="true" aria-labelledby="pl-furnish-title" onClick={(e) => e.stopPropagation()}>
         <h2 id="pl-furnish-title">✨ Расставить мебель с ИИ</h2>
         {report ? (
           <>
-            <p>{placed ? `Поставлено предметов: ${placed}. Всё легло одной правкой — кнопка «Отменить» или Ctrl+Z уберёт разом.` : 'Ничего не встало: проверка отбросила всё предложенное.'}</p>
+            <p>{placed ? `Поставлено предметов: ${placed}. Всё легло одной правкой — кнопка «Отменить» или Ctrl+Z уберёт разом.` : commonError ? `Ничего не встало: ${commonError}. Попробуйте ещё раз.` : 'Ничего не встало: проверка отбросила всё предложенное.'}</p>
             {placed > 0 && placed <= 2 && <p className="pl-furnish-warn">Встало совсем мало — модель предложила слишком мало или почти всё не прошло проверку. Посмотрите план и, если не нравится, отмените.</p>}
             {report.zoningFailed && <p className="pl-furnish-warn">Назначения комнат подобрать не вышло ({report.zoningFailed}) — обставлено по их именам.</p>}
             <ul className="pl-furnish-report">
@@ -101,7 +104,7 @@ export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled,
                 <li key={r.id}>
                   <b>{r.purpose}</b>
                   {r.purpose !== r.name && <span className="pl-furnish-was"> (была «{r.name}»)</span>}
-                  {r.error ? <div className="pl-furnish-warn">Не вышло: {r.error}</div> : <div>{r.summary}</div>}
+                  {r.error ? !commonError && <div className="pl-furnish-warn">Не вышло: {friendlyAiError(r.error)}</div> : <div>{r.summary}</div>}
                   {r.why && <small>{r.why}</small>}
                 </li>
               ))}
@@ -188,7 +191,7 @@ export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled,
               {scope === 'all' ? 'Сначала ИИ решит, какой комнате какое назначение по вашим пожеланиям, потом обставит каждую. ' : ''}
               Каждый предмет проверяется геометрией: вне комнаты, на пути двери или поверх другого — не ставится.
             </p>
-            {error && <p className="pl-furnish-warn">{error}</p>}
+            {error && <p className="pl-furnish-warn">{friendlyAiError(error)}</p>}
             <div className="pl-ask-foot">
               {busy && <span className="pl-furnish-busy">{busy}</span>}
               <button className="pl-btn ghost" onClick={onClose} disabled={!!busy}>

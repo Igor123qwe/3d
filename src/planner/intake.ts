@@ -60,6 +60,8 @@ export interface IntakeHandlers {
   onImage: (file: File) => void | Promise<void>
   onPlanFile: (file: File) => void | Promise<void>
   onPlanText?: (text: string) => void | Promise<void>
+  /** в буфере ни картинки, ни плана — сказать об этом, а не молчать */
+  onNothing?: () => void
   onError: (message: string) => void
 }
 
@@ -159,7 +161,7 @@ export function useFileIntake(h: IntakeHandlers, enabled = true): Intake {
       if (text && looksLikePlanJson(text) && handlers.current.onPlanText) {
         e.preventDefault()
         void handlers.current.onPlanText(text)
-      }
+      } else handlers.current.onNothing?.()
     }
     window.addEventListener('dragenter', onEnter)
     window.addEventListener('dragover', onOver)
