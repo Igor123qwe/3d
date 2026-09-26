@@ -29,6 +29,8 @@ export interface PlacementCheck {
   added?: boolean
   /** шкаф растянут на всю нишу: новая ширина, см */
   widened?: number
+  /** придвинут к своей паре: тумба к изголовью, стул к столу */
+  paired?: string
 }
 
 export interface LayoutOptions {
@@ -79,6 +81,14 @@ export function snapToWall(f: Furniture, walls: Wall[], snapCm: number): Furnitu
 
 type Fail = 'room' | 'wall' | 'door' | 'other'
 
+/** зона подхода к предмету; allow — что в ней стоять может (стул у стола, тумба у кровати) */
+interface Zone {
+  poly: Pt[]
+  allow?: string[]
+}
+
+const zonesFor = (f: Furniture, cat: CatalogItem | undefined): Zone[] => zonesOf(f, cat).map((z) => ({ poly: z.poly, allow: cat?.allowInZone }))
+
 interface Ctx {
   /** контур по внутренним граням: здесь предмету место */
   inner: Pt[]
@@ -87,12 +97,17 @@ interface Ctx {
   /** точки у окон со стороны комнаты: высокий шкаф их закрывать не должен */
   windowPts: Pt[]
   taken: Pt[][]
+  /** типы занявших место — по порядку taken: стулу у стола его зона не помеха */
+  takenKinds: string[]
   /** зоны подхода уже стоящих предметов: новый предмет их не перекрывает */
-  takenZones: Pt[][]
+  takenZones: Zone[]
   tol: number
   /** двуспальные кровати, что уже встали: к ним — тумбы по бокам */
   beds?: Furniture[]
 }
+
+/** на чём сидят за столом: им место в зоне стола */
+const SEAT_TYPES = new Set(['chair', 'office-chair', 'bar-stool'])
 
 /** двуспальная кровать: по центру стены, подход с двух сторон, тумбы по бокам */
 const isDoubleBed = (cat: CatalogItem | undefined) => cat?.glyph === 'bed' && cat.w >= 140
@@ -117,6 +132,73 @@ function nightstandSpots(bed: Furniture, w: number, d: number): Spot[] {
   })
 }
 
+/** Где сесть за стол: к письменному — один стул спереди, к обеденному — по сторонам */
+function seatSpots(host: Furniture, hostCat: CatalogItem, seat: CatalogItem): Spot[] {
+  const at = (lx: number, ly: number, turn: number): Spot => {
+    const c = add({ x: host.x, y: host.y }, rotate({ x: lx, y: ly }, host.rot))
+    return { x: c.x, y: c.y, rot: normDeg(host.rot + turn) }
+  }
+  // стул смотрит на стол, спинкой в комнату; 3 см — чтобы не касаться столешницы
+  const front = (off: number) => at(off, host.d / 2 + seat.d / 2 + 3, 180)
+  const back = (off: number) => at(off, -(host.d / 2 + seat.d / 2 + 3), 0)
+  const left = (off: number) => at(-(host.w / 2 + seat.d / 2 + 3), off, 270)
+  const right = (off: number) => at(host.w / 2 + seat.d / 2 + 3, off, 90)
+  // сколько стульев в ряд вдоль стороны длиной L: на человека 60 см
+  const row = (L: number, per: number) => {
+    const n = Math.max(1, Math.floor(L / per))
+    return Array.from({ length: n }, (_, i) => (i - (n - 1) / 2) * per)
+  }
+  if (hostCat.glyph === 'desk') return [front(0)]
+  if (hostCat.type === 'island') return row(hostCat.w, 50).map(front)
+  if (hostCat.type === 'kitchen-table') return [left(0), right(0), ...row(host.w, 60).map(front)]
+  if (hostCat.glyph === 'table-round') return [front(0), back(0), left(0), right(0)]
+  return [...row(host.w, 60).map(front), ...row(host.w, 60).map(back), left(0), right(0)]
+}
+
+/**
+ * Предметы, которые без пары не имеют смысла: тумба стоит у изголовья,
+ * стул — у стола. Модель ставит их «рядом по смыслу», но не по месту —
+ * тумба посреди стены, кресло в метре от стола; здесь они придвигаются.
+ * soft — нет пары, и пусть стоит где стоит (банкетка бывает и у окна)
+ */
+interface PairRule {
+  hosts: (cat: CatalogItem) => boolean
+  spots: (host: Furniture, hostCat: CatalogItem, cat: CatalogItem) => Spot[]
+  /** пояснение к месту */
+  note: (hostCat: CatalogItem) => string
+  /** почему не встал: пары нет вовсе */
+  alone: string
+  /** почему не встал: у пары не осталось места */
+  full: string
+  soft?: boolean
+}
+
+const DESKS = (c: CatalogItem) => c.glyph === 'desk'
+const TABLES = (c: CatalogItem) => ['dining-table', 'table-round', 'kitchen-table'].includes(c.type)
+const toSeat = (host: CatalogItem) => (host.type === 'vanity' ? 'к туалетному столику' : 'к столу')
+
+const PAIRS: Record<string, PairRule> = {
+  nightstand: {
+    hosts: (c) => c.glyph === 'bed',
+    spots: (bed, _, cat) => nightstandSpots(bed, cat.w, cat.d),
+    note: () => 'у изголовья кровати',
+    alone: 'нет кровати, у которой её поставить',
+    full: 'у изголовья кровати нет места',
+  },
+  'office-chair': { hosts: DESKS, spots: seatSpots, note: toSeat, alone: 'нет стола, к которому его придвинуть', full: 'у стола не осталось места' },
+  chair: { hosts: (c) => DESKS(c) || TABLES(c), spots: seatSpots, note: toSeat, alone: 'нет стола, к которому его придвинуть', full: 'у стола не осталось места' },
+  'bar-stool': { hosts: (c) => c.type === 'island' || c.type === 'kitchen-table', spots: seatSpots, note: () => 'к острову', alone: 'нет острова или стола, к которому его придвинуть', full: 'у острова не осталось места' },
+  bench: {
+    hosts: (c) => c.glyph === 'bed',
+    // в ногах кровати, вдоль неё
+    spots: (bed, _, cat) => [{ ...add({ x: bed.x, y: bed.y }, rotate({ x: 0, y: bed.d / 2 + cat.d / 2 + 3 }, bed.rot)), rot: normDeg(bed.rot + 180) }],
+    note: () => 'в ногах кровати',
+    alone: '',
+    full: '',
+    soft: true,
+  },
+}
+
 /** Встаёт ли предмет честно; нет — что мешает */
 function fits(f: Furniture, c: Ctx): Fail | null {
   const body = furnitureBody(f)
@@ -134,12 +216,16 @@ function fits(f: Furniture, c: Ctx): Fail | null {
 function penalty(f: Furniture, cat: CatalogItem, c: Ctx): number {
   let p = 0
   for (const z of zonesOf(f, cat)) {
-    const blocked = c.walls.some((w) => convexOverlap(z.poly, w, 1.5)) || c.taken.some((t) => convexOverlap(z.poly, t, 1.5)) || c.swings.some((s) => convexOverlap(z.poly, s, 2))
+    const blocked =
+      c.walls.some((w) => convexOverlap(z.poly, w, 1.5)) ||
+      c.taken.some((t, i) => !cat.allowInZone?.includes(c.takenKinds[i]) && convexOverlap(z.poly, t, 1.5)) ||
+      c.swings.some((s) => convexOverlap(z.poly, s, 2))
     // дверцы шкафа и ящики комода, упёртые в кровать, — не открыть: это дороже узкого прохода
     if (blocked) p += z.side === 'front' && (cat.glyph === 'wardrobe' || cat.glyph === 'drawers') ? 160 : 80
   }
   const body = furnitureBody(f)
-  for (const z of c.takenZones) if (convexOverlap(body, z, 1.5)) p += 80
+  // стул в зоне стола и тумба в зоне кровати — на своём месте, остальное мешает подойти
+  for (const z of c.takenZones) if (!z.allow?.includes(f.type) && convexOverlap(body, z.poly, 1.5)) p += 80
   // окно: высокое его не закрывает; изголовье не под окном; зеркало столика — не спиной к свету
   if (c.windowPts.length) {
     const near = obbCorners(f.x, f.y, f.w + 8, f.d + 8, f.rot)
@@ -152,6 +238,13 @@ function penalty(f: Furniture, cat: CatalogItem, c: Ctx): number {
     if (backToWindow && (cat.glyph === 'bed' || f.type === 'vanity')) p += 320
     // столик и стол — рядом с окном боком к нему: свет сбоку
     if (!backToWindow && (f.type === 'vanity' || cat.glyph === 'desk') && c.windowPts.some((q) => dist(q, f) < Math.max(f.w, f.d) / 2 + 90)) p -= 40
+  }
+  // за столом сидят: место для стула перед ним — тоже часть стола, и проходы соседей оно не перекрывает
+  if (cat.glyph === 'desk') {
+    const sc = add({ x: f.x, y: f.y }, rotate({ x: 0, y: f.d / 2 + 30 }, f.rot))
+    const seat = obbCorners(sc.x, sc.y, 60, 60, f.rot)
+    for (const z of c.takenZones) if (!z.allow?.includes('office-chair') && convexOverlap(seat, z.poly, 1.5)) p += 60
+    if (c.taken.some((t, i) => !SEAT_TYPES.has(c.takenKinds[i]) && convexOverlap(seat, t, 1.5))) p += 60
   }
   // двуспальная кровать: к ней подходят с двух сторон — по центру стены, не меньше 60 см с каждой
   if (isDoubleBed(cat)) {
@@ -275,7 +368,7 @@ function cornerToCenter(it: AiPlacement): AiPlacement {
 }
 
 /** Прочесть ответ как центры (как просили) или как углы — что честнее встаёт */
-export function readPlacements(items: AiPlacement[], c: { inner: Pt[]; walls: Pt[][]; swings: Pt[][]; windowPts: Pt[]; taken: Pt[][]; takenZones: Pt[][]; tol: number }): AiPlacement[] {
+export function readPlacements(items: AiPlacement[], c: Ctx): AiPlacement[] {
   const misses = (list: AiPlacement[]) =>
     list.reduce((n, it) => {
       const cat = CATALOG_MAP[it.type]
@@ -308,7 +401,7 @@ function fillAlongWall(f: Furniture, cat: CatalogItem, c: Ctx): Furniture {
   // и чужие проходы, и свой фронт: дверцы у края шкафа тоже должны открываться
   const zonesHit = (g: Furniture) => {
     const body = furnitureBody(g)
-    const others = c.takenZones.filter((z) => convexOverlap(body, z, 1.5)).length
+    const others = c.takenZones.filter((z) => convexOverlap(body, z.poly, 1.5)).length
     const own = zonesOf(g, cat).filter((z) => c.taken.some((t) => convexOverlap(z.poly, t, 1.5)) || c.swings.some((s) => convexOverlap(z.poly, s, 2))).length
     return others + own
   }
@@ -384,8 +477,8 @@ export function vetLayout(proposed: AiPlacement[], room: Room, plan: Plan, optio
   // мебель, которая уже стоит в этой комнате (символы электрики не мешают)
   const standing = plan.furniture.filter((f) => !CATALOG_MAP[f.type]?.symbol && pointInPoly({ x: f.x, y: f.y }, room.polygon))
   const taken: Pt[][] = standing.map(furnitureBody)
-  const takenZones: Pt[][] = standing.flatMap((f) => zonesOf(f, CATALOG_MAP[f.type]).map((z) => z.poly))
-  const ctx: Ctx = { inner, walls: wallPolys, swings, windowPts, taken, takenZones, tol: o.outTolerance }
+  const takenZones: Zone[] = standing.flatMap((f) => zonesFor(f, CATALOG_MAP[f.type]))
+  const ctx: Ctx = { inner, walls: wallPolys, swings, windowPts, taken, takenKinds: standing.map((f) => f.type), takenZones, tol: o.outTolerance }
 
   // журнальный стол в санузле геометрию пройдёт, а смысл — нет: только уместные в комнате типы
   // список тот же, что ушёл модели: по назначению, а не по старому имени комнаты
@@ -410,11 +503,13 @@ export function vetLayout(proposed: AiPlacement[], room: Room, plan: Plan, optio
   const placed: Placed[] = []
   const standingZones = [...takenZones]
   const standingBodies = [...taken]
+  const standingKinds = standing.map((f) => f.type)
   /** собрать занятое заново: без предметов skip — их место пересматривается */
   const rebuild = (skip: Set<number> = new Set()) => {
     const others = placed.filter((p) => !skip.has(p.idx))
     ctx.taken = [...standingBodies, ...others.map((p) => furnitureBody(p.f))]
-    ctx.takenZones = [...standingZones, ...others.flatMap((p) => zonesOf(p.f, p.used).map((z) => z.poly))]
+    ctx.takenKinds = [...standingKinds, ...others.map((p) => p.used.type)]
+    ctx.takenZones = [...standingZones, ...others.flatMap((p) => zonesFor(p.f, p.used))]
     ctx.beds = others.filter((p) => isDoubleBed(p.used)).map((p) => p.f)
   }
   const kinds = (cat: CatalogItem) => [cat, ...(ALTERNATIVES[cat.type] ?? []).map((t) => CATALOG_MAP[t]).filter((c): c is CatalogItem => !!c && fitting.has(c.type))]
@@ -502,17 +597,53 @@ export function vetLayout(proposed: AiPlacement[], room: Room, plan: Plan, optio
     if (!changed) break
   }
 
-  // Двуспальная кровать без тумб выглядит недоделанной: если модель их не
-  // предложила, а у изголовья есть место — ставим по бокам и говорим об этом
+  // Пары: тумба — к изголовью, стул — к столу. Пары нет или у неё нет
+  // свободного места — отказ с причиной: тумба посреди стены хуже, чем никакой
+  const paired = new Map<number, string>()
+  const hostsOf = (rule: PairRule, self: Placed) => [
+    ...placed.filter((q) => q !== self && rule.hosts(q.used)).map((q) => ({ f: q.f, cat: q.used })),
+    ...standing.filter((f) => CATALOG_MAP[f.type] && rule.hosts(CATALOG_MAP[f.type])).map((f) => ({ f, cat: CATALOG_MAP[f.type] })),
+  ]
+  for (const p of [...placed]) {
+    const rule = PAIRS[p.used.type]
+    if (!rule) continue
+    rebuild(new Set([p.idx]))
+    let best: { f: Furniture; cost: number; host: CatalogItem } | null = null
+    const hosts = hostsOf(rule, p)
+    for (const h of hosts) {
+      for (const s of rule.spots(h.f, h.cat, p.used)) {
+        const g = toFurniture(p.used, s, p.f.id)
+        if (fits(g, ctx)) continue
+        // ближе к тому, где стоял, и без помех проходам
+        const cost = penalty(g, p.used, ctx) + Math.min(dist(g, p.f), 300) * 0.3
+        if (!best || cost < best.cost) best = { f: g, cost, host: h.cat }
+      }
+    }
+    if (best) {
+      if (dist(best.f, p.f) > 1 || best.f.rot !== p.f.rot) paired.set(p.idx, rule.note(best.host))
+      p.f = best.f
+    } else if (!rule.soft) {
+      placed.splice(placed.indexOf(p), 1)
+      done.set(p.idx, { item: items[p.idx], ok: false, reason: `${p.used.name}: ${hosts.length ? rule.full : rule.alone}` })
+    }
+    rebuild()
+  }
+
+  // Двуспальная кровать без тумб выглядит недоделанной: к ней — тумбы с обеих
+  // сторон изголовья. Каких модель не дала, а место есть — ставим и говорим об этом
   const added: PlacementCheck[] = []
   const nightCat = CATALOG_MAP.nightstand
-  if (nightCat && fitting.has('nightstand') && ctx.beds?.length && !items.some((it) => it.type === 'nightstand')) {
+  if (nightCat && fitting.has('nightstand') && ctx.beds?.length) {
+    const stands = placed.filter((q) => q.used.type === 'nightstand').map((q) => q.f)
     for (const bed of ctx.beds) {
       for (const s of nightstandSpots(bed, nightCat.w, nightCat.d)) {
+        if (stands.some((n) => dist(n, s) < 15)) continue
         const f: Furniture = { ...toFurniture(nightCat, s), note: 'у изголовья: к двуспальной кровати — тумбы с двух сторон' }
         if (fits(f, ctx)) continue
         ctx.taken.push(furnitureBody(f))
-        ctx.takenZones.push(...zonesOf(f, nightCat).map((z) => z.poly))
+        ctx.takenKinds.push(f.type)
+        ctx.takenZones.push(...zonesFor(f, nightCat))
+        stands.push(f)
         added.push({ item: { type: 'nightstand', x: f.x, y: f.y, rot: f.rot, why: 'добавлено к кровати' }, ok: true, furniture: f, moved: 0, added: true })
       }
     }
@@ -524,10 +655,14 @@ export function vetLayout(proposed: AiPlacement[], room: Room, plan: Plan, optio
   for (const p of placed) {
     if (!FILLS.has(p.used.type) || p.used.resizable === false) continue
     const i = ctx.taken.findIndex((t) => JSON.stringify(t) === JSON.stringify(furnitureBody(p.f)))
-    if (i >= 0) ctx.taken.splice(i, 1)
+    if (i >= 0) {
+      ctx.taken.splice(i, 1)
+      ctx.takenKinds.splice(i, 1)
+    }
     const grown = fillAlongWall(p.f, p.used, ctx)
     p.f = grown
     ctx.taken.push(furnitureBody(grown))
+    ctx.takenKinds.push(p.used.type)
   }
 
   for (const p of placed) {
@@ -535,12 +670,22 @@ export function vetLayout(proposed: AiPlacement[], room: Room, plan: Plan, optio
     const moved = movedOf.get(p.idx) ?? 0
     const notes = [item.why || '']
     const bigger = p.f.w - p.used.w
+    const pair = paired.get(p.idx)
     if (p.used !== p.cat && ALTERNATIVES[p.cat.type]?.includes(p.used.type)) notes.push(`${p.used.name} вместо ${p.cat.name.toLowerCase()}: дверцам распашного здесь не хватает места`)
     else if (p.used !== p.cat) notes.push(`${p.used.name} вместо ${p.cat.name.toLowerCase()}: большой не помещается`)
+    else if (pair && moved > 20) notes.push(pair)
     else if (moved > 20) notes.push(`место поправлено на ${moved} см: предложенное не подходило`)
     if (bigger >= 10) notes.push(`во всю нишу: ${Math.round(p.f.w)} см вместо ${p.used.w}`)
     p.f = { ...p.f, note: notes.filter(Boolean).join(' · ') || undefined }
-    done.set(p.idx, { item, ok: true, furniture: p.f, moved, replaced: p.used !== p.cat ? p.cat.name : undefined, widened: bigger >= 10 ? Math.round(p.f.w) : undefined })
+    done.set(p.idx, {
+      item,
+      ok: true,
+      furniture: p.f,
+      moved,
+      replaced: p.used !== p.cat ? p.cat.name : undefined,
+      widened: bigger >= 10 ? Math.round(p.f.w) : undefined,
+      paired: pair && moved > 20 ? pair : undefined,
+    })
   }
   // в отчёте — предложение модели как было
   return [...items.map((_, i) => ({ ...done.get(i)!, item: proposed[i] })), ...added]
@@ -566,10 +711,12 @@ export function applyLayout(plan: Plan, checks: PlacementCheck[]): Plan {
 export function layoutSummary(checks: PlacementCheck[]): string {
   const ok = checks.filter((c) => c.ok).length
   const bad = checks.length - ok
-  const movedN = checks.filter((c) => c.ok && !c.replaced && !c.added && (c.moved ?? 0) > 20).length
+  const movedN = checks.filter((c) => c.ok && !c.replaced && !c.added && !c.paired && (c.moved ?? 0) > 20).length
   const smaller = checks.filter((c) => c.ok && c.replaced).length
   const widened = checks.filter((c) => c.ok && c.widened).length
-  const fixes = [movedN ? `место поправлено у ${movedN}` : '', smaller ? `замена на подходящий — ${smaller}` : '', widened ? `шкаф во всю нишу` : ''].filter(Boolean).join(', ')
+  // «тумба — у изголовья кровати, кресло офисное — к столу»: что придвинуто к своей паре
+  const pairs = [...new Set(checks.filter((c) => c.ok && c.paired).map((c) => `${(CATALOG_MAP[c.furniture!.type]?.name ?? '').toLowerCase()} — ${c.paired}`))]
+  const fixes = [movedN ? `место поправлено у ${movedN}` : '', pairs.join(', '), smaller ? `замена на подходящий — ${smaller}` : '', widened ? `шкаф во всю нишу` : ''].filter(Boolean).join(', ')
   const names = checks.filter((c) => c.ok && c.furniture).map((c) => CATALOG_MAP[c.furniture!.type]?.name ?? c.furniture!.type)
   const head = `Поставлено предметов: ${ok}${names.length ? ` — ${names.join(', ')}` : ''}${fixes ? ` (${fixes})` : ''}`
   if (!bad) return head

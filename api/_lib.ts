@@ -26,6 +26,17 @@ export interface TaskSpec {
   chain: string[]
   /** человеческое описание для страницы состояния */
   about: string
+  /**
+   * Сколько думать рассуждающей модели. Без ограничения gpt-5 и Claude тратят
+   * на рассуждения весь запас токенов и возвращают пустой ответ — у человека это
+   * выглядело как «ответила не по формату». Нет — модель решает сама
+   */
+  reasoning?: 'low' | 'medium' | 'high'
+  /**
+   * Страховка от медленной модели: если она молчит дольше, параллельно
+   * спрашиваем следующую и берём первый годный ответ. Нет — строго по очереди
+   */
+  hedgeMs?: number
 }
 
 // Умолчания подобраны по реальному прайсу роутера (₽ за 1 млн токенов, вход/выход)
@@ -51,22 +62,30 @@ const TASKS: Record<AiTask, TaskSpec> = {
     chain: ['deepseek/deepseek-v4-flash', 'openai/gpt-5-nano', 'google/gemini-2.5-flash-lite'],
     about: 'Достаёт из страницы магазина название, цену и габариты',
   },
-  // Расстановка мебели требует рассуждения, но текста мало. 4,5/9,0 → 9,0/30,1 → 27,4/218,9.
+  // Расстановка мебели. Первая — Gemini Flash: самая быстрая из сильных
+  // (около 300 токенов в секунду) и в пространственных задачах почти как
+  // дорогие модели, при цене $0,75/$3,75 за миллион. Вторая — DeepSeek другого
+  // поставщика: если у Google сбой, ответит она. «Быстро» — та же модель,
+  // но думает меньше; «Тщательно» — думает дольше, а в запасе Claude Sonnet.
+  // Место под ответ с запасом: рассуждения считаются в тот же лимит.
   layout: {
     vision: false,
-    maxTokens: 4000,
-    timeoutMs: 90_000,
-    chain: ['deepseek/deepseek-v4-flash', 'z-ai/glm-5.3-flash', 'openai/gpt-5-mini'],
-    about: 'Расставляет мебель в комнате по правилам эргономики',
+    maxTokens: 12_000,
+    timeoutMs: 60_000,
+    chain: ['google/gemini-3.8-flash', 'deepseek/deepseek-v4-flash', 'openai/gpt-5-mini'],
+    about: 'Быстро расставляет мебель в комнате по правилам эргономики',
+    reasoning: 'low',
+    hedgeMs: 25_000,
   },
-  // Тщательная расстановка: сильная модель продумывает зоны, проходы и свет.
-  // 218,9/1094,6 → 27,4/218,9 → 4,5/9,0: около 3–4 ₽ за комнату у первой
+  // около 1–2 ₽ за комнату у первой; Sonnet (218,9/1094,6) — только если обе до неё не справились
   layout_pro: {
     vision: false,
-    maxTokens: 6000,
-    timeoutMs: 180_000,
-    chain: ['anthropic/claude-sonnet-5', 'openai/gpt-5-mini', 'deepseek/deepseek-v4-flash'],
-    about: 'Тщательно расставляет мебель: сильная модель продумывает зоны, проходы и свет',
+    maxTokens: 20_000,
+    timeoutMs: 120_000,
+    chain: ['google/gemini-3.8-flash', 'deepseek/deepseek-v4-flash', 'anthropic/claude-sonnet-5'],
+    about: 'Тщательно расставляет мебель: модель продумывает зоны, проходы и свет',
+    reasoning: 'medium',
+    hedgeMs: 45_000,
   },
   // Отнести товар к типу каталога — самая дешёвая модель из возможных. 2,2/4,4 → 5,5/8,8.
   classify: {
@@ -250,11 +269,31 @@ export async function availableModels(cfg: AiConfig): Promise<Set<string> | null
 }
 
 /** семейство модели: чем заменить, если именно этой у роутера нет */
-function familyOf(model: string): RegExp | null {
-  const m = /^([^/]+)\/(claude-(?:sonnet|opus|haiku)|gpt-5(?:\.\d+)?-(?:mini|nano)|gpt-5|gemini-[\d.]+-flash-lite|gemini-[\d.]+-flash|gemini-[\d.]+-pro|deepseek-v\d+-flash|glm-[\d.]+-flash|qwen\d*-vl)/.exec(model)
+export function familyOf(model: string): RegExp | null {
+  const m = /^([^/]+)\/(claude-(?:sonnet|opus|haiku)|gpt-5(?:\.\d+)?-(?:mini|nano)|gpt-5(?:\.\d+)?|gemini-[\d.]+-flash-lite|gemini-[\d.]+-flash|gemini-[\d.]+-pro|deepseek-v[\d.]+-flash|glm-[\d.]+-flash|qwen\d*-vl)/.exec(model)
   if (!m) return null
   const head = m[2].replace(/[\d.]+/g, '[\\d.]+')
-  return new RegExp(`^${m[1]}/${head}`)
+  // после имени — только номер версии, «-preview» и дата: gemini-3.8-flash не
+  // подменяется на gemini-3.8-flash-lite или -image, gpt-5 — на gpt-5-mini
+  // у qwen в имени ещё и размер: qwen3-vl-235b-a22b-instruct — там хватает начала
+  if (m[2].startsWith('qwen')) return new RegExp(`^${m[1]}/${head}`)
+  return new RegExp(`^${m[1]}/${head}(?:[-.]?[\\d.]+)*(?:-preview|-latest|-exp)?(?:-[\\d-]{4,})?$`)
+}
+
+/** версия модели для сравнения «новее»: claude-sonnet-5 новее 4.5, gemini-3.10 новее 3.9; даты не в счёт */
+function versionOf(id: string): number[] {
+  return (id.replace(/-\d{4}-\d{2}-\d{2}$|-\d{8}$|-\d{2}-\d{4}$/, '').match(/\d+/g) ?? []).map(Number)
+}
+
+function newer(a: string, b: string): number {
+  const va = versionOf(a)
+  const vb = versionOf(b)
+  for (let i = 0; i < Math.max(va.length, vb.length); i++) {
+    const d = (va[i] ?? -1) - (vb[i] ?? -1)
+    if (d) return d
+  }
+  // при равной версии — выпуск, а не предварительная
+  return (/preview|exp/.test(b) ? 1 : 0) - (/preview|exp/.test(a) ? 1 : 0)
 }
 
 /** цепочка задачи, сверенная с роутером */
@@ -269,8 +308,7 @@ export async function resolveChain(cfg: AiConfig, task: AiTask): Promise<string[
       continue
     }
     const fam = familyOf(model)
-    // новее — дальше по алфавиту: claude-sonnet-5 после claude-sonnet-4.5
-    const alt = fam ? [...ids].filter((id) => fam.test(id) && !out.includes(id)).sort().pop() : undefined
+    const alt = fam ? [...ids].filter((id) => fam.test(id) && !out.includes(id)).sort(newer).pop() : undefined
     if (alt) out.push(alt)
   }
   return out.length ? out : chain
@@ -284,32 +322,103 @@ export async function askJson<T>(cfg: AiConfig, o: AskOptions<T>): Promise<AiAns
   if (cfg.dailyLimitRub > 0 && budget.rub >= cfg.dailyLimitRub) {
     throw new Error(`дневной лимит расходов исчерпан (${budget.rub.toFixed(2)} ₽)`)
   }
-  const tried: string[] = []
-  let last = ''
-  for (const model of chain) {
+  /** одна модель: ответ, разбор и проверка; любая беда — исключение с понятной причиной */
+  const attempt = async (model: string, signal: AbortSignal): Promise<{ value: T; costRub: number }> => {
+    const reply = await callModel(cfg, model, spec, o.messages, signal)
+    addSpent(reply.costRub)
+    let data: unknown
     try {
-      const { text, costRub } = await callModel(cfg, model, spec, o.messages)
-      addSpent(costRub)
-      const value = o.check(extractJson(text))
-      return { value, model, costRub, tried }
+      data = extractJson(reply.text)
+    } catch {
+      throw new Error(reply.cut ? `ответ оборвался: не хватило ${spec.maxTokens} токенов` : 'ответила текстом, а не JSON', { cause: reply.text })
+    }
+    try {
+      return { value: o.check(data), costRub: reply.costRub }
     } catch (e) {
-      last = e instanceof Error ? e.message : String(e)
-      tried.push(`${model}: ${last}`)
+      // из оборванного ответа не набралось годного — причина в обрыве, а не в формате
+      const msg = reply.cut ? `ответ оборвался: не хватило ${spec.maxTokens} токенов` : e instanceof Error ? e.message : String(e)
+      throw new Error(msg, { cause: reply.text })
     }
   }
-  throw new Error(`ни одна модель не справилась. ${tried.join('; ')}`)
+
+  // По очереди, но с подстраховкой: если модель молчит дольше hedgeMs,
+  // параллельно спрашиваем следующую — берётся первый годный ответ.
+  // Одновременно думают не больше двух: платить за всю цепочку разом незачем
+  return new Promise<AiAnswer<T>>((resolve, reject) => {
+    const tried: string[] = []
+    const running = new Map<string, { ctrl: AbortController; hedge?: ReturnType<typeof setTimeout> }>()
+    let next = 0
+    let finished = false
+    const stopAll = () => {
+      for (const r of running.values()) {
+        clearTimeout(r.hedge)
+        r.ctrl.abort()
+      }
+      running.clear()
+    }
+    const launch = () => {
+      if (finished || next >= chain.length || running.size >= 2) return
+      const model = chain[next++]
+      const ctrl = new AbortController()
+      const slot: { ctrl: AbortController; hedge?: ReturnType<typeof setTimeout> } = { ctrl }
+      if (spec.hedgeMs && next < chain.length) slot.hedge = setTimeout(launch, spec.hedgeMs)
+      running.set(model, slot)
+      attempt(model, ctrl.signal).then(
+        ({ value, costRub }) => {
+          if (finished) return
+          finished = true
+          running.delete(model)
+          stopAll()
+          resolve({ value, model, costRub, tried })
+        },
+        (e: unknown) => {
+          clearTimeout(slot.hedge)
+          running.delete(model)
+          if (finished) return
+          const msg = e instanceof Error ? e.message : String(e)
+          tried.push(`${model}: ${msg}`)
+          // в консоль сервера — с началом ответа: по нему видно, что модель прислала на самом деле
+          const sample = e instanceof Error && typeof e.cause === 'string' ? ` — «${e.cause.replace(/\s+/g, ' ').slice(0, 160)}»` : ''
+          console.warn(`[ИИ] ${o.task}: ${model} не справилась: ${msg}${sample}`)
+          if (next < chain.length) launch()
+          else if (!running.size) {
+            finished = true
+            reject(new Error(`ни одна модель не справилась. ${tried.join('; ')}`))
+          }
+        },
+      )
+    }
+    launch()
+  })
 }
 
 interface ModelReply {
   text: string
   costRub: number
+  /** модель упёрлась в лимит токенов: ответ может быть оборван */
+  cut: boolean
 }
 
-async function callModel(cfg: AiConfig, model: string, spec: TaskSpec, messages: AiMessage[]): Promise<ModelReply> {
+/**
+ * Сколько думать — только тем, кто думает и без просьбы (gpt-5, Gemini 3) или
+ * думает лучше всех (Claude). DeepSeek и прочим рассуждения не включаем:
+ * запасная модель должна отвечать быстро, как отвечала раньше
+ */
+const reasoningFor = (model: string, spec: TaskSpec) =>
+  spec.reasoning && /^(openai\/(gpt-5|o\d)|google\/gemini-(?:[3-9]|\d{2})|anthropic\/)/.test(model) ? spec.reasoning : undefined
+
+/** рассуждающим моделям нужна температура по умолчанию: gpt-5 иначе отказывает, Gemini 3 зацикливается, Claude с рассуждением не принимает */
+const defaultTemperature = (model: string, spec: TaskSpec) =>
+  /^openai\/(gpt-5|o\d)/.test(model) || /^google\/gemini-(?:[3-9]|\d{2})/.test(model) || !!reasoningFor(model, spec)
+
+async function callModel(cfg: AiConfig, model: string, spec: TaskSpec, messages: AiMessage[], outer?: AbortSignal): Promise<ModelReply> {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), spec.timeoutMs)
-  try {
-    const res = await fetch(`${cfg.base}/chat/completions`, {
+  const onOuter = () => ctrl.abort()
+  outer?.addEventListener('abort', onOuter)
+  const effort = reasoningFor(model, spec)
+  const send = (withReasoning: boolean) =>
+    fetch(`${cfg.base}/chat/completions`, {
       method: 'POST',
       signal: ctrl.signal,
       headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.key}` },
@@ -317,30 +426,53 @@ async function callModel(cfg: AiConfig, model: string, spec: TaskSpec, messages:
         model,
         messages,
         max_tokens: spec.maxTokens,
-        // рассуждающие модели OpenAI (gpt-5, o-серия) принимают только температуру по умолчанию
-        ...(/^openai\/(gpt-5|o\d)/.test(model) ? {} : { temperature: 0 }),
+        ...(defaultTemperature(model, spec) ? {} : { temperature: 0 }),
+        // рассуждения — сколько задано, и без их текста в ответе: нам нужен только JSON
+        ...(withReasoning && effort ? { reasoning: { effort, exclude: true } } : {}),
         response_format: { type: 'json_object' },
       }),
     })
+  try {
+    let res = await send(true)
+    // шлюз не знает про настройку рассуждений — спрашиваем ту же модель без неё
+    if (res.status === 400 && effort) res = await send(false)
     if (!res.ok) {
       // текст ошибки роутера наружу не отдаём: в нём может оказаться ключ
       throw new Error(res.status === 404 ? 'нет у роутера (404)' : res.status === 429 ? 'роутер просит подождать (429)' : `роутер отказал (${res.status})`)
     }
     const payload = (await res.json()) as {
-      choices?: { message?: { content?: string } }[]
+      choices?: { message?: { content?: unknown; refusal?: unknown; reasoning?: unknown }; finish_reason?: string }[]
+      error?: { code?: unknown }
       cost_rub?: number
       usage?: { cost_rub?: number; total_cost?: number }
     }
-    const text = payload.choices?.[0]?.message?.content
-    if (!text) throw new Error('пустой ответ')
+    // шлюз может вернуть ошибку поставщика с кодом 200
+    if (payload.error && !payload.choices?.length) throw new Error(`сбой у поставщика${payload.error.code ? ` (${String(payload.error.code).slice(0, 20)})` : ''}`)
+    const choice = payload.choices?.[0]
+    const content = choice?.message?.content
+    // текст может прийти строкой или списком частей, как у Claude через некоторые шлюзы
+    const text =
+      typeof content === 'string'
+        ? content
+        : Array.isArray(content)
+          ? content.map((p) => (typeof p === 'string' ? p : p && typeof p === 'object' && typeof (p as { text?: unknown }).text === 'string' ? (p as { text: string }).text : '')).join('')
+          : ''
+    const cut = choice?.finish_reason === 'length'
     const costRub = Number(payload.cost_rub ?? payload.usage?.cost_rub ?? payload.usage?.total_cost ?? 0) || 0
-    return { text, costRub }
+    if (!text.trim()) {
+      addSpent(costRub)
+      if (cut) throw new Error(`всё ушло в рассуждения: не хватило ${spec.maxTokens} токенов на ответ`)
+      if (typeof choice?.message?.refusal === 'string' && choice.message.refusal) throw new Error('отказалась отвечать')
+      throw new Error('пустой ответ')
+    }
+    return { text, costRub, cut }
   } catch (e) {
-    // обрыв по нашему таймеру — не «отменено», а «не уложилась»
-    if (ctrl.signal.aborted) throw new Error(`не ответила за ${Math.round(spec.timeoutMs / 1000)} с`)
+    // обрыв по нашему таймеру — не «отменено», а «не уложилась»; по чужому — другая модель уже ответила
+    if (ctrl.signal.aborted && !outer?.aborted) throw new Error(`не ответила за ${Math.round(spec.timeoutMs / 1000)} с`)
     throw e
   } finally {
     clearTimeout(timer)
+    outer?.removeEventListener('abort', onOuter)
   }
 }
 

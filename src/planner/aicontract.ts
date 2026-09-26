@@ -358,24 +358,44 @@ export interface AiPlacement {
 
 export function checkAiLayout(data: unknown): AiPlacement[] {
   const d = data as Record<string, unknown> | null
-  const items = Array.isArray(d?.items) ? (d as { items: unknown[] }).items : Array.isArray(data) ? (data as unknown[]) : []
+  // список предметов: как просили — items, но модели зовут его и по-своему
+  const named = (v: unknown): unknown[] | null => (Array.isArray(v) ? v : null)
+  const listOf = (v: unknown): unknown[] | null => (Array.isArray(v) && v.some((x) => x && typeof x === 'object') ? v : null)
+  const items =
+    named(data) ??
+    (d && typeof d === 'object'
+      ? (named(d.items) ?? named(d.furniture) ?? named(d.placements) ?? named(d.layout) ?? Object.values(d).map(listOf).find((v) => v) ?? null)
+      : null)
+  if (!items) throw new Error('в ответе нет списка предметов')
+  const num = (v: unknown): number => (typeof v === 'string' ? parseFloat(v) : Number(v))
+  /** точка: {x, y}, [x, y] или поля x, y */
+  const pointOf = (it: Record<string, unknown>): [number, number] => {
+    for (const k of ['center', 'position', 'pos', 'centre']) {
+      const v = it[k] as Record<string, unknown> | unknown[] | undefined
+      if (Array.isArray(v) && v.length >= 2) return [num(v[0]), num(v[1])]
+      if (v && typeof v === 'object') return [num((v as Record<string, unknown>).x), num((v as Record<string, unknown>).y)]
+    }
+    return [num(it.x), num(it.y)]
+  }
   const out: AiPlacement[] = []
   for (const raw of items.slice(0, 60)) {
+    if (!raw || typeof raw !== 'object') continue
     const it = raw as Record<string, unknown>
-    const type = typeof it.type === 'string' ? it.type.trim() : ''
-    const x = Number(it.x)
-    const y = Number(it.y)
-    const rot = Number(it.rot ?? 0)
+    const typeRaw = it.type ?? it.kind ?? it.id
+    const type = typeof typeRaw === 'string' ? typeRaw.trim() : ''
+    const [x, y] = pointOf(it)
+    const rot = num(it.rot ?? it.rotation ?? it.angle ?? 0)
     if (!type || !Number.isFinite(x) || !Number.isFinite(y)) continue
+    const why = it.why ?? it.reason
     out.push({
       type,
       x,
       y,
       rot: Number.isFinite(rot) ? (((Math.round(rot / 15) * 15) % 360) + 360) % 360 : 0,
-      why: typeof it.why === 'string' ? it.why.trim().slice(0, 200) : '',
+      why: typeof why === 'string' ? why.trim().slice(0, 200) : '',
     })
   }
-  if (!out.length) throw new Error('пустая расстановка')
+  if (!out.length) throw new Error(items.length ? 'в ответе нет координат предметов' : 'пустая расстановка')
   return out
 }
 
@@ -452,33 +472,149 @@ export function checkAiProduct(data: unknown): AiProductFields {
 }
 
 // ---------- разбор ответа ----------
-/** достать JSON из ответа: модели любят обрамлять его ```json и пояснениями */
+/**
+ * Достать JSON из ответа. Модели обрамляют его ```json и пояснениями, ставят
+ * запятую после последнего элемента, пишут комментарии, а при нехватке токенов
+ * обрывают на полуслове. Всё это чинится здесь, а не превращается в
+ * «ответила не по формату»: из оборванного ответа берутся целые предметы.
+ */
 export function extractJson(text: string): unknown {
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text)
-  const body = fenced ? fenced[1] : text
-  const direct = tryParse(body)
-  if (direct !== undefined) return direct
-  for (const [open, close] of [['{', '}'], ['[', ']']] as const) {
-    const start = body.indexOf(open)
-    if (start < 0) continue
+  const fences = [...text.matchAll(/```(?:json|JSON)?\s*([\s\S]*?)(?:```|$)/g)].map((m) => m[1])
+  for (const body of [...fences, text]) {
+    const got = parseLoose(body)
+    if (got !== undefined) return got
+  }
+  for (const body of [...fences, text]) {
+    const got = balanced(body)
+    if (got !== undefined) return got
+  }
+  throw new Error('модель вернула не JSON')
+}
+
+/** разобрать как есть или после чистки; годится только объект или массив — числа и строки ответом не бывают */
+const parseLoose = (s: string): unknown => {
+  for (const t of [s, loosen(s)]) {
+    const got = tryParse(t)
+    if (got !== null && typeof got === 'object') return got
+  }
+  return undefined
+}
+
+/**
+ * Первый объект или массив в тексте, что разбирается. Не закрылся до конца
+ * текста — ответ оборван: закрываем скобки после последнего целого значения
+ */
+function balanced(body: string): unknown {
+  let tries = 0
+  for (let start = body.search(/[{[]/); start >= 0 && tries < 20; start = nextStart(body, start), tries++) {
+    const open = body[start]
+    const close = open === '{' ? '}' : ']'
     let depth = 0
     let inStr = false
     let esc = false
-    for (let i = start; i < body.length; i++) {
+    let closed = false
+    for (let i = start; i < body.length && !closed; i++) {
       const ch = body[i]
-      if (esc) { esc = false; continue }
-      if (ch === '\\') { esc = true; continue }
-      if (ch === '"') { inStr = !inStr; continue }
+      if (esc) {
+        esc = false
+        continue
+      }
+      if (ch === '\\') {
+        esc = true
+        continue
+      }
+      if (ch === '"') {
+        inStr = !inStr
+        continue
+      }
       if (inStr) continue
       if (ch === open) depth++
       else if (ch === close && --depth === 0) {
-        const got = tryParse(body.slice(start, i + 1))
+        const got = parseLoose(body.slice(start, i + 1))
         if (got !== undefined) return got
-        break
+        closed = true
       }
     }
+    if (!closed) {
+      const whole = closeTruncated(loosen(body.slice(start)))
+      const got = whole === undefined ? undefined : parseLoose(whole)
+      if (got !== undefined) return got
+    }
   }
-  throw new Error('модель вернула не JSON')
+  return undefined
+}
+
+const nextStart = (body: string, from: number): number => {
+  const i = body.slice(from + 1).search(/[{[]/)
+  return i < 0 ? -1 : from + 1 + i
+}
+
+/** убрать то, что JSON не прощает, а модели пишут: запятую перед скобкой и комментарии */
+function loosen(s: string): string {
+  let out = ''
+  let inStr = false
+  let esc = false
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (inStr) {
+      out += ch
+      if (esc) esc = false
+      else if (ch === '\\') esc = true
+      else if (ch === '"') inStr = false
+      continue
+    }
+    if (ch === '"') {
+      inStr = true
+      out += ch
+      continue
+    }
+    if (ch === '/' && s[i + 1] === '/') {
+      while (i < s.length && s[i] !== '\n') i++
+      out += '\n'
+      continue
+    }
+    if (ch === '/' && s[i + 1] === '*') {
+      const j = s.indexOf('*/', i + 2)
+      i = j < 0 ? s.length : j + 1
+      continue
+    }
+    if (ch === ',') {
+      let j = i + 1
+      while (j < s.length && /\s/.test(s[j])) j++
+      if (s[j] === '}' || s[j] === ']') continue
+    }
+    out += ch
+  }
+  return out
+}
+
+/** ответ оборвался: отрезать после последнего целого значения и закрыть открытые скобки */
+function closeTruncated(s: string): string | undefined {
+  const stack: string[] = []
+  let inStr = false
+  let esc = false
+  let cut = -1
+  let tail: string[] = []
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (inStr) {
+      if (esc) esc = false
+      else if (ch === '\\') esc = true
+      else if (ch === '"') inStr = false
+      continue
+    }
+    if (ch === '"') inStr = true
+    else if (ch === '{' || ch === '[') stack.push(ch === '{' ? '}' : ']')
+    else if (ch === '}' || ch === ']') {
+      stack.pop()
+      // всё закрылось само — значит, не обрыв, а просто мусор, который не разобрался
+      if (!stack.length) return undefined
+      cut = i + 1
+      tail = [...stack]
+    }
+  }
+  if (cut < 0) return undefined
+  return s.slice(0, cut) + tail.reverse().join('')
 }
 
 function tryParse(s: string): unknown {

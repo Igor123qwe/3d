@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { addSpent, askJson, chainFor, chainFrom, rateLimit, resetModelCache, resolveChain, spentToday, type AiConfig } from '../api/_lib'
+import { addSpent, askJson, chainFor, chainFrom, familyOf, rateLimit, resetModelCache, resolveChain, spentToday, type AiConfig } from '../api/_lib'
 
 const cfg: AiConfig = { base: 'https://router.test/v1', key: 'sk-secret-do-not-leak', dailyLimitRub: 0 }
 
@@ -228,5 +228,108 @@ describe('модели, которых нет у роутера', () => {
     expect(r.model).toBe('deepseek/deepseek-v4-flash')
     expect(r.tried[0]).toMatch(/gpt-5-mini: роутер отказал \(400\)/)
     expect(asked[0]).toBe('openai/gpt-5-mini без температуры')
+  })
+
+  it('Gemini Flash подменяется ближайшим Flash, а не Lite и не генератором картинок; новее — по номеру версии', async () => {
+    resetModelCache()
+    process.env.AI_MODEL_LAYOUT_PRO = 'google/gemini-3.8-flash,anthropic/claude-sonnet-5'
+    router(
+      ['google/gemini-3.7-flash', 'google/gemini-3.9-flash-lite', 'google/gemini-3.9-flash-image', 'google/gemini-3-flash-preview', 'anthropic/claude-sonnet-4.5', 'anthropic/claude-sonnet-10'],
+      () => reply('{}'),
+    )
+    expect(await resolveChain(cfg, 'layout_pro')).toEqual(['google/gemini-3.7-flash', 'anthropic/claude-sonnet-10'])
+    expect(familyOf('openai/gpt-5')!.test('openai/gpt-5-mini')).toBe(false)
+    expect(familyOf('openai/gpt-5-mini')!.test('openai/gpt-5.4-mini')).toBe(true)
+    expect(familyOf('qwen/qwen3-vl-235b-a22b-instruct')!.test('qwen/qwen3-vl-32b-instruct')).toBe(true)
+  })
+
+  it('рассуждения ограничены, места под ответ с запасом; Gemini — без температуры, DeepSeek — с нулевой', async () => {
+    resetModelCache()
+    const bodies: Record<string, unknown>[] = []
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/models')) return new Response('нет', { status: 500 })
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+      bodies.push(body)
+      return body.model === 'google/gemini-3.8-flash' ? reply('мусор') : reply('{"ok":1}')
+    })
+    process.env.AI_MODEL_LAYOUT_PRO = 'google/gemini-3.8-flash,deepseek/deepseek-v4-flash'
+    await askJson({ ...cfg }, { task: 'layout_pro', messages: [{ role: 'user', content: 'x' }], check: (d) => d })
+    expect(bodies[0].reasoning).toEqual({ effort: 'medium', exclude: true })
+    expect(bodies[0].max_tokens).toBeGreaterThanOrEqual(16000)
+    expect(bodies[0].temperature).toBeUndefined()
+    expect(bodies[1].temperature).toBe(0)
+    // запасной DeepSeek рассуждения не включаются: он должен ответить быстро
+    expect(bodies[1].reasoning).toBeUndefined()
+  })
+
+  it('шлюз не принял настройку рассуждений — та же модель спрашивается без неё', async () => {
+    resetModelCache()
+    const bodies: Record<string, unknown>[] = []
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/models')) return new Response('нет', { status: 500 })
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+      bodies.push(body)
+      return body.reasoning ? new Response('{}', { status: 400 }) : reply('{"ok":1}')
+    })
+    process.env.AI_MODEL_LAYOUT_PRO = 'google/gemini-3.8-flash'
+    const r = await askJson({ ...cfg }, { task: 'layout_pro', messages: [{ role: 'user', content: 'x' }], check: (d) => d })
+    expect(r.model).toBe('google/gemini-3.8-flash')
+    expect(bodies.map((b) => !!b.reasoning)).toEqual([true, false])
+  })
+
+  it('ответ списком частей, как у Claude через шлюз, читается', async () => {
+    resetModelCache()
+    vi.stubGlobal('fetch', async (url: string) => {
+      if (String(url).endsWith('/models')) return new Response('нет', { status: 500 })
+      return new Response(JSON.stringify({ choices: [{ message: { content: [{ type: 'text', text: '{"items":' }, { type: 'text', text: '[1]}' }] } }] }), { status: 200 })
+    })
+    process.env.AI_MODEL_LAYOUT_PRO = 'anthropic/claude-sonnet-5'
+    const r = await askJson({ ...cfg }, { task: 'layout_pro', messages: [{ role: 'user', content: 'x' }], check: (d) => d })
+    expect(r.value).toEqual({ items: [1] })
+  })
+
+  it('пустой ответ после рассуждений назван так, а не «не по формату»', async () => {
+    resetModelCache()
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/models')) return new Response('нет', { status: 500 })
+      const body = JSON.parse(String(init?.body)) as { model: string }
+      if (body.model === 'openai/gpt-5-mini') return new Response(JSON.stringify({ choices: [{ message: { content: '' }, finish_reason: 'length' }] }), { status: 200 })
+      return new Response(JSON.stringify({ choices: [{ message: { content: '{"items":[{"a":1},{"b"' }, finish_reason: 'length' }] }), { status: 200 })
+    })
+    process.env.AI_MODEL_LAYOUT_PRO = 'openai/gpt-5-mini,deepseek/deepseek-v4-flash'
+    const r = await askJson({ ...cfg }, { task: 'layout_pro', messages: [{ role: 'user', content: 'x' }], check: (d) => d })
+    expect(r.tried[0]).toMatch(/всё ушло в рассуждения/)
+    // оборванный ответ второй модели спасён: целые предметы взяты
+    expect(r.value).toEqual({ items: [{ a: 1 }] })
+  })
+
+  it('медленная модель подстрахована: следом спрашивается следующая, берётся первый годный ответ', async () => {
+    resetModelCache()
+    vi.useFakeTimers()
+    try {
+      let slowAborted = false
+      vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/models')) return Promise.resolve(new Response('нет', { status: 500 }))
+        const body = JSON.parse(String(init?.body)) as { model: string }
+        if (body.model === 'google/gemini-3.8-flash')
+          return new Promise<Response>((_, rej) =>
+            init?.signal?.addEventListener('abort', () => {
+              slowAborted = true
+              rej(new Error('This operation was aborted'))
+            }),
+          )
+        return Promise.resolve(reply('{"ok":1}'))
+      })
+      process.env.AI_MODEL_LAYOUT_PRO = 'google/gemini-3.8-flash,deepseek/deepseek-v4-flash'
+      const pending = askJson({ ...cfg }, { task: 'layout_pro', messages: [{ role: 'user', content: 'x' }], check: (d) => d })
+      await vi.advanceTimersByTimeAsync(46_000)
+      const r = await pending
+      expect(r.model).toBe('deepseek/deepseek-v4-flash')
+      // проигравшая не числится «не ответившей» и остановлена, чтобы не платить за неё дальше
+      expect(r.tried).toEqual([])
+      expect(slowAborted).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

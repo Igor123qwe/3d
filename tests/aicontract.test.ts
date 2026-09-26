@@ -27,6 +27,30 @@ describe('разбор ответа модели', () => {
   it('бросает ошибку, если JSON нет вовсе', () => {
     expect(() => extractJson('Извините, я не смог прочитать этот план.')).toThrow(/не JSON/)
   })
+
+  it('терпит запятую перед скобкой и комментарии', () => {
+    expect(extractJson('{"items":[{"type":"bed-160","x":1,"y":2,},], // кровать\n "plan":"так"}')).toEqual({ items: [{ type: 'bed-160', x: 1, y: 2 }], plan: 'так' })
+  })
+
+  it('берёт тот блок кода, где JSON, а не первый попавшийся', () => {
+    const text = 'Сначала схема:\n```\nкровать | тумба\n```\nИтог:\n```json\n{"items":[]}\n```'
+    expect(extractJson(text)).toEqual({ items: [] })
+  })
+
+  it('ответ оборвался на полуслове — берутся целые предметы', () => {
+    const text = '```json\n{"plan":"кровать по центру","items":[{"type":"bed-160","x":170,"y":105,"rot":0},{"type":"nightstand","x":60,"y":20,"rot":0},{"type":"wardr'
+    expect(extractJson(text)).toEqual({
+      plan: 'кровать по центру',
+      items: [
+        { type: 'bed-160', x: 170, y: 105, rot: 0 },
+        { type: 'nightstand', x: 60, y: 20, rot: 0 },
+      ],
+    })
+  })
+
+  it('фигурные скобки в пояснении перед ответом не сбивают', () => {
+    expect(extractJson('Повороты {0, 90, 180} учтены. {"items":[{"type":"desk","x":1,"y":2}]}')).toEqual({ items: [{ type: 'desk', x: 1, y: 2 }] })
+  })
 })
 
 describe('проверка распознанного плана', () => {
@@ -109,6 +133,23 @@ describe('проверка расстановки', () => {
 
   it('пустую расстановку считает ошибкой', () => {
     expect(() => checkAiLayout({ items: [] })).toThrow(/пустая/)
+  })
+
+  it('расстановку понимает и в другой обёртке: position, center, rotation, furniture', () => {
+    const items = checkAiLayout({
+      furniture: [
+        { type: 'bed-160', position: { x: 170, y: 105 }, rotation: 90 },
+        { type: 'desk', center: [40, 300], angle: '270' },
+        { kind: 'nightstand', x: '60', y: '20' },
+      ],
+    })
+    expect(items.map((i) => [i.type, i.x, i.y, i.rot])).toEqual([
+      ['bed-160', 170, 105, 90],
+      ['desk', 40, 300, 270],
+      ['nightstand', 60, 20, 0],
+    ])
+    expect(() => checkAiLayout({ plan: 'только замысел' })).toThrow(/нет списка/)
+    expect(() => checkAiLayout({ items: [{ type: 'bed-160' }] })).toThrow(/нет координат/)
   })
 })
 

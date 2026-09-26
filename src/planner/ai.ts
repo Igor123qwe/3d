@@ -65,6 +65,21 @@ async function post<T>(endpoint: string, body: unknown, signal?: AbortSignal): P
 /** короткое имя модели: anthropic/claude-sonnet-5 → claude-sonnet-5 */
 export const shortModel = (m: string): string => m.replace(/^[^/]+\//, '')
 
+/** что случилось с одной моделью — словами, по которым ясно, что делать */
+function whyModel(why: string): string {
+  if (/abort/i.test(why)) return 'оборвалось'
+  if (/Failed to fetch|fetch failed|ECONN|network/i.test(why)) return 'нет связи'
+  if (/рассужд/i.test(why)) return 'думала слишком долго и не успела ответить'
+  if (/оборвал|не хватило/i.test(why)) return 'ответ оборвался на полуслове'
+  if (/пустой ответ/i.test(why)) return 'прислала пустой ответ'
+  if (/отказалась/i.test(why)) return 'отказалась отвечать'
+  if (/не JSON|текстом/i.test(why)) return 'ответила текстом вместо данных'
+  if (/нет списка|нет координат|пустая расстановка/i.test(why)) return 'не дала ни одного предмета'
+  if (/Unexpected|JSON/i.test(why)) return 'ответила не по формату'
+  if (/не прошёл|пусто/i.test(why)) return 'ответ не прошёл проверку'
+  return why
+}
+
 export function friendlyAiError(msg: string): string {
   // перебор моделей не удался: по каждой — что случилось, иначе не понять, в чём дело
   const chain = /ни одна модель не справилась\.\s*(.+)$/s.exec(msg)
@@ -73,11 +88,7 @@ export function friendlyAiError(msg: string): string {
       const i = p.indexOf(': ')
       if (i < 0) return p
       const model = shortModel(p.slice(0, i))
-      let why = p.slice(i + 2)
-      if (/abort/i.test(why)) why = 'оборвалось'
-      else if (/Failed to fetch|fetch failed|ECONN|network/i.test(why)) why = 'нет связи'
-      else if (/JSON|не прошёл|пуст|Unexpected/i.test(why)) why = 'ответила не по формату'
-      return `${model} — ${why}`
+      return `${model} — ${whyModel(p.slice(i + 2))}`
     })
     return `ни одна модель не ответила: ${parts.join('; ')}`
   }

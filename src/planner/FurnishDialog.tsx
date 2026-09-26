@@ -36,7 +36,7 @@ interface Props {
   models?: { best?: string[]; fast?: string[] }
 }
 
-/** выбор модели запоминается: тщательно — сильная, быстро — дешёвая */
+/** выбор запоминается: тщательно — модель думает дольше, быстро — меньше */
 const LS_QUALITY = 'boop.planner.furnishQuality'
 const readQuality = (): 'fast' | 'best' => {
   try {
@@ -209,16 +209,16 @@ export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled,
             <div className="pl-furnish-row">
               <span className="pl-furnish-label">Как расставлять</span>
               <div className="pl-segment" role="radiogroup" aria-label="Модель для расстановки">
-                <button role="radio" aria-checked={quality === 'best'} className={quality === 'best' ? 'active' : ''} onClick={() => setQuality('best')} disabled={!!busy} title="Сильная модель продумывает зоны, проходы и свет. Около 3–4 ₽ за комнату">
+                <button role="radio" aria-checked={quality === 'best'} className={quality === 'best' ? 'active' : ''} onClick={() => setQuality('best')} disabled={!!busy} title="Модель продумывает зоны, проходы и свет. Около 1–3 ₽ и 15–40 секунд на комнату">
                   Тщательно
                 </button>
-                <button role="radio" aria-checked={quality === 'fast'} className={quality === 'fast' ? 'active' : ''} onClick={() => setQuality('fast')} disabled={!!busy} title="Дешёвая быстрая модель: копейки за комнату, но думает меньше">
+                <button role="radio" aria-checked={quality === 'fast'} className={quality === 'fast' ? 'active' : ''} onClick={() => setQuality('fast')} disabled={!!busy} title="Та же модель думает меньше: вдвое быстрее и дешевле">
                   Быстро
                 </button>
               </div>
             </div>
             <p className="pl-furnish-note">
-              {quality === 'best' ? 'Сильная модель: сначала продумывает замысел комнаты, потом расставляет. Около 3–4 ₽ за комнату, до пары минут.' : 'Дешёвая модель: быстро и почти бесплатно, но продумывает меньше.'}
+              {quality === 'best' ? 'Сначала продумывает замысел комнаты, потом расставляет. Около 1–3 ₽ и 15–40 секунд на комнату, по три комнаты разом.' : 'Думает меньше: вдвое быстрее и дешевле, меньше рубля за комнату.'}
               {(() => {
                 const chain = quality === 'best' ? models?.best : models?.fast
                 return chain?.length ? ` Модель: ${shortModel(chain[0])}${chain.length > 1 ? `, запасная — ${shortModel(chain[1])}` : ''}.` : ''

@@ -173,6 +173,111 @@ describe('проверка расстановки от ИИ', () => {
     expect(red.map((i) => i.text)).toEqual([])
   })
 
+  it('тумбы — у изголовья, а не где модель их бросила; кресло — перед столом, лицом к нему', () => {
+    // как на плане пользователя: тумбы у дальних стен, кресло в метре от стола
+    const { plan, room: r } = room()
+    const checks = vetLayout(
+      [
+        { type: 'bed-160', x: 250, y: 105, rot: 0, why: 'изголовьем к верхней стене' },
+        { type: 'nightstand', x: 470, y: 350, rot: 0, why: 'у кровати' },
+        { type: 'nightstand', x: 30, y: 360, rot: 0, why: 'у кровати' },
+        { type: 'desk', x: 30, y: 300, rot: 270, why: 'у левой стены' },
+        { type: 'office-chair', x: 300, y: 330, rot: 0, why: 'у стола' },
+      ],
+      r,
+      plan,
+      { purpose: 'Спальня' },
+    )
+    for (const c of checks) honest(c, r, plan, checks)
+    const bed = checks.find((c) => c.furniture?.type === 'bed-160')!.furniture!
+    const stands = checks.filter((c) => c.furniture?.type === 'nightstand').map((c) => c.furniture!)
+    expect(stands).toHaveLength(2)
+    // вплотную к бокам изголовья, по разные стороны
+    for (const n of stands) {
+      expect(Math.abs(Math.abs(n.x - bed.x) - (bed.w / 2 + n.w / 2)), `тумба в (${n.x}; ${n.y})`).toBeLessThan(5)
+      expect(Math.abs(n.y - n.d / 2 - (bed.y - bed.d / 2))).toBeLessThan(3)
+    }
+    expect(Math.sign(stands[0].x - bed.x)).not.toBe(Math.sign(stands[1].x - bed.x))
+    expect(checks.find((c) => c.item.type === 'nightstand')!.furniture!.note).toMatch(/у изголовья/)
+    // кресло прямо перед столом, лицом к нему
+    const desk = checks.find((c) => c.furniture?.type === 'desk')!.furniture!
+    const chair = checks.find((c) => c.furniture?.type === 'office-chair')!
+    const toChair = { x: chair.furniture!.x - desk.x, y: chair.furniture!.y - desk.y }
+    // перед столом: по оси стола на расстоянии половины стола и половины кресла
+    const ax = Math.cos((desk.rot * Math.PI) / 180)
+    const ay = Math.sin((desk.rot * Math.PI) / 180)
+    const along = toChair.x * ax + toChair.y * ay
+    const across = -toChair.x * ay + toChair.y * ax
+    expect(Math.abs(along), 'по центру стола').toBeLessThan(2)
+    expect(Math.abs(across - (desk.d / 2 + 30 + 3)), 'вплотную к переднему краю').toBeLessThan(2)
+    expect((chair.furniture!.rot - desk.rot + 360) % 360).toBe(180)
+    expect(chair.paired).toMatch(/к столу/)
+    expect(layoutSummary(checks)).toMatch(/кресло офисное — к столу/)
+    const next = applyLayout(plan, checks)
+    const warn = runChecks(next, buildRooms(next).rooms).issues.filter((i) => /Кресло|Тумба/.test(i.text) && i.level === 'error')
+    expect(warn).toEqual([])
+  })
+
+  it('тумба без кровати и стул без стола не ставятся — с понятной причиной', () => {
+    const { plan, room: r } = room()
+    const checks = vetLayout(
+      [
+        { type: 'nightstand', x: 100, y: 30, rot: 0, why: '' },
+        { type: 'office-chair', x: 250, y: 200, rot: 0, why: '' },
+      ],
+      r,
+      plan,
+      { purpose: 'Спальня' },
+    )
+    expect(checks[0].ok).toBe(false)
+    expect(checks[0].reason).toMatch(/нет кровати/)
+    expect(checks[1].ok).toBe(false)
+    expect(checks[1].reason).toMatch(/нет стола/)
+  })
+
+  it('стулья обеденной группы — вокруг стола, а не по комнате', () => {
+    const { plan, room: r } = room()
+    const checks = vetLayout(
+      [
+        { type: 'dining-table', x: 250, y: 200, rot: 0, why: 'по центру' },
+        { type: 'chair', x: 60, y: 60, rot: 0, why: '' },
+        { type: 'chair', x: 440, y: 60, rot: 0, why: '' },
+        { type: 'chair', x: 60, y: 340, rot: 0, why: '' },
+        { type: 'chair', x: 440, y: 340, rot: 0, why: '' },
+      ],
+      r,
+      plan,
+      { purpose: 'Гостиная' },
+    )
+    for (const c of checks) honest(c, r, plan, checks)
+    const table = checks[0].furniture!
+    for (const c of checks.slice(1)) {
+      const f = c.furniture!
+      // стул касается стола: от центра стула до края стола — половина стула и зазор
+      const dx = Math.max(0, Math.abs(f.x - table.x) - table.w / 2)
+      const dy = Math.max(0, Math.abs(f.y - table.y) - table.d / 2)
+      expect(Math.hypot(dx, dy), `стул в (${f.x}; ${f.y})`).toBeLessThan(30)
+    }
+  })
+
+  it('стул, который модель поставила к столу правильно, не двигается и не «поправлен»', () => {
+    const { plan, room: r } = room()
+    // стол у верхней стены, стул прямо перед ним: в зоне подхода к столу ему и место
+    const checks = vetLayout(
+      [
+        // чистовой контур начинается с 10: стол 120 × 60 вплотную к стене — центр на 40
+        { type: 'desk', x: 250, y: 40, rot: 0, why: '' },
+        { type: 'office-chair', x: 250, y: 40 + 30 + 30 + 3, rot: 180, why: '' },
+      ],
+      r,
+      plan,
+      { purpose: 'Кабинет' },
+    )
+    expect(checks[1].ok).toBe(true)
+    expect(checks[1].moved).toBeLessThan(3)
+    expect(checks[1].furniture!.note ?? '').not.toMatch(/поправлено/)
+  })
+
   it('второй предмет на том же месте встаёт рядом, а не поверх', () => {
     const { plan, room: r } = room()
     const checks = vetLayout(
