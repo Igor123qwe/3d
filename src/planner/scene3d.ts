@@ -1,5 +1,6 @@
 // Сборка 3D-сцены (three.js) из плана: стены с проёмами, полы, мебель (боксы или модели).
 // Единицы сцены — метры. План (x, y) → мир (x, 0, y), высота → Y.
+import { baseColorOf, FLOOR_COLORS } from './palette'
 import * as THREE from 'three'
 import type { Furniture, Plan, Pt, Room } from './types'
 import { CATALOG_MAP, CATEGORY_COLORS, FLOORS, dims3d } from './catalog'
@@ -150,7 +151,7 @@ function buildFloors(rooms: Room[], opts: SceneOpts): THREE.Group {
     if (r.inner.length < 3) continue
     const shape = new THREE.Shape(r.inner.map((p) => new THREE.Vector2(p.x * M, -p.y * M)))
     const geom = new THREE.ShapeGeometry(shape)
-    const color = FLOORS.find((f) => f.key === r.meta.floor)?.color ?? '#eeeeee'
+    const color = FLOOR_COLORS[r.meta.floor]?.color ?? FLOORS.find((f) => f.key === r.meta.floor)?.color ?? '#eeeeee'
     const mat = new THREE.MeshStandardMaterial({
       color: new THREE.Color(color),
       roughness: 0.85,
@@ -245,7 +246,8 @@ function buildFurniture(plan: Plan, opts: SceneOpts): THREE.Group {
   for (const f of plan.furniture) {
     const cat = CATALOG_MAP[f.type]
     const { h, elev } = dims3d(f)
-    const color = new THREE.Color(f.color || CATEGORY_COLORS[cat?.category ?? 'misc'])
+    // тот же цвет, что на цветном плане: ткань у мягкой мебели, материал у остальной
+    const color = new THREE.Color(f.color || (cat ? baseColorOf(f.type, cat.glyph) : CATEGORY_COLORS.misc))
     const item = new THREE.Group()
     item.name = `item:${f.id}`
     item.userData = { furnitureId: f.id }

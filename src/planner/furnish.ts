@@ -27,6 +27,8 @@ export interface FurnishOptions {
   purpose?: string
   /** 'fast' — дешёвая быстрая модель, иначе сильная (тщательно) */
   quality?: 'fast' | 'best'
+  /** штрихи дизайнера и палитра текстиля; по умолчанию — да */
+  touches?: boolean
 }
 
 export interface FurnishDeps {
@@ -196,7 +198,7 @@ export async function furnish(plan: Plan, rooms: Room[], o: FurnishOptions, deps
     }
     costs.push(a.res.ai)
     if (o.replace) acc = { ...acc, furniture: acc.furniture.filter((f) => isElectricItem(f) || !inRoom(r)(f)) }
-    const checks = vetLayout(a.res.items, r, acc, { purpose: p.purpose, wishes })
+    const checks = vetLayout(a.res.items, r, acc, { purpose: p.purpose, wishes, touches: o.touches !== false })
     acc = applyLayout(acc, checks)
     const placed = checks.filter((c) => c.ok).length
     report.push({ ...base, placed, rejected: checks.length - placed, summary: layoutSummary(checks), idea: a.res.plan, model: a.res.ai?.model, tried: a.res.ai?.tried })

@@ -1,7 +1,9 @@
 import React, { useMemo } from 'react'
 import type { DimensionLine, EditMode, Layers, LengthUnit, Opening, Plan, Pt, Room, Selection, Wall } from './types'
 import { CATALOG_MAP, FLOORS, itemMode } from './catalog'
-import { Glyph } from './Glyph'
+import { Glyph, LookContext } from './Glyph'
+import { isRound } from './GlyphColor'
+import { FLOOR_COLORS } from './palette'
 import { add, angleDeg, bboxOf, dist, fmtArea, fmtLen, mid, mul, norm, obbCorners, perp, pointInPoly, sub } from './geometry'
 import { openingGeom, zonesOf, type CheckResult } from './checks'
 import { wallsAtNode } from './snapping'
@@ -9,6 +11,7 @@ import { wallsAtNode } from './snapping'
 export const ACCENT = '#2563eb'
 export const WALL_FILL = '#33363d'
 const NS = { vectorEffect: 'non-scaling-stroke' as const }
+
 
 export function wallPolygon(w: Wall, walls: Wall[]): Pt[] {
   const dir = norm(sub(w.b, w.a))
@@ -144,6 +147,8 @@ export interface SceneProps {
 }
 
 const SceneImpl: React.FC<SceneProps> = ({ plan, rooms, check, layers, unit, zoom, selection = null, hover = null, badItems, photos, mode }) => {
+  const look = React.useContext(LookContext)
+  const colorful = look === 'color'
   const wallPolys = useMemo(() => plan.walls.map((w) => ({ w, poly: wallPolygon(w, plan.walls) })), [plan.walls])
   const wallMap = useMemo(() => new Map(plan.walls.map((w) => [w.id, w])), [plan.walls])
   const furniture = useMemo(() => sortedFurniture(plan), [plan])
@@ -188,6 +193,9 @@ const SceneImpl: React.FC<SceneProps> = ({ plan, rooms, check, layers, unit, zoo
             dominantBaseline="middle"
             fill="#333"
             fontFamily="system-ui, sans-serif"
+            stroke={colorful ? 'rgba(255,255,255,0.85)' : undefined}
+            strokeWidth={colorful ? 2.4 / zoom : undefined}
+            paintOrder="stroke"
             transform={f.rot > 90 && f.rot <= 270 ? 'rotate(180)' : undefined}
             pointerEvents="none"
           >
@@ -235,6 +243,20 @@ const SceneImpl: React.FC<SceneProps> = ({ plan, rooms, check, layers, unit, zoo
         <pattern id="pl-parquet" width={40} height={40} patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
           <path d="M 0 0 H 40 M 0 20 H 40 M 20 0 V 40" fill="none" stroke="rgba(0,0,0,0.07)" strokeWidth={0.8} />
         </pattern>
+        {/* цветной вид: доски вразбежку с разным тоном, плитка со светлыми швами, ёлочка */}
+        <pattern id="pl-c-plank" width={180} height={36} patternUnits="userSpaceOnUse">
+          <rect x={0} y={0} width={110} height={18} fill="rgba(255,255,255,0.16)" />
+          <rect x={60} y={18} width={120} height={18} fill="rgba(120,80,40,0.05)" />
+          <path d="M 0 18 H 180 M 0 36 H 180 M 110 0 V 18 M 60 18 V 36" fill="none" stroke="rgba(110,72,38,0.16)" strokeWidth={0.7} />
+        </pattern>
+        <pattern id="pl-c-tile" width={30} height={30} patternUnits="userSpaceOnUse">
+          <rect x={0} y={0} width={30} height={30} fill="none" stroke="rgba(255,255,255,0.95)" strokeWidth={1.2} />
+          <rect x={1} y={1} width={14} height={14} fill="rgba(255,255,255,0.12)" />
+        </pattern>
+        <pattern id="pl-c-parquet" width={40} height={40} patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+          <rect x={0} y={0} width={20} height={40} fill="rgba(255,255,255,0.14)" />
+          <path d="M 0 0 H 40 M 0 20 H 40 M 20 0 V 40" fill="none" stroke="rgba(110,72,38,0.15)" strokeWidth={0.7} />
+        </pattern>
       </defs>
 
       {/* подложка — под всем чертежом */}
@@ -255,10 +277,11 @@ const SceneImpl: React.FC<SceneProps> = ({ plan, rooms, check, layers, unit, zoo
       {layers.rooms &&
         rooms.map((r) => {
           const isSel = selection?.kind === 'room' && selId === r.meta.id
-          const pattern = r.meta.floor === 'tile' ? 'url(#pl-tile)' : r.meta.floor === 'laminate' ? 'url(#pl-plank)' : r.meta.floor === 'parquet' ? 'url(#pl-parquet)' : null
+          const cf = colorful ? FLOOR_COLORS[r.meta.floor] : undefined
+          const pattern = cf ? cf.pattern ?? null : r.meta.floor === 'tile' ? 'url(#pl-tile)' : r.meta.floor === 'laminate' ? 'url(#pl-plank)' : r.meta.floor === 'parquet' ? 'url(#pl-parquet)' : null
           return (
             <g key={r.meta.id}>
-              <polygon points={ptsAttr(r.inner)} fill={floorColor(r.meta.floor)} stroke="none" />
+              <polygon points={ptsAttr(r.inner)} fill={cf?.color ?? floorColor(r.meta.floor)} stroke="none" />
               {pattern && <polygon points={ptsAttr(r.inner)} fill={pattern} stroke="none" />}
               {isSel && <polygon points={ptsAttr(r.inner)} fill="rgba(37,99,235,0.08)" stroke={ACCENT} strokeWidth={1.5} strokeDasharray="6 4" {...NS} />}
             </g>
@@ -286,6 +309,24 @@ const SceneImpl: React.FC<SceneProps> = ({ plan, rooms, check, layers, unit, zoo
 
       {/* ковры */}
       {rugs.map(renderItem)}
+
+      {/* мягкие тени: свет сверху слева, под стенами не видно */}
+      {colorful &&
+        rest.map((x) => {
+          if (x.cat?.symbol || photos?.[x.f.id]) return null
+          const f = x.f
+          const own = !mode || itemMode(f) === mode
+          const k = own ? 1 : mode === 'electric' ? 0.5 : 0.3
+          return (
+            <g key={`sh-${f.id}`} transform={`translate(${f.x + 2.5} ${f.y + 3.5}) rotate(${f.rot})`} opacity={k} pointerEvents="none">
+              {isRound(x.cat?.glyph) ? (
+                <ellipse cx={0} cy={0} rx={f.w / 2 + 1} ry={f.d / 2 + 1} fill="rgba(60,40,20,0.13)" />
+              ) : (
+                <rect x={-f.w / 2 - 0.5} y={-f.d / 2 - 0.5} width={f.w + 1} height={f.d + 1} rx={Math.min(8, Math.min(f.w, f.d) / 4)} fill="rgba(60,40,20,0.13)" />
+              )}
+            </g>
+          )
+        })}
 
       {/* стены */}
       {wallPolys.map(({ w, poly }) => {

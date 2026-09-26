@@ -6,7 +6,7 @@ import { buildRooms } from './rooms'
 import { runChecks } from './checks'
 import { PlannerCanvas, dialogOpen, UNIT_CM, UNIT_NAME, type CanvasHandle, type View } from './PlannerCanvas'
 import { Scene, planBounds } from './Scene'
-import { Glyph } from './Glyph'
+import { Glyph, LookContext, type PlanLook } from './Glyph'
 import { TEMPLATES } from './templates'
 import { downloadCsv, downloadJson, downloadPng, downloadSvg, normalizePlan, printToScale, readPlanFile } from './exporters'
 import type { Area } from './ops'
@@ -113,6 +113,8 @@ interface UiPrefs {
   wallThickness: number
   mode: EditMode
   wallRef: WallRef
+  /** цветной интерьер или чертёж */
+  look: PlanLook
 }
 
 const loadPrefs = (): UiPrefs => {
@@ -127,12 +129,13 @@ const loadPrefs = (): UiPrefs => {
         wallThickness: p.wallThickness ?? 10,
         mode: p.mode === 'furnish' || p.mode === 'electric' ? p.mode : 'build',
         wallRef: p.wallRef === 'inner' || p.wallRef === 'outer' ? p.wallRef : 'axis',
+        look: p.look === 'drawing' ? 'drawing' : 'color',
       }
     }
   } catch {
     /* ignore */
   }
-  return { layers: DEFAULT_LAYERS, unit: 'cm', ortho: true, wallThickness: 10, mode: 'build', wallRef: 'axis' }
+  return { layers: DEFAULT_LAYERS, unit: 'cm', ortho: true, wallThickness: 10, mode: 'build', wallRef: 'axis', look: 'color' }
 }
 
 /** был ли в этом браузере сохранённый план — чтобы не затирать работу планом из ссылки */
@@ -194,7 +197,8 @@ const WALL_REFS: { ref: WallRef; name: string; long: string }[] = [
   { ref: 'outer', name: 'снаружи', long: 'по наружной грани' },
 ]
 
-const COLORS = ['', '#e6edf7', '#f5e9d8', '#e6f3e8', '#e0f1f7', '#fdf1dc', '#fbe7ee', '#ececec', '#d9c9b4', '#c7d2fe', '#bbf7d0', '#fecaca', '#fde68a', '#ffffff', '#4b5563']
+// ткани и материалы цветного вида: морская волна, шалфей, горчица, терракота, пыльная роза, графит, олива, дерево
+const COLORS = ['', '#5f8f9a', '#6f93a8', '#9fb8a8', '#7fa39a', '#9aa36b', '#e0a84f', '#d9a35f', '#d98b6d', '#c9a2a6', '#a9a4c7', '#5c6b7a', '#dcbc92', '#94664a', '#f7f4ef', '#2e3137']
 
 /**
  * Числовое поле, которое применяет значение по Enter или уходу фокуса.
@@ -290,6 +294,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const [mode, setModeRaw] = useState<EditMode>(prefs.mode)
   /** по какой линии стены считать её длину */
   const [wallRef, setWallRef] = useState<WallRef>(prefs.wallRef)
+  const [look, setLook] = useState<PlanLook>(prefs.look)
   const [view, setView] = useState<View>({ x: 40, y: 40, zoom: 0.7 })
   const [panel, setPanel] = useState<PanelTab>('props')
   const [panelOpen, setPanelOpen] = useState(true)
@@ -437,11 +442,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   }
   useEffect(() => {
     try {
-      localStorage.setItem(LS_UI, JSON.stringify({ layers, unit, ortho, wallThickness, mode, wallRef }))
+      localStorage.setItem(LS_UI, JSON.stringify({ layers, unit, ortho, wallThickness, mode, wallRef, look }))
     } catch {
       /* ignore */
     }
-  }, [layers, unit, ortho, wallThickness, mode, wallRef])
+  }, [layers, unit, ortho, wallThickness, mode, wallRef, look])
 
   useEffect(() => {
     const t = setTimeout(() => canvasRef.current?.fit(), 60)
@@ -3589,6 +3594,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   )
 
   return (
+    <LookContext.Provider value={look}>
     <div className={`pl-root ${view3d ? 'is3d' : ''}`}>
       <header className="pl-header">
         {onBack && (
@@ -3676,6 +3682,15 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
                 ))}
                 <MenuItem checked={photoMode} label="Фото-вид моделей на плане" onSelect={() => setPhotoMode((v) => !v)} />
                 <MenuSep />
+                <MenuGroup title="Стиль плана" />
+                <MenuChoice
+                  options={[
+                    { value: 'color' as PlanLook, label: 'Цветной' },
+                    { value: 'drawing' as PlanLook, label: 'Чертёж' },
+                  ]}
+                  value={look}
+                  onChange={setLook}
+                />
                 <MenuGroup title="Единицы на плане" />
                 <MenuChoice
                   options={[
@@ -4126,6 +4141,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         </div>
       )}
     </div>
+    </LookContext.Provider>
   )
 }
 

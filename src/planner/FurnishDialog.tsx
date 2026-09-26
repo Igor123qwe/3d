@@ -46,6 +46,16 @@ const readQuality = (): 'fast' | 'best' => {
   }
 }
 
+/** штрихи дизайнера: ковёр, торшер, растение и палитра — по умолчанию да, выбор запоминается */
+const LS_TOUCHES = 'boop.planner.furnishTouches'
+const readTouches = (): boolean => {
+  try {
+    return localStorage.getItem(LS_TOUCHES) !== '0'
+  } catch {
+    return true
+  }
+}
+
 const readWishes = () => {
   try {
     return localStorage.getItem(LS_WISHES) ?? ''
@@ -59,6 +69,15 @@ export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled,
   const [wishes, setWishes] = useState(readWishes)
   const [replace, setReplace] = useState(false)
   const [rename, setRename] = useState(true)
+  const [touches, setTouchesRaw] = useState(readTouches)
+  const setTouches = (v: boolean) => {
+    setTouchesRaw(v)
+    try {
+      localStorage.setItem(LS_TOUCHES, v ? '1' : '0')
+    } catch {
+      /* не запомнится */
+    }
+  }
   const [quality, setQualityRaw] = useState<'fast' | 'best'>(readQuality)
   const setQuality = (q: 'fast' | 'best') => {
     setQualityRaw(q)
@@ -99,7 +118,7 @@ export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled,
     setError('')
     setBusy('Отправляю…')
     try {
-      const rep = await onRun({ scope, wishes, replace, rename, purpose: scope === 'all' ? undefined : purpose, quality }, setBusy)
+      const rep = await onRun({ scope, wishes, replace, rename, purpose: scope === 'all' ? undefined : purpose, quality, touches }, setBusy)
       setReport(rep)
     } catch (e) {
       setError((e as Error).message)
@@ -224,6 +243,10 @@ export const FurnishDialog: React.FC<Props> = ({ rooms, initialScope, aiEnabled,
                 return chain?.length ? ` Модель: ${shortModel(chain[0])}${chain.length > 1 ? `, запасная — ${shortModel(chain[1])}` : ''}.` : ''
               })()}
             </p>
+            <label className="pl-furnish-check">
+              <input type="checkbox" checked={touches} onChange={() => setTouches(!touches)} disabled={!!busy} />
+              <span>Штрихи дизайнера: ковёр собирает зону, торшер у кресла, растение у окна, текстиль в одной палитре</span>
+            </label>
             <label className="pl-furnish-check">
               <input type="checkbox" checked={replace} onChange={() => setReplace((v) => !v)} disabled={!!busy} />
               <span>Убрать мебель, что уже стоит (иначе ИИ дополнит расстановку и не тронет её). Электрика остаётся</span>

@@ -15,6 +15,8 @@ import { CATALOG, CATALOG_MAP, dims3d, type CatalogItem } from './catalog'
 import { frontBlockedShare, furnitureBody, isWideStorage, openingGeom, runChecks, TOLERATED_FRONT_SHARE, wallBody, zonesOf } from './checks'
 import { findNiches, nicheSpot, nicheText, type Niche } from './niches'
 import { composeKitchen, KITCHEN_MODULES } from './kitchen'
+import { armchairSpots, coffeeSpot, lampSpots, plantSpots, rugBeforeSofa, rugInside, rugUnderBed, rugUnderTable, smallerRugs, tvSpot, type RugPlace, type WindowSeg } from './decor'
+import { paletteFor } from './palette'
 import { add, convexOverlap, dist, mul, norm, normDeg, obbCorners, perp, pointInPoly, rotate, sub } from './geometry'
 
 export interface PlacementCheck {
@@ -37,6 +39,10 @@ export interface PlacementCheck {
   niche?: string
   /** модуль кухонного гарнитура, собранного программой; у первого — как собран */
   kitchen?: string | true
+  /** штрих дизайнера: ковёр, торшер, растение — что и зачем */
+  touch?: string
+  /** палитра текстиля комнаты — у первого предмета */
+  palette?: string
 }
 
 export interface LayoutOptions {
@@ -48,9 +54,11 @@ export interface LayoutOptions {
   purpose?: string
   /** пожелания хозяина: просили гардеробную — шкаф в нише становится гардеробной */
   wishes?: string
+  /** штрихи дизайнера и палитра: ковёр, торшер, растение, цвета текстиля; по умолчанию — нет, диалог включает */
+  touches?: boolean
 }
 
-export const DEFAULT_LAYOUT: Required<Omit<LayoutOptions, 'purpose' | 'wishes'>> = { outTolerance: 2, snapCm: 25 }
+export const DEFAULT_LAYOUT: Required<Omit<LayoutOptions, 'purpose' | 'wishes' | 'touches'>> = { outTolerance: 2, snapCm: 25 }
 
 function pointSegDist(p: Pt, a: Pt, b: Pt): number {
   const vx = b.x - a.x
@@ -114,6 +122,8 @@ interface Ctx {
   beds?: Furniture[]
   /** ниши комнаты: хранению — туда */
   niches: Niche[]
+  /** окна по внутренней грани: растению — к ним */
+  windows: WindowSeg[]
 }
 
 /** шкафы и гардеробные: им место в нише (кухонный пенал — не про это) */
@@ -186,7 +196,9 @@ function seatSpots(host: Furniture, hostCat: CatalogItem, seat: CatalogItem): Sp
  */
 interface PairRule {
   hosts: (cat: CatalogItem) => boolean
-  spots: (host: Furniture, hostCat: CatalogItem, cat: CatalogItem) => Spot[]
+  spots: (host: Furniture, hostCat: CatalogItem, cat: CatalogItem, c: Ctx) => Spot[]
+  /** очередь: кресло встаёт к журнальному столу, когда тот уже у дивана, торшер — к креслу */
+  rank?: number
   /** пояснение к месту */
   note: (hostCat: CatalogItem) => string
   /** почему не встал: пары нет вовсе */
@@ -197,6 +209,7 @@ interface PairRule {
 }
 
 const DESKS = (c: CatalogItem) => c.glyph === 'desk'
+const SOFAS = (c: CatalogItem) => c.glyph === 'sofa' || c.glyph === 'sofa-corner'
 const TABLES = (c: CatalogItem) => ['dining-table', 'table-round', 'kitchen-table'].includes(c.type)
 const toSeat = (host: CatalogItem) => (host.type === 'vanity' ? 'к туалетному столику' : 'к столу')
 
@@ -211,6 +224,49 @@ const PAIRS: Record<string, PairRule> = {
   'office-chair': { hosts: DESKS, spots: seatSpots, note: toSeat, alone: 'нет стола, к которому его придвинуть', full: 'у стола не осталось места' },
   chair: { hosts: (c) => DESKS(c) || TABLES(c), spots: seatSpots, note: toSeat, alone: 'нет стола, к которому его придвинуть', full: 'у стола не осталось места' },
   'bar-stool': { hosts: (c) => c.type === 'island' || c.type === 'kitchen-table', spots: seatSpots, note: (h) => (h.type === 'island' ? 'к острову' : 'к столу'), alone: 'нет острова или стола, к которому его придвинуть', full: 'у острова не осталось места' },
+  // гостиная — как у дизайнера: стол перед диваном, кресла вокруг стола, телевизор напротив, торшер у кресла
+  'coffee-table': {
+    hosts: SOFAS,
+    spots: (sofa, sc, cat) => [coffeeSpot(sofa, sc.glyph === 'sofa-corner', cat)],
+    note: () => 'перед диваном на 45 см — дотянуться рукой и пройти',
+    alone: '',
+    full: '',
+    soft: true,
+  },
+  armchair: {
+    hosts: (c) => c.type === 'coffee-table',
+    spots: (table, _, cat) => armchairSpots(table, cat),
+    note: () => 'у журнального стола — разговорная зона',
+    alone: '',
+    full: '',
+    soft: true,
+    rank: 1,
+  },
+  'tv-stand': {
+    hosts: SOFAS,
+    spots: (sofa, _, cat, c) => [tvSpot(sofa, c.inner, cat)].filter((s): s is Spot => !!s),
+    note: () => 'напротив дивана — смотреть, не поворачивая головы',
+    alone: '',
+    full: '',
+    soft: true,
+  },
+  tv: {
+    hosts: SOFAS,
+    spots: (sofa, _, cat, c) => [tvSpot(sofa, c.inner, cat)].filter((s): s is Spot => !!s),
+    note: () => 'напротив дивана — смотреть, не поворачивая головы',
+    alone: '',
+    full: '',
+    soft: true,
+  },
+  lamp: {
+    hosts: (c) => c.glyph === 'armchair' || c.glyph === 'sofa',
+    spots: (host, _, cat) => lampSpots(host, cat),
+    note: (h) => (h.glyph === 'armchair' ? 'у кресла — уголок для чтения' : 'у дивана — мягкий свет вечером'),
+    alone: '',
+    full: '',
+    soft: true,
+    rank: 2,
+  },
   bench: {
     hosts: (c) => c.glyph === 'bed',
     // в ногах кровати, вдоль неё
@@ -673,6 +729,7 @@ function vetOnce(proposed: AiPlacement[], room: Room, plan: Plan, options: Layou
   const windowPts: Pt[] = []
   const doorCenters: Pt[] = []
   const windowCenters: Pt[] = []
+  const windowSegs: WindowSeg[] = []
   for (const op of plan.openings) {
     const wall = walls.find((w) => w.id === op.wallId)
     if (!wall) continue
@@ -686,6 +743,10 @@ function vetOnce(proposed: AiPlacement[], room: Room, plan: Plan, options: Layou
     }
     windowCenters.push(g.center)
     const n = perp(norm(sub(wall.b, wall.a)))
+    // окно по внутренней грани: с той стороны стены, где комната
+    const side = pointInPoly(add(g.center, mul(n, wall.thickness / 2 + 6)), inner) ? 1 : -1
+    const face = mul(n, (side * wall.thickness) / 2)
+    windowSegs.push({ a: add(add(g.center, mul(g.dir, -g.hw)), face), b: add(add(g.center, mul(g.dir, g.hw)), face), n: mul(n, side) })
     for (const side of [1, -1]) {
       for (let k = -2; k <= 2; k++) {
         const q = add(add(g.center, mul(norm(sub(wall.b, wall.a)), (k / 2) * (op.width / 2 - 5))), mul(n, side * (wall.thickness / 2 + 6)))
@@ -699,11 +760,13 @@ function vetOnce(proposed: AiPlacement[], room: Room, plan: Plan, options: Layou
   const [x0, x1, y0, y1] = [Math.min(...xs) - 60, Math.max(...xs) + 60, Math.min(...ys) - 60, Math.max(...ys) + 60]
   const wallPolys = walls.filter((w) => Math.max(w.a.x, w.b.x) >= x0 && Math.min(w.a.x, w.b.x) <= x1 && Math.max(w.a.y, w.b.y) >= y0 && Math.min(w.a.y, w.b.y) <= y1).map(wallBody)
   // мебель, которая уже стоит в этой комнате (символы электрики не мешают)
-  const standing = plan.furniture.filter((f) => !CATALOG_MAP[f.type]?.symbol && pointInPoly({ x: f.x, y: f.y }, room.polygon))
+  // ковёр под ногами — не препятствие: на нём стоят кровать и диван
+  const standingAll = plan.furniture.filter((f) => !CATALOG_MAP[f.type]?.symbol && pointInPoly({ x: f.x, y: f.y }, room.polygon))
+  const standing = standingAll.filter((f) => (CATALOG_MAP[f.type]?.z ?? 1) === 1)
   const taken: Pt[][] = standing.map(furnitureBody)
   const takenZones: Zone[] = standing.flatMap((f) => zonesFor(f, CATALOG_MAP[f.type]))
   const niches = findNiches(inner, { doors: doorCenters, windows: windowCenters })
-  const ctx: Ctx = { inner, walls: wallPolys, swings, windowPts, taken, takenKinds: standing.map((f) => f.type), takenZones, tol: o.outTolerance, niches }
+  const ctx: Ctx = { inner, walls: wallPolys, swings, windowPts, taken, takenKinds: standing.map((f) => f.type), takenZones, tol: o.outTolerance, niches, windows: windowSegs }
 
   // журнальный стол в санузле геометрию пройдёт, а смысл — нет: только уместные в комнате типы
   // список тот же, что ушёл модели: по назначению, а не по старому имени комнаты
@@ -718,9 +781,13 @@ function vetOnce(proposed: AiPlacement[], room: Room, plan: Plan, options: Layou
   const area = (it: AiPlacement) => (CATALOG_MAP[it.type] ? CATALOG_MAP[it.type].w * CATALOG_MAP[it.type].d : 0)
   const order = items.map((_, i) => i).sort((a, b) => area(items[b]) - area(items[a]) || a - b)
   const done = new Map<number, PlacementCheck>()
+  const rugIdx: number[] = []
   interface Placed {
     idx: number
+    /** что предложила модель — от него считается «место поправлено» */
     want: Spot
+    /** куда целимся: место у пары (телевизор напротив дивана) или предложенное */
+    target: Spot
     cat: CatalogItem
     used: CatalogItem
     f: Furniture
@@ -770,8 +837,23 @@ function vetOnce(proposed: AiPlacement[], room: Room, plan: Plan, options: Layou
       done.set(idx, { item, ok: false, reason: `${cat.name}: не к месту в этой комнате` })
       continue
     }
+    // ковёр кладётся под мебель, когда она встала, — см. ниже
+    if (cat.glyph === 'rug') {
+      rugIdx.push(idx)
+      continue
+    }
     const want: Spot = { x: item.x, y: item.y, rot: normDeg(item.rot) }
-    let { best, fail } = bestOf(cat, want)
+    // у парного предмета пара уже стоит (диван раньше стола и телевизора): сразу целимся в место у неё,
+    // иначе его займёт кто-то другой и телевизор встанет не напротив дивана
+    const rule = PAIRS[cat.type]
+    const aim = rule?.soft
+      ? placed
+          .filter((q) => rule.hosts(q.used))
+          .flatMap((q) => rule.spots(q.f, q.used, cat, ctx))
+          .filter((s) => !fits(toFurniture(cat, s), ctx))
+          .sort((a, b) => dist(a, want) - dist(b, want))[0]
+      : undefined
+    let { best, fail } = bestOf(cat, aim ?? want)
     if (!best) {
       for (const smaller of smallerOf(cat)) {
         const r = findSpot(smaller, want, ctx)
@@ -785,7 +867,7 @@ function vetOnce(proposed: AiPlacement[], room: Room, plan: Plan, options: Layou
       done.set(idx, { item, ok: false, reason: `${cat.name}: ${FAIL_TEXT[fail ?? 'room']}` })
       continue
     }
-    placed.push({ idx, want, cat, used: best.used, f: toFurniture(best.used, best.spot) })
+    placed.push({ idx, want, target: aim ?? want, cat, used: best.used, f: toFurniture(best.used, best.spot) })
     rebuild()
   }
 
@@ -798,8 +880,8 @@ function vetOnce(proposed: AiPlacement[], room: Room, plan: Plan, options: Layou
       // тумбы у изголовья едут вместе с кроватью: иначе они держат её на месте
       const attached = isDoubleBed(p.used) ? placed.filter((q) => q.used.type === 'nightstand' && nightstandSpots(p.f, q.used.w, q.used.d).some((s) => dist(s, q.f) < 40)) : []
       rebuild(new Set([p.idx, ...attached.map((q) => q.idx)]))
-      const now = spotCost(p.f, p.used, p.want, ctx) + (p.used.type === p.cat.type ? 0 : 30)
-      const { best } = bestOf(p.cat, p.want)
+      const now = spotCost(p.f, p.used, p.target, ctx) + (p.used.type === p.cat.type ? 0 : 30)
+      const { best } = bestOf(p.cat, p.target)
       if (!best || best.cost >= now - 10) continue
       const moved = toFurniture(best.used, best.spot, p.f.id)
       // тумбы — к новым бокам изголовья; не встают — кровать остаётся где была
@@ -833,14 +915,15 @@ function vetOnce(proposed: AiPlacement[], room: Room, plan: Plan, options: Layou
     ...placed.filter((q) => q !== self && rule.hosts(q.used)).map((q) => ({ f: q.f, cat: q.used })),
     ...standing.filter((f) => CATALOG_MAP[f.type] && rule.hosts(CATALOG_MAP[f.type])).map((f) => ({ f, cat: CATALOG_MAP[f.type] })),
   ]
-  for (const p of [...placed]) {
+  const rankOf = (p: Placed) => PAIRS[p.used.type]?.rank ?? 0
+  for (const p of [...placed].sort((a, b) => rankOf(a) - rankOf(b))) {
     const rule = PAIRS[p.used.type]
     if (!rule) continue
     rebuild(new Set([p.idx]))
     let best: { f: Furniture; cost: number; host: CatalogItem } | null = null
     const hosts = hostsOf(rule, p)
     for (const h of hosts) {
-      for (const s of rule.spots(h.f, h.cat, p.used)) {
+      for (const s of rule.spots(h.f, h.cat, p.used, ctx)) {
         const g = toFurniture(p.used, s, p.f.id)
         if (fits(g, ctx)) continue
         // ближе к тому, где стоял, и без помех проходам
@@ -849,7 +932,8 @@ function vetOnce(proposed: AiPlacement[], room: Room, plan: Plan, options: Layou
       }
     }
     if (best) {
-      if (dist(best.f, p.f) > 1 || best.f.rot !== p.f.rot) paired.set(p.idx, rule.note(best.host))
+      // пояснение — если место у пары не то, что предлагала модель
+      if (dist(best.f, p.want) > 20 || best.f.rot !== p.want.rot) paired.set(p.idx, rule.note(best.host))
       p.f = best.f
     } else if (!rule.soft) {
       placed.splice(placed.indexOf(p), 1)
@@ -876,6 +960,97 @@ function vetOnce(proposed: AiPlacement[], room: Room, plan: Plan, options: Layou
         added.push({ item: { type: 'nightstand', x: f.x, y: f.y, rot: f.rot, why: 'добавлено к кровати' }, ok: true, furniture: f, moved: 0, added: true })
       }
     }
+  }
+
+  // Ковры — под то, что они собирают в зону: кровать, диван, обеденный стол
+  const RUG_NOTE = { bed: 'под нижние две трети кровати — утром ступать на тёплое', sofa: 'передние ножки дивана на ковре — зона отдыха собрана', table: 'под столом с запасом — отодвинутый стул не съезжает с ковра' }
+  const RUG_TOUCH = { bed: 'ковёр под кроватью', sofa: 'ковёр у дивана', table: 'ковёр под столом' }
+  type RugHost = { f: Furniture; kind: 'bed' | 'sofa' | 'table'; corner?: boolean }
+  const rugHosts = (): RugHost[] => [
+    ...placed.filter((q) => isDoubleBed(q.used)).map((q) => ({ f: q.f, kind: 'bed' as const })),
+    ...placed.filter((q) => SOFAS(q.used)).map((q) => ({ f: q.f, kind: 'sofa' as const, corner: q.used.glyph === 'sofa-corner' })),
+    ...placed.filter((q) => q.used.type === 'dining-table' || q.used.type === 'table-round').map((q) => ({ f: q.f, kind: 'table' as const })),
+  ]
+  const rugOk = (r: RugPlace) => rugInside(r, inner) && !swings.some((sw) => convexOverlap(sw, obbCorners(r.x, r.y, r.w, r.d, r.rot), 2))
+  /** ковёр под зону: самый большой, что ложится; не лёг даже поменьше — ковра нет */
+  const rugFits = (h: RugHost): RugPlace | null => {
+    const big = h.kind === 'bed' ? rugUnderBed(h.f) : h.kind === 'table' ? rugUnderTable(h.f) : rugBeforeSofa(h.f, !!h.corner)
+    if (rugOk(big)) return big
+    // уже кровати или стола ковёр не нужен: он должен выглядывать по бокам
+    const minW = h.kind === 'sofa' ? 120 : h.f.w + 30
+    return smallerRugs(big, h.kind !== 'table', minW, 100).find(rugOk) ?? null
+  }
+  const rugFurniture = (type: string, r: RugPlace, note?: string): Furniture => ({ id: uid('f'), type, x: Math.round(r.x * 10) / 10, y: Math.round(r.y * 10) / 10, w: Math.round(r.w), d: Math.round(r.d), rot: normDeg(r.rot), note })
+  const rugTaken = new Set<Furniture>()
+  for (const idx of rugIdx) {
+    const item = items[idx]
+    const cat = CATALOG_MAP[item.type]
+    const host = rugHosts()
+      .filter((h) => !rugTaken.has(h.f))
+      .sort((a, b) => dist(a.f, item) - dist(b.f, item))
+      .map((h) => ({ h, r: rugFits(h) }))
+      .find((x) => x.r)
+    if (host) {
+      rugTaken.add(host.h.f)
+      const f = rugFurniture(item.type, host.r!, RUG_NOTE[host.h.kind])
+      done.set(idx, { item, ok: true, furniture: f, moved: Math.round(dist(f, item)), touch: RUG_TOUCH[host.h.kind] })
+      continue
+    }
+    const r = { x: item.x, y: item.y, w: cat.w, d: cat.d, rot: normDeg(item.rot) }
+    if (rugOk(r)) done.set(idx, { item, ok: true, furniture: rugFurniture(item.type, r, item.why || undefined), moved: 0 })
+    else done.set(idx, { item, ok: false, reason: `${cat.name}: не помещается в комнате` })
+  }
+
+  // Штрихи дизайнера — чего модель не дала, а комната просит: ковёр собирает
+  // зону, торшер у кресла — уголок для чтения, растение у окна — живой акцент
+  const touched: PlacementCheck[] = []
+  const touches = options.touches === true
+  const has = (type: string) => placed.some((q) => q.used.type === type) || standingAll.some((f) => f.type === type)
+  const addTouch = (f: Furniture, cat: CatalogItem, touch: string) => {
+    if (cat.z !== 0) {
+      ctx.taken.push(furnitureBody(f))
+      ctx.takenKinds.push(f.type)
+      ctx.takenZones.push(...zonesFor(f, cat))
+    }
+    touched.push({ item: { type: f.type, x: f.x, y: f.y, rot: f.rot, why: 'штрих дизайнера' }, ok: true, furniture: f, moved: 0, added: true, touch })
+  }
+  if (touches) {
+    const rugCat = CATALOG_MAP.rug
+    const anyRug = rugIdx.some((i) => done.get(i)?.ok) || standingAll.some((f) => CATALOG_MAP[f.type]?.glyph === 'rug')
+    if (rugCat && fitting.has('rug') && !anyRug) {
+      const host = rugHosts()
+        .map((h) => ({ h, r: rugFits(h) }))
+        .find((x) => x.r)
+      if (host) addTouch(rugFurniture('rug', host.r!, RUG_NOTE[host.h.kind]), rugCat, RUG_TOUCH[host.h.kind])
+    }
+    const lampCat = CATALOG_MAP.lamp
+    const reading = placed.find((q) => q.used.glyph === 'armchair')
+    if (lampCat && fitting.has('lamp') && reading && !has('lamp')) {
+      for (const s of lampSpots(reading.f, lampCat)) {
+        const f = { ...toFurniture(lampCat, s), note: 'у кресла — уголок для чтения: свет сбоку и сзади' }
+        if (!fits(f, ctx) && penalty(f, lampCat, ctx) < 40) {
+          addTouch(f, lampCat, 'торшер у кресла')
+          break
+        }
+      }
+    }
+    const plantCat = CATALOG_MAP.plant
+    if (plantCat && fitting.has('plant') && room.area >= 9 && !has('plant')) {
+      for (const s of plantSpots(ctx.windows, plantCat)) {
+        const f = { ...toFurniture(plantCat, s), note: 'у окна — растению светло, окно открывается' }
+        if (!fits(f, ctx) && penalty(f, plantCat, ctx) < 40) {
+          addTouch(f, plantCat, 'растение у окна')
+          break
+        }
+      }
+    }
+  }
+  // палитра текстиля: основной цвет — диван и покрывало, акцент — кресла и банкетка, ковёр — свой
+  const palette = touches ? paletteFor(options.purpose || room.meta.name) : null
+  const paint = (f: Furniture, cat: CatalogItem | undefined): Furniture => {
+    if (!palette || !cat || f.color) return f
+    const color = SOFAS(cat) || cat.glyph === 'bed' ? palette.main : cat.glyph === 'armchair' || cat.glyph === 'bench' ? palette.accent : cat.glyph === 'rug' ? palette.rug : undefined
+    return color ? { ...f, color } : f
   }
 
   // сдвиг от предложенного — до растяжки шкафа: растяжка не «поправка места»
@@ -909,7 +1084,7 @@ function vetOnce(proposed: AiPlacement[], room: Room, plan: Plan, options: Layou
     else if (moved > 20) notes.push(`место поправлено на ${moved} см: предложенное не подходило`)
     if (p.used.type === 'closet') notes.push(`${Math.round(p.f.w)} × ${Math.round(p.f.d)} см, двери-купе`)
     else if (bigger >= 10) notes.push(`во всю нишу: ${Math.round(p.f.w)} см вместо ${p.used.w}`)
-    p.f = { ...p.f, note: notes.filter(Boolean).join(' · ') || undefined }
+    p.f = paint({ ...p.f, note: notes.filter(Boolean).join(' · ') || undefined }, p.used)
     done.set(p.idx, {
       item,
       ok: true,
@@ -922,7 +1097,9 @@ function vetOnce(proposed: AiPlacement[], room: Room, plan: Plan, options: Layou
     })
   }
   // в отчёте — предложение модели как было
-  return { checks: [...items.map((_, i) => ({ ...done.get(i)!, item: proposed[i] })), ...added], niches }
+  const all = [...items.map((_, i) => ({ ...done.get(i)!, item: proposed[i] })), ...added, ...touched].map((c) => (c.ok && c.furniture ? { ...c, furniture: paint(c.furniture, CATALOG_MAP[c.furniture.type]) } : c))
+  if (palette && all.some((c) => c.ok && c.furniture?.color)) all[0] = { ...all[0], palette: palette.name }
+  return { checks: all, niches }
 }
 
 function pointSegDistPoly(p: Pt, poly: Pt[]): number {
@@ -945,14 +1122,27 @@ export function applyLayout(plan: Plan, checks: PlacementCheck[]): Plan {
 export function layoutSummary(checks: PlacementCheck[]): string {
   const ok = checks.filter((c) => c.ok).length
   const bad = checks.length - ok
-  const movedN = checks.filter((c) => c.ok && !c.replaced && !c.added && !c.paired && !c.niche && !c.kitchen && (c.moved ?? 0) > 20).length
+  const movedN = checks.filter((c) => c.ok && !c.replaced && !c.added && !c.paired && !c.niche && !c.kitchen && CATALOG_MAP[c.item.type]?.glyph !== 'rug' && (c.moved ?? 0) > 20).length
   const smaller = checks.filter((c) => c.ok && c.replaced).length
   const widened = checks.filter((c) => c.ok && c.widened).length
   // «тумба — у изголовья кровати, кресло офисное — к столу»: что придвинуто к своей паре
   const pairs = [...new Set(checks.filter((c) => c.ok && c.paired).map((c) => `${(CATALOG_MAP[c.furniture!.type]?.name ?? '').toLowerCase()} — ${c.paired}`))]
   const inNiche = checks.filter((c) => c.ok && c.niche).map((c) => `${(CATALOG_MAP[c.furniture!.type]?.name ?? '').toLowerCase()} — в ${c.niche}`)
   const kitchen = checks.find((c) => typeof c.kitchen === 'string')?.kitchen as string | undefined
-  const fixes = [kitchen ?? '', movedN ? `место поправлено у ${movedN}` : '', pairs.join(', '), ...inNiche, smaller ? `замена на подходящий — ${smaller}` : '', widened ? `шкаф во всю нишу` : ''].filter(Boolean).join(', ')
+  const touches = checks.filter((c) => c.ok && c.touch).map((c) => c.touch!)
+  const palette = checks.find((c) => c.palette)?.palette
+  const fixes = [
+    kitchen ?? '',
+    movedN ? `место поправлено у ${movedN}` : '',
+    pairs.join(', '),
+    ...inNiche,
+    smaller ? `замена на подходящий — ${smaller}` : '',
+    widened ? `шкаф во всю нишу` : '',
+    touches.length ? `штрихи дизайнера: ${touches.join(', ')}` : '',
+    palette ? `палитра «${palette}»` : '',
+  ]
+    .filter(Boolean)
+    .join(', ')
   // одинаковые — одной строкой: «Тумба 60 ×3», а не три раза подряд
   const count = new Map<string, number>()
   for (const c of checks) if (c.ok && c.furniture) {
@@ -991,6 +1181,8 @@ export function catalogForRoom(name: string, all: CatalogItem[]): { type: string
   const extra = new Set<string>()
   if (cats.has('kids')) for (const t of ['bed-90', 'bed-140', 'nightstand', 'wardrobe', 'desk', 'office-chair', 'office-shelf']) extra.add(t)
   if (cats.has('office')) for (const t of ['armchair', 'sofa-2']) extra.add(t)
+  // жилым комнатам — ковёр, торшер и растение: то, чем дизайнер заканчивает комнату
+  if (cats.has('bedroom') || cats.has('kids') || cats.has('office')) for (const t of ['rug', 'lamp', 'plant']) extra.add(t)
   // на кухне едят: обычные стулья и круглый стол тоже к месту
   if (cats.has('kitchen')) for (const t of ['chair', 'table-round', 'dining-table']) extra.add(t)
   // гардеробная в нишу прихожей — лучшее место для верхней одежды

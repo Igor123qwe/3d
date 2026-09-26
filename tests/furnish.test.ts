@@ -64,7 +64,8 @@ describe('расстановка с ИИ по пожеланиям', () => {
     const room = rooms[0]
     const xs = room.polygon.map((q) => q.x)
     const plan: Plan = { ...plan0, furniture: [{ id: 'd', type: 'desk', x: (Math.min(...xs) + Math.max(...xs)) / 2, y: 60, w: 120, d: 60, rot: 0 }] }
-    const rep = await furnish(plan, rooms, { scope: room.meta.id, wishes: '', replace: false, rename: false, purpose: 'Кабинет' }, fakeDeps(log))
+    // без штрихов дизайнера: проверяем только то, что предложила модель
+    const rep = await furnish(plan, rooms, { scope: room.meta.id, wishes: '', replace: false, rename: false, purpose: 'Кабинет', touches: false }, fakeDeps(log))
     expect(log.zones).toHaveLength(0)
     expect(log.layout).toHaveLength(1)
     expect(log.layout[0].purpose).toBe('Кабинет')

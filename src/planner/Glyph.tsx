@@ -1,6 +1,11 @@
 import React from 'react'
 import type { Furniture } from './types'
 import { CATALOG_MAP, CATEGORY_COLORS, type CatalogItem } from './catalog'
+import { ColorGlyph } from './GlyphColor'
+
+/** как рисовать план: цветной интерьер или чертёж */
+export type PlanLook = 'color' | 'drawing'
+export const LookContext = React.createContext<PlanLook>('color')
 
 const S = {
   stroke: '#2f2f2f',
@@ -30,6 +35,9 @@ interface Props {
 
 /** Условное обозначение объекта в локальных координатах (центр в 0,0; спинка сверху) */
 const GlyphImpl: React.FC<Props> = ({ item, cat = CATALOG_MAP[item.type], zoom }) => {
+  const look = React.useContext(LookContext)
+  // условные знаки электрики — всегда чертёжные: у них постоянный экранный размер
+  if (look === 'color' && !cat?.symbol) return <ColorGlyph item={item} cat={cat} />
   const w = item.w
   const d = item.d
   const hw = w / 2
