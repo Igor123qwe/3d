@@ -38,7 +38,7 @@ export const AskDialog: React.FC<Props> = ({ title, text, options, cancelLabel =
     <div className="pl-ask-backdrop" onClick={onCancel}>
       <div className="pl-ask" role="dialog" aria-modal="true" aria-labelledby="pl-ask-title" onClick={(e) => e.stopPropagation()}>
         <h2 id="pl-ask-title">{title}</h2>
-        {text && <p>{text}</p>}
+        {text && <div className="pl-ask-text">{text}</div>}
         <div className="pl-ask-options">
           {options.map((o, i) => (
             <button key={o.key} ref={i === primaryIndex ? primary : undefined} className={`pl-ask-option ${o.primary ? 'primary' : ''}`} onClick={() => onPick(o.key)}>

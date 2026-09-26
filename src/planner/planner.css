@@ -816,6 +816,8 @@
   overflow: hidden;
 }
 .pl-status-hint {
+  color: var(--pl-ink-2);
+  font-size: 12.5px;
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1436,6 +1438,8 @@
 }
 .pl-ask {
   width: min(520px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow: auto;
   background: var(--pl-surface);
   border-radius: 20px;
   box-shadow: var(--pl-shadow-lg);
@@ -1447,7 +1451,8 @@
   font-size: 19px;
   letter-spacing: -0.01em;
 }
-.pl-ask > p {
+.pl-ask > p,
+.pl-ask-text {
   margin: 0 0 16px;
   color: var(--pl-ink-2);
   font-size: 14px;
@@ -1727,4 +1732,46 @@
 }
 .pl-stats .bad b {
   color: #b91c1c;
+}
+
+/* отчёт распознавания: суть сверху, разбор свёрнут */
+.pl-report-head {
+  white-space: pre-line;
+}
+.pl-report-details {
+  margin: 10px 0;
+  font-size: 13px;
+}
+.pl-report-details summary {
+  cursor: pointer;
+  color: var(--pl-accent);
+}
+.pl-report-details ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  color: var(--pl-ink-2);
+}
+.pl-report-details li {
+  margin-bottom: 4px;
+}
+.pl-report-verdict {
+  margin-top: 8px;
+  font-weight: 600;
+}
+.pl-back-steps {
+  width: 100%;
+  justify-content: flex-start;
+  margin-bottom: 8px;
+}
+.pl-status-cancel {
+  padding: 1px 8px;
+  font-size: 12px;
+  margin-left: 6px;
+}
+/* протяжка по холсту не должна выделять текст */
+.pl-empty,
+.pl-canvas-wrap svg,
+.pl-tools,
+.pl-panel-tabs {
+  user-select: none;
 }

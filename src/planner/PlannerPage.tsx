@@ -276,7 +276,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const [start, setStart] = useState(() => !hasSavedPlan() && !parseHash(location.hash).plan)
   const [saveState, setSaveState] = useState<'saved' | 'saving' | 'error'>('saved')
   /** вопрос с вариантами поверх холста: заменить проект, подложить схему и т. п. */
-  const [ask, setAsk] = useState<{ title: string; text?: string; options: AskOption[]; onPick: (key: string) => void } | null>(null)
+  const [ask, setAsk] = useState<{ title: string; text?: React.ReactNode; options: AskOption[]; onPick: (key: string) => void } | null>(null)
   /** план, который только что построили из шаблона или схемы, чтобы отличать его от своей работы */
   const untouched = useRef<Plan | null>(null)
   /** диалог «Расставить мебель с ИИ»: для всей квартиры или комнаты */
@@ -310,6 +310,14 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   // состояние ИИ: приходит с сервера, потому что ключ живёт только там
   const [ai, setAi] = useState<AiStatus>({ enabled: false, tasks: [], spentToday: null })
   const [aiBusy, setAiBusy] = useState('')
+  /** текущий вызов ИИ: кнопка «Отменить» обрывает все его запросы */
+  const aiAbort = useRef<AbortController | null>(null)
+  const aiSignal = () => aiAbort.current?.signal
+  const startAi = (text: string) => {
+    aiAbort.current = new AbortController()
+    setAiBusy(text)
+  }
+  const aborted = () => !!aiAbort.current?.signal.aborted
   /** что и сколько стоил последний вызов — чтобы расходы не были сюрпризом */
   const [aiLast, setAiLast] = useState('')
   const [auto, setAuto] = useState<AutoElectricOptions>({ ...DEFAULT_AUTO, panel: true })
@@ -734,6 +742,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         const markup = new XMLSerializer().serializeToString(el)
         if (job.kind === 'svg') downloadSvg(plan.name, markup)
         else await downloadPng(plan.name, markup, job.w * job.z, job.h * job.z)
+        setToast(job.kind === 'svg' ? `SVG сохранён: ${plan.name || 'план'}.svg` : `PNG ${Math.round(job.w * job.z)}×${Math.round(job.h * job.z)} сохранён: ${plan.name || 'план'}.png`)
       } catch {
         setToast('Не удалось экспортировать')
       } finally {
@@ -793,12 +802,29 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
 
   const loadPlanFile = async (f: File) => {
     const p = await readPlanFile(f)
-    history.replace(p)
-    untouched.current = null
-    setSelection(null)
-    setStart(false)
-    setTimeout(() => canvasRef.current?.fit(), 30)
-    setToast(`Открыт план «${p.name}»`)
+    // через историю: Ctrl+Z вернёт прежний план, как у шаблона и картинки
+    const put = () => {
+      history.apply(() => p)
+      untouched.current = null
+      setSelection(null)
+      setStart(false)
+      setTimeout(() => canvasRef.current?.fit(), 30)
+      setToast(`Открыт план «${p.name}». Прежний вернёт Ctrl+Z`)
+    }
+    if (!hasOwnWork()) put()
+    else
+      setAsk({
+        title: `Открыть «${p.name}»?`,
+        text: 'Текущий план с вашими правками будет заменён. Прежний вернёт Ctrl+Z; сохранить его в файл — Ctrl+S.',
+        options: [
+          { key: 'open', label: 'Открыть файл', icon: 'file', primary: true },
+          { key: 'keep', label: 'Оставить текущий план' },
+        ],
+        onPick: (k) => {
+          setAsk(null)
+          if (k === 'open') put()
+        },
+      })
   }
 
   const loadPlanText = async (text: string) => {
@@ -1100,11 +1126,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
     const sheet = await numberSheet(photo, boxes, wu.px.w, text)
     const readsOf = (ans: NumbersResult) => boxes.map((_, i) => ans.numbers.find((x) => x.n === i + 1)?.text ?? null)
     const sizes = (reads: (string | null)[]) => reads.filter((t) => sizeFromText(t) !== null).length
-    const first = await askNumbers(sheet, boxes.length)
+    const first = await askNumbers(sheet, boxes.length, aiSignal())
     let reads = readsOf(first)
     let ai: AiCost = first.ai
     if (sizes(reads) < Math.ceil(boxes.length / 4)) {
-      const again = await askNumbers(sheet, boxes.length, undefined, 1).catch(() => null)
+      const again = await askNumbers(sheet, boxes.length, aiSignal(), 1).catch(() => null)
       if (again) {
         // в отчёт — модель, чьи числа взяты; цена — за оба прохода
         const better = sizes(readsOf(again)) > sizes(reads)
@@ -1147,7 +1173,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             const side = (r.x2 - r.x1) / Math.max(1, r.y2 - r.y1)
             const shape = r.poly && r.poly.length > 4 ? 'непрямоугольная, с уступами' : side >= 2 ? 'вытянута по горизонтали' : side <= 0.5 ? 'вытянута по вертикали' : 'близка к прямоугольнику'
             const hint = `На картинке она ${shape}.`
-            const first = await askRoomLabel(crop, hint)
+            const first = await askRoomLabel(crop, hint, aiSignal())
             // Без размеров комната остаётся как на картинке: у 4ж «4,26» написано
             // посреди комнаты, и дешёвая модель его пропускает, а у комнаты с
             // нишами без размеров вдоль стен ниша и коридор не подгоняются.
@@ -1156,7 +1182,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
             const noSizes = !first.room.widthCm && !first.room.depthCm
             const noWalls = shape.startsWith('непрямоугольная') && !first.room.walls?.length
             if (!first.room.notRoom && (noSizes || noWalls)) {
-              const again = await askRoomLabel(crop, `${hint} Прочитай ширину, глубину и все размеры, подписанные вдоль её стен (walls).`, undefined, 1).catch(() => null)
+              const again = await askRoomLabel(crop, `${hint} Прочитай ширину, глубину и все размеры, подписанные вдоль её стен (walls).`, aiSignal(), 1).catch(() => null)
               if (again && !again.room.notRoom && (again.room.widthCm || again.room.depthCm || again.room.walls?.length)) {
                 const tried = [...(first.ai.tried ?? []), ...(again.ai.tried ?? [])]
                 return {
@@ -1239,7 +1265,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         try {
           const others = regions.filter((g) => g !== region && g.poly).map((g) => g.poly!)
           const crop = await cropForVision(photo, region, Math.round(Math.max(u.px.w, u.px.h) * 0.05), 800, others, u.px.w)
-          const ans = await askRoomLabel(crop, `Перечитай подписи этой комнаты очень внимательно, цифру за цифрой. Не сходится: ${what}. Если подпись и правда такая — оставь её.`, undefined, 1)
+          const ans = await askRoomLabel(crop, `Перечитай подписи этой комнаты очень внимательно, цифру за цифрой. Не сходится: ${what}. Если подпись и правда такая — оставь её.`, aiSignal(), 1)
           model = ans.ai.model
           costRub += ans.ai.costRub
           for (const t of ans.ai.tried ?? []) if (!tried.includes(t)) tried.push(t)
@@ -1448,14 +1474,16 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       setToast('Стена поставлена по участку')
       return
     }
-    let done = false
-    history.apply((prev) => {
-      const { plan: next, id } = openingInArea(prev, area, what, buildRooms(prev).rooms)
-      done = !!id
-      return next
-    })
+    // считаем от текущего плана, а не внутри обновляющей функции: она выполняется позже, и тост врал
+    const { plan: next, id } = openingInArea(plan, area, what, rooms)
     const name = what === 'door' ? 'Дверь' : what === 'window' ? 'Окно' : 'Проём'
-    setToast(done ? `${name} поставлен${what === 'window' ? 'о' : ''} на стену участка` : 'На участке нет стены — сначала поставьте стену')
+    if (!id) {
+      setToast('На участке нет стены — сначала поставьте стену')
+      return
+    }
+    history.apply(() => next)
+    setSelection({ kind: 'opening', id })
+    setToast(`${name} поставлен${what === 'window' ? 'о' : ''} на стену участка`)
   }
 
   const onRefineArea = (area: Area) => {
@@ -1483,7 +1511,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           try {
             const box = { x1: (area.x1 - u.x) / u.scale, y1: (area.y1 - u.y) / u.scale, x2: (area.x2 - u.x) / u.scale, y2: (area.y2 - u.y) / u.scale }
             const crop = await cropForVision(u.original ?? u.src, box)
-            const { spot, ai: cost } = await askSpot(crop)
+            const { spot, ai: cost } = await askSpot(crop, undefined, aiSignal())
             noteCost('участок', cost)
             const label = spot.what === 'wall' ? 'стена' : spot.what === 'door' ? 'дверь' : spot.what === 'window' ? 'окно' : spot.what === 'doorway' ? 'проём без двери' : 'ничего'
             setAsk({
@@ -1626,7 +1654,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   const recognizeWithAi = async () => {
     const u0 = plan.underlay
     if (!u0 || aiBusy) return
-    setAiBusy('Читаю план…')
+    startAi('Читаю план…')
     try {
       const u = u0
       // снимок под углом: выпрямится готовый чертёж вместе с подложкой
@@ -1665,7 +1693,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       // что модель назвала не помещением (шахта, штриховка), из комнат уходит
       const notRooms = byRooms?.notRooms.length ?? 0
       if (byRooms && notRooms) regions = regions.filter((g) => !byRooms.notRooms.includes(g))
-      let { plan: read, ai: cost } = byRooms ?? (await recognizePlan(photo))
+      let { plan: read, ai: cost } = byRooms ?? (await recognizePlan(photo, undefined, aiSignal()))
       const byMarks = await marksAsk
       if (byMarks) {
         marks = byMarks.marks
@@ -1704,7 +1732,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
           `Первая попытка разошлась с планом (${result.report.quality.issues.join('; ')}). Перепроверь: у каждой комнаты на плане подписаны номер и площадь — ` +
           'верни ровно те комнаты, что подписаны, не выдумывай лишних; размеры width_cm и depth_cm бери только с подписей у стен этой комнаты; box — по внутренним граням стен.'
         try {
-          const second = await recognizePlan(photo, hint, undefined, 1)
+          const second = await recognizePlan(photo, hint, aiSignal(), 1)
           const again = convert(second.plan)
           attempts = 2
           noteCost('план', second.ai)
@@ -1800,7 +1828,6 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       if (attempts > 1) lines.push(`Попыток две: первая разошлась, вторая — модель ${cost.model}.`)
       if (r.note) lines.push(`Модель: ${r.note}`)
       lines.push(q.verdict === 'ok' ? 'Проверьте чертёж поверх фото и подтвердите масштаб.' : 'Результат требует проверки: смотрите разделы выше и уточните спорные места.')
-      lines.push(`Версия программы: ${APP_VERSION}.`)
       // сырой ответ модели и отчёт — в консоль и по кнопке в буфер: без них не разобрать, что пошло не так
       // размеры по одному и что из них легло на стены — чтобы по отчёту было видно, на каком шаге теряются числа
       const debugReport = {
@@ -1814,9 +1841,28 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         report: r,
       }
       console.info('[ИИ] распознавание плана', debugReport)
+      // сверху — суть в три строки, подробности разбора — свёрнуты
+      const verdict = lines[lines.length - 1]
+      const head = lines.slice(0, 3)
+      const detail = lines.slice(3, -1)
       setAsk({
         title: 'Распознано',
-        text: lines.join('\n'),
+        text: (
+          <>
+            <div className="pl-report-head">{head.join('\n')}</div>
+            {detail.length > 0 && (
+              <details className="pl-report-details">
+                <summary>Подробности проверки ({detail.length})</summary>
+                <ul>
+                  {detail.map((l, i) => (
+                    <li key={i}>{l}</li>
+                  ))}
+                </ul>
+              </details>
+            )}
+            <div className="pl-report-verdict">{verdict}</div>
+          </>
+        ),
         options: [
           { key: 'apply', label: 'Заменить чертёж распознанным', hint: 'прежний вернёт Ctrl+Z', icon: 'check', primary: true },
           ...(fixes.length ? [{ key: 'plain', label: 'Заменить, размеры как на картинке', hint: 'без подгонки под подписи плана', icon: 'check' as const }] : []),
@@ -1848,8 +1894,9 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
       })
       noteCost('план', cost)
     } catch (e) {
-      setToast(`Распознать не вышло: ${(e as Error).message}`)
+      setToast(aborted() ? 'Распознавание отменено' : `Распознать не вышло: ${(e as Error).message}`)
     } finally {
+      aiAbort.current = null
       setAiBusy('')
     }
   }
@@ -1857,11 +1904,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
   /** Расставить мебель с ИИ по пожеланиям: вся квартира или комната; всё проверено геометрией */
   const runFurnish = async (o: FurnishOptions, progress: (text: string) => void) => {
     if (aiBusy) return null
-    setAiBusy('Расставляю мебель…')
+    startAi('Расставляю мебель…')
     try {
       const rep = await furnish(plan, rooms, o, {
-        zones: (a) => askZones(a),
-        layout: (a) => askLayout(a),
+        zones: (a) => askZones(a, aiSignal()),
+        layout: (a) => askLayout(a, aiSignal()),
         onProgress: (t) => {
           progress(t)
           setAiBusy(t)
@@ -3142,64 +3189,72 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
 
   const renderHelp = () => (
     <div className="pl-help">
-      <div className="pl-props-title">Помощь ИИ</div>
-      {ai.enabled ? (
-        <>
-          <div className="pl-note">
-            Под каждую задачу — своя модель: на дешёвую работу дешёвая, дорогая включается, только если дешёвая не
-            справилась. Ключ хранится на сервере и в браузер не попадает.
-          </div>
-          <table className="pl-spec">
-            <tbody>
-              {ai.tasks.map((t) => (
-                <tr key={t.task}>
-                  <td>{t.about}</td>
-                  <td className="pl-spec-models">{t.models.join(' → ')}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {ai.spentToday && (
-            <div className="pl-note">
-              Потрачено за сутки: {ai.spentToday.rub.toFixed(2)} ₽ за {ai.spentToday.calls} вызовов
-              {ai.spentToday.limitRub > 0 ? ` из лимита ${ai.spentToday.limitRub} ₽` : ''}.
-            </div>
-          )}
-          {aiLast && <div className="pl-note">Последний вызов — {aiLast}.</div>}
-        </>
-      ) : (
-        <div className="pl-note">
-          ИИ не подключён, и всё работает без него: стены обводятся по линиям картинки, товар читается публичными
-          читалками, мебель ставится вручную. Чтобы включить, добавьте на сервере ключ ROUTERAI_API_KEY.
-        </div>
-      )}
-      <div className="pl-props-title">Правила дизайнеров</div>
-      <ul className="pl-rules">
-        <li><b>Проходы.</b> Основные — 90–100 см, второстепенные — 60–70 см. Меньше 60 см — уже не проход.</li>
-        <li><b>Спальня.</b> С обеих сторон двуспальной кровати 70 см. Изголовье к глухой стене, не под окно, не ногами к двери. Шкаф-купе экономит 30 см перед собой по сравнению с распашным.</li>
-        <li><b>Гостиная.</b> Диван ↔ телевизор 2–3 м для 55″. Журнальный стол в 40–45 см от дивана. Ковёр объединяет зону: передние ножки мебели на нём.</li>
-        <li><b>Столовая.</b> 60 см ширины стола на человека; 75–80 см от края стола до стены, чтобы отодвинуть стул.</li>
-        <li><b>Кухня.</b> Порядок холодильник → мойка → плита, между мойкой и плитой 60–90 см столешницы. Между рядами 120 см. Плита не у окна и не вплотную к холодильнику.</li>
-        <li><b>Санузел.</b> Перед унитазом 60 см, по бокам 20–25. Перед раковиной и ванной 70 см. Дверь наружу.</li>
-        <li><b>Двери.</b> Не бьются о мебель и друг о друга; выключатель со стороны ручки.</li>
-        <li><b>Свет и розетки.</b> Три сценария света в каждой комнате. Розетки: у кровати по 2 с каждой стороны, у дивана, на кухне каждые 60–100 см над столешницей.</li>
-        <li><b>Окна.</b> Не загораживать высокой мебелью; рабочий стол — боком к окну.</li>
-      </ul>
+      <div className="pl-props-title">Как работать</div>
+      <ol className="pl-steps">
+        <li>Стены: «Комната» тянет прямоугольник, «Стена» — по точкам (длину можно набрать цифрами и нажать Enter). Замкнутый контур сам становится комнатой.</li>
+        <li>Двери и окна прилипают к стенам; ширина, петли и сторона — в панели справа.</li>
+        <li>Режим «Мебель»: каталог слева, предметы магнитятся к стенам (Shift — без магнита). «✨» расставит мебель по вашим пожеланиям.</li>
+        <li>Режим «Электрика»: «Спроектировать по нормам» — розетки, выключатели, свет, щит с группами и ведомость.</li>
+        <li>«Проверка» покажет, где тесно, что мешает дверям и чего не хватает по нормам.</li>
+      </ol>
       <div className="pl-props-title">Горячие клавиши</div>
       <table className="pl-keys">
         <tbody>
           <tr><td>V / W / C</td><td>Выбор / Стена / Комната</td></tr>
           <tr><td>D / N / M / L</td><td>Дверь / Окно / Размер / Рулетка</td></tr>
+          <tr><td>Цифры, Enter</td><td>Длина следующей стены при рисовании</td></tr>
+          <tr><td>Alt + тянуть, Alt + щелчок</td><td>Участок стены до стыков: выдвинуть или удалить</td></tr>
+          <tr><td>Shift + тянуть</td><td>Без привязок и без магнита</td></tr>
+          <tr><td>Стрелки, Shift + стрелки</td><td>Сдвиг на 1 см / 10 см (стена, проём, предмет)</td></tr>
           <tr><td>R, Shift+R</td><td>Повернуть на 90° (и призрак при установке)</td></tr>
-          <tr><td>Ctrl+D</td><td>Дублировать</td></tr>
-          <tr><td>Стрелки, Shift</td><td>Сдвиг на 1 см / 10 см</td></tr>
+          <tr><td>Ctrl+D</td><td>Дублировать предмет</td></tr>
           <tr><td>Del</td><td>Удалить</td></tr>
           <tr><td>Ctrl+Z / Ctrl+Y</td><td>Отменить / Вернуть</td></tr>
-          <tr><td>Esc / Enter</td><td>Завершить стену, отменить инструмент</td></tr>
-          <tr><td>Колесо, пинч, пробел+мышь</td><td>Масштаб и сдвиг</td></tr>
+          <tr><td>Ctrl+S / Ctrl+O</td><td>Сохранить в файл / Открыть файл</td></tr>
+          <tr><td>Esc / Enter</td><td>Завершить стену, закрыть меню или диалог, снять выделение</td></tr>
+          <tr><td>Колесо, пинч, пробел + мышь</td><td>Масштаб и сдвиг</td></tr>
         </tbody>
       </table>
-      <div className="pl-note">План сохраняется в браузере автоматически. Через «Файл» можно сохранить JSON, открыть его на другом устройстве, экспортировать PNG/SVG.</div>
+      <div className="pl-props-title">Правила дизайнеров</div>
+      <ul className="pl-rules">
+        <li><b>Проходы.</b> Основные — 90–100 см, второстепенные — 60–70 см. Меньше 60 см — уже не проход.</li>
+        <li><b>Спальня.</b> С обеих сторон двуспальной кровати 70 см. Изголовье к глухой стене, не под окном и не напротив двери.</li>
+        <li><b>Гостиная.</b> Диван ↔ телевизор 2–3 м для 55″. Журнальный стол в 40–45 см от дивана.</li>
+        <li><b>Столовая.</b> 60 см ширины стола на человека; 75–80 см от края стола до стены, чтобы отодвинуть стул.</li>
+        <li><b>Кухня.</b> Порядок холодильник → мойка → плита, между мойкой и плитой 60–90 см столешницы; треугольник не длиннее 6–7 м.</li>
+        <li><b>Санузел.</b> Перед унитазом 60 см, по бокам 20–25. Перед раковиной и ванной 70 см. Дверь наружу.</li>
+        <li><b>Двери.</b> Не бьются о мебель и друг о друга; выключатель со стороны ручки.</li>
+        <li><b>Свет и розетки.</b> Три сценария света в каждой комнате. Розетки: у кровати по 2 с каждой стороны, у дивана, над столешницей каждые 60–100 см.</li>
+        <li><b>Окна.</b> Не загораживать высокой мебелью; рабочий стол — боком к окну.</li>
+      </ul>
+      <details className="pl-details">
+        <summary>Помощь ИИ: что подключено и сколько стоит</summary>
+        {ai.enabled ? (
+          <>
+            <div className="pl-note">Под каждую задачу — своя модель: на дешёвую работу дешёвая, дорогая включается, только если дешёвая не справилась. Ключ хранится на сервере и в браузер не попадает.</div>
+            <table className="pl-spec">
+              <tbody>
+                {ai.tasks.map((t) => (
+                  <tr key={t.task}>
+                    <td>{t.about}</td>
+                    <td className="pl-spec-models">{t.models.join(' → ')}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {ai.spentToday && (
+              <div className="pl-note">
+                Потрачено за сутки: {ai.spentToday.rub.toFixed(2)} ₽ за {ai.spentToday.calls} вызовов
+                {ai.spentToday.limitRub > 0 ? ` из лимита ${ai.spentToday.limitRub} ₽` : ''}.
+              </div>
+            )}
+            {aiLast && <div className="pl-note">Последний вызов — {aiLast}.</div>}
+          </>
+        ) : (
+          <div className="pl-note">{ai.hint || 'ИИ не подключён, и всё работает без него: стены обводятся по линиям картинки, товар по ссылке читается без модели, мебель ставится вручную. Подключение — в README, раздел «Подключение».'}</div>
+        )}
+      </details>
+      <div className="pl-note">План сохраняется в браузере автоматически. Через меню «Проект» можно сохранить файл плана, открыть его снова, экспортировать PNG/SVG и поделиться ссылкой.</div>
     </div>
   )
 
@@ -3214,7 +3269,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         <div className="pl-brand">
           <input className="pl-name" value={plan.name} onChange={(e) => history.silent((p) => ({ ...p, name: e.target.value }))} aria-label="Название плана" title="Название плана — можно переименовать" />
           <span className={`pl-saved ${saveState}`} title="План сохраняется в этом браузере сам">
-            {saveState === 'saving' ? 'Сохраняю…' : saveState === 'error' ? 'Не сохранилось' : 'Сохранено'}
+            {saveState === 'saving' ? 'Сохраняю…' : saveState === 'error' ? 'Не сохранилось' : 'Сохранено в браузере'}
           </span>
         </div>
         {!view3d && (
@@ -3571,6 +3626,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         </div>
         {panelOpen && (
           <div className="pl-panel-body">
+            {panel === 'props' && plan.underlay && selection && (
+              <button className="pl-btn ghost pl-back-steps" onClick={() => setSelection(null)} title="Показать шаги: подготовка фото, масштаб, распознавание">
+                ‹ К шагам работы с картинкой
+              </button>
+            )}
             {panel === 'props' && renderProps()}
             {panel === 'catalog' && renderCatalog()}
             {panel === 'electric' && renderElectric()}
@@ -3580,7 +3640,7 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         )}
       </aside>
 
-      {!view3d && !start && isEmptyPlan(plan) && !plan.underlay && (
+      {!view3d && !start && tool === 'select' && isEmptyPlan(plan) && !plan.underlay && (
         <div className="pl-empty">
           <div className="pl-empty-card">
             <h2>Чистый лист</h2>
@@ -3634,6 +3694,11 @@ export const PlannerPage: React.FC<Props> = ({ onBack }) => {
         <span className="pl-status-hint" title={aiBusy ? aiBusy : hint}>
           {aiBusy ? `✨ ${aiBusy}` : hint}
         </span>
+        {aiBusy && (
+          <button className="pl-btn ghost pl-status-cancel" onClick={() => aiAbort.current?.abort()} title="Прервать запросы к ИИ">
+            Отменить
+          </button>
+        )}
         <span className="pl-status-stats">
           {fmtArea(totalArea)} · {rooms.length} {rooms.length === 1 ? 'комната' : rooms.length >= 2 && rooms.length <= 4 ? 'комнаты' : 'комнат'} · сетка {fmtNum(plan.settings.grid)} см
         </span>

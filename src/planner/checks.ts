@@ -257,6 +257,16 @@ export function runChecks(plan: Plan, rooms: Room[]): CheckResult {
     }
   }
 
+  // 6б. окно на внутренней стене: с обеих сторон комнаты — свет через него не попадёт
+  for (const op of plan.openings) {
+    if (op.kind !== 'window') continue
+    const wall = wallMap.get(op.wallId)
+    if (!wall) continue
+    const g = openingGeom(op, wall)
+    const inside = (s: number) => rooms.some((r) => pointInPoly(add(g.center, mul(g.n, s * (wall.thickness / 2 + 12))), r.polygon))
+    if (inside(1) && inside(-1)) push({ id: `winin-${op.id}`, level: 'info', text: 'Окно на внутренней стене: с обеих сторон комнаты — наружного света через него не будет', target: { kind: 'opening', id: op.id } })
+  }
+
   // 7. электрика
   const electrics = plan.furniture.filter((f) => f.electric)
   if (electrics.length) {

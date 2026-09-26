@@ -8,7 +8,7 @@ import { openingGeom, type CheckResult } from './checks'
 import { Glyph } from './Glyph'
 import { ACCENT, Scene, planBounds, ptsAttr, sortedFurniture, wallPolygon } from './Scene'
 import { snapFurniture, snapOpening, snapWallPoint, type Guide } from './snapping'
-import { deleteRun, deleteSection, movedSection, pushRun, refLength, runSection, runSpan, setRoomSide, stretchRun, touchesLocked, wallAtCorner, wallRun, type WallRun } from './walledit'
+import { deleteRun, deleteSection, movedSection, normalizeWalls, pushRun, refLength, runSection, runSpan, setRoomSide, stretchRun, touchesLocked, wallAtCorner, wallRun, type WallRun } from './walledit'
 import { buildRooms } from './rooms'
 import { addDimRef, dimSnap, squareDim } from './dims'
 import type { ElectricDesign } from './electricplan'
@@ -359,7 +359,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
       case 'door':
       case 'window':
       case 'doorway':
-        text = 'Наведите на стену и кликните — проём встанет на стену. Потом можно двигать и менять ширину'
+        text = 'Клик по стене — проём встанет на неё; ещё клик — ещё один. Ширина и петли — в панели справа. Esc — закончить'
         break
       case 'place':
         text = placing ? `«${placing.name}»: кликните, куда поставить. R — повернуть, Esc — отмена. Объект сам прилипает к стене` : 'Выберите предмет в каталоге'
@@ -520,7 +520,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
             finishDraft()
             return
           }
-          history.apply((pl) => addWall(pl, last, s.p, wallThickness))
+          history.apply((pl) => normalizeWalls(addWall(pl, last, s.p, wallThickness)))
           if (d.length >= 2 && eq(s.p, d[0], 0.75)) {
             finishDraft()
             return
@@ -544,7 +544,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           }
           history.apply(() => r.plan)
           onSelect({ kind: 'opening', id: r.id })
-          onToolChange('select')
+          // инструмент остаётся: следующая дверь — ещё один клик, закончить — Esc или V
           return
         }
         case 'place': {
@@ -1040,7 +1040,7 @@ export const PlannerCanvas = forwardRef<CanvasHandle, CanvasProps>((props, ref) 
           }
           const d = draftRef.current
           const last = d[d.length - 1]
-          history.apply((pl) => addWall(pl, last, p, wallThickness))
+          history.apply((pl) => normalizeWalls(addWall(pl, last, p, wallThickness)))
           setTyped('')
           if (d.length >= 2 && eq(p, d[0], 0.75)) finishDraft()
           else setDraft([...d, p])
