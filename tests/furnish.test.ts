@@ -79,6 +79,32 @@ describe('расстановка с ИИ по пожеланиям', () => {
     expect(kept.x).toBe(plan.furniture[0].x)
   })
 
+  it('кухня: стояк и вентканал с плана — модели в запросе, в координатах от угла комнаты', async () => {
+    const log = { zones: [] as ZonesAsk[], layout: [] as LayoutAsk[] }
+    const plan0 = flat()
+    const rooms = buildRooms(plan0).rooms
+    const room = rooms[0]
+    const xs = room.inner.map((q) => q.x)
+    const ys = room.inner.map((q) => q.y)
+    const [x0, x1, y0] = [Math.min(...xs), Math.max(...xs), Math.min(...ys)]
+    const plan: Plan = {
+      ...plan0,
+      furniture: [
+        { id: 'rs', type: 'riser', x: x1 - 10, y: y0 + 200, w: 25, d: 20, rot: 90 },
+        { id: 'vt', type: 'vent-duct', x: x1 - 12, y: y0 + 20, w: 40, d: 25, rot: 90 },
+      ],
+    }
+    await furnish(plan, rooms, { scope: room.meta.id, wishes: '', replace: true, rename: false, purpose: 'Кухня', touches: false }, fakeDeps(log))
+    expect(log.layout[0].communications).toEqual([
+      { x: Math.round(x1 - 10 - x0), y: 200, what: 'стояк воды и канализации' },
+      { x: Math.round(x1 - 12 - x0), y: 20, what: 'вентканал: вытяжка над плитой' },
+    ])
+    // в спальне коммуникации модели не нужны
+    const log2 = { zones: [] as ZonesAsk[], layout: [] as LayoutAsk[] }
+    await furnish(plan, rooms, { scope: room.meta.id, wishes: '', replace: true, rename: false, purpose: 'Спальня', touches: false }, fakeDeps(log2))
+    expect(log2.layout[0].communications).toBeUndefined()
+  })
+
   it('«заменить»: старая мебель в комнате уходит, электрика остаётся', async () => {
     const log = { zones: [] as ZonesAsk[], layout: [] as LayoutAsk[] }
     const plan0 = flat()

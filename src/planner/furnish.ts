@@ -10,7 +10,7 @@ import { findNiches } from './niches'
 import type { AiCost, LayoutAsk, LayoutResult, ZonesAsk, ZonesResult } from './ai'
 import type { Plan, Room } from './types'
 import { CATALOG, CATALOG_MAP, isElectricItem } from './catalog'
-import { applyLayout, catalogForRoom, layoutSummary, vetLayout } from './autolayout'
+import { applyLayout, catalogForRoom, kitchenCommunications, layoutSummary, vetLayout } from './autolayout'
 import { updateRoomMeta } from './ops'
 import { isFixedPurpose, isSkippedForFurnish } from './roomkind'
 import { lerp, pointInPoly } from './geometry'
@@ -160,6 +160,8 @@ export async function furnish(plan: Plan, rooms: Room[], o: FurnishOptions, deps
       doors: ops.filter((q) => q.kind !== 'window'),
       windows: ops.filter((q) => q.kind === 'window'),
     })
+    // стояки и вентканал: гарнитур ставят к ним, а не куда поместится
+    const comm = /кухн/i.test(p) ? kitchenCommunications(r, plan, rooms).map(loc) : []
     try {
       const res = await deps.layout({
         polygon: (r.inner.length >= 3 ? r.inner : r.polygon).map((q) => loc({ x: q.x, y: q.y })),
@@ -167,6 +169,7 @@ export async function furnish(plan: Plan, rooms: Room[], o: FurnishOptions, deps
         quality: o.quality,
         openings: ops,
         niches: niches.length ? niches : undefined,
+        communications: comm.length ? comm : undefined,
         room: r.meta.name,
         purpose: p,
         areaM2: r.area,
@@ -198,7 +201,7 @@ export async function furnish(plan: Plan, rooms: Room[], o: FurnishOptions, deps
     }
     costs.push(a.res.ai)
     if (o.replace) acc = { ...acc, furniture: acc.furniture.filter((f) => isElectricItem(f) || !inRoom(r)(f)) }
-    const checks = vetLayout(a.res.items, r, acc, { purpose: p.purpose, wishes, touches: o.touches !== false })
+    const checks = vetLayout(a.res.items, r, acc, { purpose: p.purpose, wishes, touches: o.touches !== false, rooms })
     acc = applyLayout(acc, checks)
     const placed = checks.filter((c) => c.ok).length
     report.push({ ...base, placed, rejected: checks.length - placed, summary: layoutSummary(checks), idea: a.res.plan, model: a.res.ai?.model, tried: a.res.ai?.tried })

@@ -316,6 +316,25 @@ const GlyphImpl: React.FC<Props> = ({ item, cat = CATALOG_MAP[item.type], zoom }
       )
     case 'column':
       return <rect x={-hw} y={-hd} width={w} height={d} fill="#4a4a4a" {...S} />
+    case 'riser': {
+      const r = Math.min(w / 4, d / 2) - 1
+      return (
+        <g>
+          {body(1, { fill: '#fff' })}
+          <circle cx={-w / 4} cy={0} r={r} fill="#dbeafe" {...S} />
+          <circle cx={w / 4} cy={0} r={r} fill="#e5e7eb" {...S} />
+        </g>
+      )
+    }
+    case 'vent':
+      return (
+        <g>
+          {body(1, { fill: '#e5e7eb' })}
+          {[-0.25, 0, 0.25].map((k) => (
+            <line key={k} x1={-hw + 4} y1={k * d} x2={hw - 4} y2={k * d} {...THIN} />
+          ))}
+        </g>
+      )
     case 'bench':
       return body(7)
     case 'outlet':

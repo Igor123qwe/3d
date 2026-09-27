@@ -1022,6 +1022,8 @@ export function buildFurnitureMesh(glyph: GlyphKind, w: number, d: number, h: nu
       g = mirror(w, d, h, color)
       break
     case 'column':
+    case 'riser':
+    case 'vent':
       g = column(w, d, h, color)
       break
     case 'box':

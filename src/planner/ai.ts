@@ -367,6 +367,8 @@ export interface LayoutAsk {
   existing?: { type: string; name: string; x: number; y: number; w: number; d: number; rot: number }[]
   /** ниши комнаты: модель их по контуру не видит */
   niches?: { x0: number; y0: number; x1: number; y1: number; open: string; width: number; depth: number; window: boolean }[]
+  /** стояки и вентканал кухни: по контуру модель шахту не видит */
+  communications?: { x: number; y: number; what: string }[]
 }
 
 export const askLayout = (ask: LayoutAsk, signal?: AbortSignal): Promise<LayoutResult> =>

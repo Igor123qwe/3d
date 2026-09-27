@@ -86,7 +86,9 @@ export const ColorGlyph: React.FC<Props> = ({ item, cat }) => {
           {box(-hw, -hd, w, back + 5, 11, shade(main, 0.2))}
           {box(-hw, -hd, arm, d, 10, shade(main, 0.15))}
           {box(hw - arm, -hd, arm, d, 10, shade(main, 0.15))}
-          {Array.from({ length: n }, (_, i) => box(-hw + arm + i * cw + 1.5, -hd + back + 1, cw - 3, d - back - 5, 8, tint(main, 0.1), shade(main, 0.18)))}
+          {Array.from({ length: n }, (_, i) => (
+            <React.Fragment key={i}>{box(-hw + arm + i * cw + 1.5, -hd + back + 1, cw - 3, d - back - 5, 8, tint(main, 0.1), shade(main, 0.18))}</React.Fragment>
+          ))}
           {/* подушки — акцент */}
           {glyph === 'sofa' && (
             <>
@@ -109,7 +111,9 @@ export const ColorGlyph: React.FC<Props> = ({ item, cat }) => {
           {box(-hw, -hd, w, back + 4, 10, shade(main, 0.2))}
           {box(hw - back - 4, -hd, back + 4, d, 10, shade(main, 0.2))}
           {box(-hw, -hd, arm, seat, 9, shade(main, 0.15))}
-          {[0, 1].map((i) => box(-hw + arm + 1.5 + (i * long) / 2, -hd + back + 1, long / 2 - 3, seat - back - 5, 8, tint(main, 0.1), shade(main, 0.18)))}
+          {[0, 1].map((i) => (
+            <React.Fragment key={i}>{box(-hw + arm + 1.5 + (i * long) / 2, -hd + back + 1, long / 2 - 3, seat - back - 5, 8, tint(main, 0.1), shade(main, 0.18))}</React.Fragment>
+          ))}
           {box(hw - seat + 1.5, -hd + back + 1, seat - back - 7, seat - back - 5, 8, tint(main, 0.1), shade(main, 0.18))}
           {box(hw - seat + 1.5, -hd + seat, seat - back - 7, d - seat - 4, 8, tint(main, 0.1), shade(main, 0.18))}
           {box(hw - back - 30, -hd + back - 3, 24, 22, 6, accent, shade(accent, 0.2), { transform: `rotate(12 ${hw - back - 18} ${-hd + back + 8})` })}
@@ -190,7 +194,9 @@ export const ColorGlyph: React.FC<Props> = ({ item, cat }) => {
         return (
           <g>
             {box(-hw, -hd, w, d, 3, MAT.white, '#d8d1c6')}
-            {Array.from({ length: n }, (_, i) => box(-hw + 4 + (i * (w - 8)) / n, -hd + 5, (w - 8) / n - 1, d - 12, 1, SPINES[i % SPINES.length], 'none'))}
+            {Array.from({ length: n }, (_, i) => (
+            <React.Fragment key={i}>{box(-hw + 4 + (i * (w - 8)) / n, -hd + 5, (w - 8) / n - 1, d - 12, 1, SPINES[i % SPINES.length], 'none')}</React.Fragment>
+          ))}
           </g>
         )
       }
@@ -377,7 +383,9 @@ export const ColorGlyph: React.FC<Props> = ({ item, cat }) => {
         return (
           <g>
             {box(-hw, -hd, w, d, 3, MAT.birch)}
-            {Array.from({ length: n }, (_, i) => box(-hw + 4 + (i * (w - 8)) / n, -hd + 3, (w - 8) / n - 3, d - 6, 5, SPINES[(i * 3) % SPINES.length], 'none', { opacity: 0.9 }))}
+            {Array.from({ length: n }, (_, i) => (
+            <React.Fragment key={i}>{box(-hw + 4 + (i * (w - 8)) / n, -hd + 3, (w - 8) / n - 3, d - 6, 5, SPINES[(i * 3) % SPINES.length], 'none', { opacity: 0.9 })}</React.Fragment>
+          ))}
           </g>
         )
       }
@@ -472,6 +480,26 @@ export const ColorGlyph: React.FC<Props> = ({ item, cat }) => {
       )
     case 'column':
       return box(-hw, -hd, w, d, 1, '#50545c', '#3c3f45')
+    case 'riser': {
+      // два стояка: холодная вода и канализация
+      const r = Math.min(w / 4, d / 2) - 1
+      return (
+        <g>
+          {box(-hw, -hd, w, d, 3, '#f1f5f9', '#94a3b8')}
+          <circle cx={-w / 4} cy={0} r={r} fill="#93c5fd" {...edge('#3b82f6')} />
+          <circle cx={w / 4} cy={0} r={r} fill="#9ca3af" {...edge('#4b5563')} />
+        </g>
+      )
+    }
+    case 'vent':
+      return (
+        <g>
+          {box(-hw, -hd, w, d, 2, '#e2e8f0', '#94a3b8')}
+          {[-0.25, 0, 0.25].map((k) => (
+            <line key={k} x1={-hw + 4} y1={k * d} x2={hw - 4} y2={k * d} {...edge('#64748b', 1)} />
+          ))}
+        </g>
+      )
     case 'bench':
       return (
         <g>

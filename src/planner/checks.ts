@@ -81,6 +81,32 @@ export function openingGeom(op: Opening, wall: Wall): OpeningGeom {
 
 const SIDE_TEXT: Record<ZoneSide, string> = { front: 'Перед', back: 'Позади', left: 'Слева от', right: 'Справа от' }
 
+/**
+ * Рабочий треугольник кухни: холодильник — мойка — плита. Сумма 3,6–8 м, каждая
+ * сторона 0,9–2,7 м. Кухня в линию — не треугольник, а отрезок: соседние по
+ * линии зоны — в 0,9–2,7 м друг от друга, весь путь не длиннее 4,5 м
+ */
+export function workTriangle(fridge: Pt, sink: Pt, stove: Pt): { sides: number[]; total: number; ok: boolean; linear: boolean; path: number; order: number[] } {
+  const pts = [fridge, sink, stove]
+  const sides = [dist(fridge, sink), dist(sink, stove), dist(stove, fridge)]
+  const total = sides.reduce((a, b) => a + b, 0)
+  // в линию: все три у одной прямой, проведённой через самые далёкие
+  const pairs: [number, number][] = [
+    [0, 1],
+    [1, 2],
+    [0, 2],
+  ]
+  const [ia, ib] = pairs.reduce((m, p) => (dist(pts[p[0]], pts[p[1]]) > dist(pts[m[0]], pts[m[1]]) ? p : m), pairs[0])
+  const mid = 3 - ia - ib
+  const span = dist(pts[ia], pts[ib])
+  const off = span > 1 ? Math.abs((pts[mid].x - pts[ia].x) * (pts[ib].y - pts[ia].y) - (pts[mid].y - pts[ia].y) * (pts[ib].x - pts[ia].x)) / span : Infinity
+  const linear = off < 45
+  const g1 = dist(pts[ia], pts[mid])
+  const g2 = dist(pts[mid], pts[ib])
+  const ok = linear ? g1 >= 90 && g2 >= 90 && g1 <= 270 && g2 <= 270 && g1 + g2 <= 450 : total >= 360 && total <= 800 && sides.every((s) => s >= 90 && s <= 270)
+  return { sides, total, ok, linear, path: g1 + g2, order: [ia, mid, ib] }
+}
+
 /** шкаф шириной от полутора метров: фронт у него из нескольких секций */
 export const isWideStorage = (f: { w: number }, cat: CatalogItem | undefined): boolean => (cat?.glyph === 'wardrobe' || cat?.glyph === 'wardrobe-slide') && f.w >= 150
 
@@ -263,23 +289,48 @@ export function runChecks(plan: Plan, rooms: Room[]): CheckResult {
   const stove = plan.furniture.find((f) => f.type === 'stove')
   if (fridge && sink && stove) {
     const pts = [fridge, sink, stove].map((f) => ({ x: f.x, y: f.y }))
-    const sides = [dist(pts[0], pts[1]), dist(pts[1], pts[2]), dist(pts[2], pts[0])]
-    const total = sides.reduce((a, b) => a + b, 0)
-    const ok = total >= 360 && total <= 800 && sides.every((s) => s >= 90 && s <= 270)
+    const t = workTriangle(pts[0], pts[1], pts[2])
+    const { sides, total, ok } = t
     triangle = { pts, sides, total, ok }
+    // кухня в линию: путь по порядку зон вдоль линии
+    const names = ['холодильник', 'мойка', 'плита']
+    const line = t.order.map((i) => names[i]).join(' — ')
+    const path = t.path
     if (!ok) {
       push({
         id: 'triangle',
         level: 'warn',
-        text: `Рабочий треугольник кухни ${(total / 100).toFixed(1)} м — норма 4–8 м в сумме, каждая сторона 1,2–2,7 м`,
+        text: t.linear
+          ? `Кухня в линию: ${line} ${(path / 100).toFixed(1)} м — норма до 4,5 м, между соседними зонами 0,9–2,7 м`
+          : `Рабочий треугольник кухни ${(total / 100).toFixed(1)} м — норма 4–8 м в сумме, каждая сторона 1,2–2,7 м`,
         target: { kind: 'furniture', id: sink.id },
       })
     } else {
-      push({ id: 'triangle-ok', level: 'info', text: `Рабочий треугольник кухни ${(total / 100).toFixed(1)} м — в норме`, target: { kind: 'furniture', id: sink.id } })
+      push({
+        id: 'triangle-ok',
+        level: 'info',
+        text: t.linear ? `Кухня в линию: ${line} ${(path / 100).toFixed(1)} м — в норме` : `Рабочий треугольник кухни ${(total / 100).toFixed(1)} м — в норме`,
+        target: { kind: 'furniture', id: sink.id },
+      })
     }
     if (dist({ x: stove.x, y: stove.y }, { x: fridge.x, y: fridge.y }) < 65) {
       push({ id: 'stove-fridge', level: 'warn', text: 'Плита вплотную к холодильнику — нужен модуль 30–60 см между ними', target: { kind: 'furniture', id: stove.id } })
     }
+  }
+
+  // 6а. коммуникации: мойка у стояка, плита у вентканала — если они отмечены на плане
+  const nearest = (f: Furniture, list: Furniture[]) => Math.min(...list.map((q) => dist(f, q)))
+  const risers = plan.furniture.filter((f) => f.type === 'riser')
+  const vents = plan.furniture.filter((f) => f.type === 'vent-duct')
+  for (const s of plan.furniture.filter((f) => f.type === 'sink')) {
+    if (!risers.length) break
+    const d = nearest(s, risers)
+    if (d > 250) push({ id: `riser-${s.id}`, level: 'warn', text: `Мойка в ${(d / 100).toFixed(1)} м от стояка — слив с уклоном выйдет длинным и будет засоряться; ближе к стояку`, target: { kind: 'furniture', id: s.id } })
+  }
+  for (const s of plan.furniture.filter((f) => f.type === 'stove')) {
+    if (!vents.length) break
+    const d = nearest(s, vents)
+    if (d > 350) push({ id: `vent-${s.id}`, level: 'info', text: `Плита в ${(d / 100).toFixed(1)} м от вентканала — воздуховод вытяжки длинный и шумный; ближе к вентканалу`, target: { kind: 'furniture', id: s.id } })
   }
 
   // 6б. окно на внутренней стене: с обеих сторон комнаты — свет через него не попадёт

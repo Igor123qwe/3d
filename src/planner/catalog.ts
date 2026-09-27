@@ -57,6 +57,8 @@ export type GlyphKind =
   | 'radiator'
   | 'mirror'
   | 'column'
+  | 'riser'
+  | 'vent'
   | 'bench'
   | 'box'
   | 'outlet'
@@ -295,6 +297,16 @@ export const CATALOG: CatalogItem[] = [
   { type: 'counter-100', name: 'Тумба 100', category: 'kitchen', w: 100, d: 60, glyph: 'counter', wallSnap: true, clearance: { front: 100 } },
   { type: 'counter-corner', name: 'Угловой модуль', category: 'kitchen', w: 90, d: 90, glyph: 'counter', wallSnap: true },
   {
+    type: 'counter-top',
+    name: 'Столешница',
+    category: 'kitchen',
+    w: 40,
+    d: 60,
+    glyph: 'counter',
+    wallSnap: true,
+    hint: 'Кусок столешницы нужной длины: над выступом шахты (тогда уже тумб) или добор между модулями.',
+  },
+  {
     type: 'sink',
     name: 'Мойка',
     category: 'kitchen',
@@ -303,7 +315,7 @@ export const CATALOG: CatalogItem[] = [
     glyph: 'sink',
     wallSnap: true,
     clearance: { front: 100 },
-    hint: 'Между мойкой и плитой — рабочая поверхность 60–90 см. Мойку удобно ставить у окна.',
+    hint: 'Мойку ставят ближе к стояку: слив идёт с уклоном, длинная труба засоряется. Между мойкой и плитой — рабочая поверхность 60–90 см.',
   },
   {
     type: 'stove',
@@ -348,9 +360,10 @@ export const CATALOG: CatalogItem[] = [
     d: 70,
     glyph: 'table',
     wallSnap: true,
-    clearance: { left: 75, right: 75 },
+    // торцом в угол — обычное дело: стулья с открытого бока и у свободного торца
+    clearance: { front: 75 },
     allowInZone: SEATS,
-    hint: 'Стол торцом или длинной стороной к стене экономит место: стулья только по бокам.',
+    hint: 'Стол длинной стороной к стене, торцом в угол у окна — экономит место: стулья с открытых сторон.',
   },
   { type: 'bar-stool', name: 'Барный стул', category: 'kitchen', w: 40, d: 40, glyph: 'stool' },
 
@@ -513,6 +526,30 @@ export const CATALOG: CatalogItem[] = [
   // ---------- Разное ----------
   { type: 'radiator', name: 'Радиатор', category: 'misc', w: 80, d: 10, glyph: 'radiator', wallSnap: true, hint: 'Не закрывайте радиатор глухой мебелью — потери тепла до 20 %.' },
   { type: 'column', name: 'Колонна / шахта', category: 'misc', w: 40, d: 40, glyph: 'column' },
+  {
+    type: 'riser',
+    name: 'Стояк: вода и канализация',
+    category: 'misc',
+    w: 25,
+    d: 20,
+    glyph: 'riser',
+    wallSnap: true,
+    // метка поверх мебели: тумбы ставят перед стояком с вырезом, он им не мешает
+    z: 2,
+    hint: 'Отметьте, где стояки: мойку поставят рядом — слив с уклоном короткий, унитаз и ванну в санузле тоже к ним.',
+  },
+  {
+    type: 'vent-duct',
+    name: 'Вентканал',
+    category: 'misc',
+    w: 40,
+    d: 25,
+    glyph: 'vent',
+    wallSnap: true,
+    // вентканал — в стене, решётка под потолком: полу не мешает
+    z: 2,
+    hint: 'Отметьте вентканал: плиту с вытяжкой поставят рядом — короткий воздуховод, меньше шума.',
+  },
   { type: 'piano', name: 'Пианино', category: 'misc', w: 150, d: 60, glyph: 'box', wallSnap: true, clearance: { front: 90 }, allowInZone: SEATS },
   { type: 'box', name: 'Произвольный объект', category: 'misc', w: 100, d: 50, glyph: 'box', hint: 'Задайте размер и подпись в панели свойств.' },
 ]
@@ -567,6 +604,9 @@ const HEIGHTS: Record<string, [number, number?]> = {
   'counter-80': [90],
   'counter-100': [90],
   'counter-corner': [90],
+  'counter-top': [90],
+  riser: [270],
+  'vent-duct': [270],
   // мойка: столешница на 90, смеситель над ней
   sink: [110],
   stove: [90],

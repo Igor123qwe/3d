@@ -13,8 +13,9 @@ import type { Furniture, Plan, Pt, Room, Wall } from './types'
 import { uid } from './types'
 import { CATALOG, CATALOG_MAP, dims3d, type CatalogItem } from './catalog'
 import { frontBlockedShare, furnitureBody, isWideStorage, openingGeom, runChecks, TOLERATED_FRONT_SHARE, wallBody, zonesOf } from './checks'
-import { findNiches, nicheSpot, nicheText, type Niche } from './niches'
-import { composeKitchen, KITCHEN_MODULES } from './kitchen'
+import { findNiches, largestRect, nicheSpot, nicheText, type Niche } from './niches'
+import { composeKitchen, KITCHEN_MODULES, shaftsOf } from './kitchen'
+import { roomKind } from './roomkind'
 import { armchairSpots, coffeeSpot, lampSpots, plantSpots, rugBeforeSofa, rugInside, rugUnderBed, rugUnderTable, smallerRugs, tvSpot, type RugPlace, type WindowSeg } from './decor'
 import { paletteFor } from './palette'
 import { add, convexOverlap, dist, mul, norm, normDeg, obbCorners, perp, pointInPoly, rotate, sub } from './geometry'
@@ -56,9 +57,13 @@ export interface LayoutOptions {
   wishes?: string
   /** штрихи дизайнера и палитра: ковёр, торшер, растение, цвета текстиля; по умолчанию — нет, диалог включает */
   touches?: boolean
+  /** куда нельзя ставить ничего: рабочий проход перед кухонным гарнитуром, проход у двери */
+  forbidden?: Pt[][]
+  /** все комнаты плана: для кухни — где санузел, за стеной которого стояки */
+  rooms?: Room[]
 }
 
-export const DEFAULT_LAYOUT: Required<Omit<LayoutOptions, 'purpose' | 'wishes' | 'touches'>> = { outTolerance: 2, snapCm: 25 }
+export const DEFAULT_LAYOUT: Required<Omit<LayoutOptions, 'purpose' | 'wishes' | 'touches' | 'forbidden' | 'rooms'>> = { outTolerance: 2, snapCm: 25 }
 
 function pointSegDist(p: Pt, a: Pt, b: Pt): number {
   const vx = b.x - a.x
@@ -124,6 +129,8 @@ interface Ctx {
   niches: Niche[]
   /** окна по внутренней грани: растению — к ним */
   windows: WindowSeg[]
+  /** куда нельзя ничего: рабочий проход перед гарнитуром, проход у двери */
+  forbidden: Pt[][]
 }
 
 /** шкафы и гардеробные: им место в нише (кухонный пенал — не про это) */
@@ -287,6 +294,7 @@ function fits(f: Furniture, c: Ctx): Fail | null {
   if (c.inner.some((v) => pointInPoly(v, core))) return 'room'
   if (c.walls.some((w) => convexOverlap(body, w, 1.5))) return 'wall'
   if (c.swings.some((s) => convexOverlap(s, body, 2))) return 'door'
+  if (c.forbidden.some((z) => convexOverlap(z, body, 1.5))) return 'other'
   if (c.taken.some((t) => convexOverlap(t, body, 1.5))) return 'other'
   return null
 }
@@ -652,13 +660,14 @@ function kitchenFirst(proposed: AiPlacement[], room: Room, plan: Plan, options: 
   if (core.size < 2 && !(/кухн/i.test(purpose) && mods.length >= 2)) return null
   const fitting = new Set(catalogForRoom(purpose, CATALOG).map((c) => c.type))
   if (!['fridge', 'sink', 'stove'].every((t) => fitting.has(t))) return null
-  const standing = plan.furniture.filter((f) => !CATALOG_MAP[f.type]?.symbol && pointInPoly({ x: f.x, y: f.y }, room.polygon))
+  const standing = plan.furniture.filter((f) => !CATALOG_MAP[f.type]?.symbol && (CATALOG_MAP[f.type]?.z ?? 1) === 1 && pointInPoly({ x: f.x, y: f.y }, room.polygon))
   // гарнитур уже стоит — не пересобираем, дополняем по одному
   if (standing.some((f) => KITCHEN_MODULES.has(f.type))) return null
   const inner = room.inner.length >= 3 ? room.inner : room.polygon
   const doorZones: Pt[][] = []
   const doors: Pt[] = []
   const windows: [Pt, Pt][] = []
+  const windowZones: Pt[][] = []
   for (const op of plan.openings) {
     const wall = plan.walls.find((w) => w.id === op.wallId)
     if (!wall) continue
@@ -666,6 +675,10 @@ function kitchenFirst(proposed: AiPlacement[], room: Room, plan: Plan, options: 
     if (!(pointInPoly(g.center, room.polygon) || pointSegDistPoly(g.center, room.polygon) < 60)) continue
     if (op.kind === 'window') {
       windows.push([add(g.center, mul(g.dir, -g.hw)), add(g.center, mul(g.dir, g.hw))])
+      // пол перед окном: батарея и подоконник — глубина тумбы вглубь, по 5 см за откосы
+      const side = pointInPoly(add(g.center, mul(g.n, g.th / 2 + 5)), inner) ? 1 : -1
+      const c = add(g.center, mul(g.n, side * (g.th / 2 + 30)))
+      windowZones.push(obbCorners(c.x, c.y, g.hw * 2 + 10, 60, (Math.atan2(g.dir.y, g.dir.x) * 180) / Math.PI))
       continue
     }
     doors.push(g.center)
@@ -677,26 +690,229 @@ function kitchenFirst(proposed: AiPlacement[], room: Room, plan: Plan, options: 
   const ys = room.polygon.map((p) => p.y)
   const [x0, x1, y0, y1] = [Math.min(...xs) - 60, Math.max(...xs) + 60, Math.min(...ys) - 60, Math.max(...ys) + 60]
   const walls = plan.walls.filter((w) => Math.max(w.a.x, w.b.x) >= x0 && Math.min(w.a.x, w.b.x) <= x1 && Math.max(w.a.y, w.b.y) >= y0 && Math.min(w.a.y, w.b.y) <= y1).map(wallBody)
-  const run = composeKitchen({ inner, blockers: [...walls, ...standing.map(furnitureBody)], doorZones, doors, windows, proposed: mods })
+
+  // Коммуникации — первое, что смотрит дизайнер кухни: стояки и вентканал не
+  // переносят. Метки на плане; колонна или выступ шахты в стене кухни; нет
+  // ничего — стена, общая с санузлом
+  const comm = communications(room, plan, inner, options.rooms)
+  // мойку под окном — только если об этом попросили
+  const allowWindow = /(мойк|раковин)[^.,;]{0,24}(у|под|возле)\s+окн|(у|под)\s+окн[^.,;]{0,24}(мойк|раковин)/i.test(options.wishes ?? '')
+  const run = composeKitchen({ inner, blockers: [...walls, ...standing.map(furnitureBody)], doorZones, doors, windows, windowZones, proposed: mods, risers: comm.risers, vents: comm.vents, allowWindow })
   if (!run) return null
 
+  const m = (cm: number) => `${(cm / 100).toFixed(1).replace('.', ',')} м`
+  const commText = [run.sinkToRiser !== undefined ? `от мойки до ${comm.riserWord} ${m(run.sinkToRiser)}` : '', run.stoveToVent !== undefined ? `от плиты до ${comm.ventWord} ${m(run.stoveToVent)}` : ''].filter(Boolean)
+  const how =
+    `кухня собрана гарнитуром ${run.shape === 'corner' ? 'буквой Г' : 'вдоль стены'}: ${run.order.join(' — ')}` +
+    (commText.length ? `; ${commText.join(', ')}` : '') +
+    (run.dropped.length ? `; места у коммуникаций не хватило: ${run.dropped.join(', ')}` : '') +
+    (windows.length ? (run.atWindow ? '; у глухих стен не поместился — часть под окном' : '; под окном свободно') : '')
+  const noteOf = (f: Furniture): string => {
+    if (f.type === 'sink' && run.sinkToRiser !== undefined) return `до ${comm.riserWord} ${m(run.sinkToRiser)} — короткий слив${run.furniture.some((g) => g.type === 'dishwasher') ? '; рядом посудомойка' : ''}`
+    if (f.type === 'stove' && run.stoveToVent !== undefined) return `до ${comm.ventWord} ${m(run.stoveToVent)} — короткий воздуховод вытяжки; столешница с обеих сторон`
+    if (f.type === 'counter-top') return f.d < 58 ? 'столешница над выступом шахты — тумбы там мельче, фасад в линию' : 'добор столешницы до шахты'
+    return KITCHEN_NOTE[f.type] ?? 'столешница гарнитура'
+  }
   // что модель назвала — сопоставляем с собранным по типу; тумбы — с тумбами любой длины
-  const how = `кухня собрана гарнитуром ${run.shape === 'corner' ? 'буквой Г' : 'вдоль стены'}: ${run.order.join(' — ')}`
   const left = [...run.furniture]
   const checks: PlacementCheck[] = []
-  const isCounter = (t: string) => /^counter-\d/.test(t)
+  const isCounter = (t: string) => /^counter-(\d|top)/.test(t)
   for (const it of mods) {
     const i = left.findIndex((f) => f.type === it.type || (isCounter(it.type) && isCounter(f.type)))
     if (i < 0) continue
     const f = left.splice(i, 1)[0]
-    checks.push({ item: it, ok: true, furniture: { ...f, note: KITCHEN_NOTE[f.type] ?? 'столешница гарнитура' }, moved: Math.round(dist(f, it)), kitchen: true })
+    checks.push({ item: it, ok: true, furniture: { ...f, note: noteOf(f) }, moved: Math.round(dist(f, it)), kitchen: true })
   }
-  for (const f of left) checks.push({ item: { type: f.type, x: f.x, y: f.y, rot: f.rot, why: 'гарнитур' }, ok: true, furniture: { ...f, note: KITCHEN_NOTE[f.type] ?? 'столешница гарнитура' }, moved: 0, added: true, kitchen: true })
+  for (const f of left) checks.push({ item: { type: f.type, x: f.x, y: f.y, rot: f.rot, why: 'гарнитур' }, ok: true, furniture: { ...f, note: noteOf(f) }, moved: 0, added: true, kitchen: true })
   if (checks.length) checks[0].kitchen = how
-  // стол и стулья — в оставшееся место, гарнитур для них уже стоит
-  const rest = proposed.filter((p) => !KITCHEN_MODULES.has(p.type))
+
+  // Перед гарнитуром — рабочий проход 110 см: там не ставят ни стол, ни стул.
+  // Стол — в самое большое свободное место, ближе к окну: там светло и далеко от плиты
+  const AISLE = 110
+  const aisles = run.furniture
+    .filter((f) => f.type !== 'counter-corner')
+    .map((f) => {
+      const front = rotate({ x: 0, y: 1 }, f.rot)
+      const c = add({ x: f.x, y: f.y }, mul(front, f.d / 2 + AISLE / 2))
+      return obbCorners(c.x, c.y, f.w, AISLE, f.rot)
+    })
+  const forbidden = [...(options.forbidden ?? []), ...aisles, ...doorZones]
   const withRun = { ...plan, furniture: [...plan.furniture, ...run.furniture] }
-  return [...checks, ...(rest.length ? vetLayout(rest, room, withRun, options) : [])]
+  const dining = diningZone(inner, [...run.furniture.map(furnitureBody), ...standing.map(furnitureBody), ...walls, ...forbidden], windows)
+  const rest = proposed.filter((p) => !KITCHEN_MODULES.has(p.type))
+  const DINING = ['dining-table', 'table-round', 'kitchen-table']
+  const tableIdx = rest.findIndex((p) => DINING.includes(p.type))
+  const planned = [...rest]
+  let tableNote = ''
+  if (tableIdx >= 0 && dining) {
+    const t = rest[tableIdx]
+    // тип стола — по месту: круглому с четырьмя стульями нужен квадрат 2 × 2 м, большому — 2,5 × 1,9
+    const short = Math.min(dining.w, dining.h)
+    const long = Math.max(dining.w, dining.h)
+    const fitsType = (type: string) => (type === 'table-round' ? short >= 216 : type === 'dining-table' ? short >= 190 && long >= 250 : short >= 120 && dining.walls.length > 0)
+    const type = [t.type, 'table-round', 'kitchen-table'].find((x) => fitting.has(x) && fitsType(x)) ?? t.type
+    const cat = CATALOG_MAP[type]
+    const target = dining.window ?? { x: dining.x, y: dining.y }
+    const clamp = (v: number, a: number, b: number) => (a > b ? (a + b) / 2 : Math.min(Math.max(v, a), b))
+    let want: { x: number; y: number; rot: number }
+    // стена, вдоль которой у торцов стола остаётся по 75 см на стулья, — ближайшая к окну
+    const room = (side: string) => (side === 'left' || side === 'right' ? dining.h : dining.w)
+    const wall =
+      type === 'kitchen-table'
+        ? [...dining.walls].sort((p, q) => Number(room(q.side) >= cat.w + 150) - Number(room(p.side) >= cat.w + 150) || dist(p.mid, target) - dist(q.mid, target))[0]
+        : undefined
+    if (wall) {
+      // стол у стены — спинкой к стене свободного места, что ближе к окну, и не в угол: у торцов 75 см на стулья
+      const along = wall.side === 'left' || wall.side === 'right' ? 'y' : 'x'
+      const lo = (along === 'y' ? dining.y0 : dining.x0) + cat.w / 2 + 75
+      const hi = (along === 'y' ? dining.y1 : dining.x1) - cat.w / 2 - 75
+      let t0 = clamp(along === 'y' ? target.y : target.x, lo, hi)
+      const off = cat.d / 2 + 0.5
+      // у окна свободное место упирается в стену — стол торцом к ней, в угол у окна:
+      // стулья с открытого бока и у дальнего торца
+      if (dining.window) {
+        const [a0, a1] = along === 'y' ? [dining.y0, dining.y1] : [dining.x0, dining.x1]
+        const hiEnd = (along === 'y' ? target.y : target.x) > (a0 + a1) / 2
+        const across = wall.side === 'left' ? dining.x0 + off : wall.side === 'right' ? dining.x1 - off : wall.side === 'top' ? dining.y0 + off : dining.y1 - off
+        const edge = hiEnd ? a1 + 3 : a0 - 3
+        const probe = along === 'y' ? { x: across, y: edge } : { x: edge, y: across }
+        if (!pointInPoly(probe, inner) && a1 - a0 >= cat.w + 75) t0 = hiEnd ? a1 - cat.w / 2 - 0.5 : a0 + cat.w / 2 + 0.5
+      }
+      want =
+        wall.side === 'left'
+          ? { x: dining.x0 + off, y: t0, rot: 270 }
+          : wall.side === 'right'
+            ? { x: dining.x1 - off, y: t0, rot: 90 }
+            : wall.side === 'top'
+              ? { x: t0, y: dining.y0 + off, rot: 0 }
+              : { x: t0, y: dining.y1 - off, rot: 180 }
+    } else {
+      // круглый и большой стол — к окну, но так, чтобы вокруг сели стулья
+      const hw = cat.w / 2 + 55
+      const hd = cat.d / 2 + 55
+      want = { x: clamp(target.x, dining.x0 + hw, dining.x1 - hw), y: clamp(target.y, dining.y0 + hd, dining.y1 - hd), rot: t.rot }
+    }
+    planned[tableIdx] = { ...t, type, x: want.x, y: want.y, rot: want.rot }
+    // стулья — к столу: пары их потом усадят с открытых сторон
+    planned.forEach((p, i) => {
+      if (p.type === 'chair' || p.type === 'bar-stool') planned[i] = { ...p, x: want.x, y: want.y }
+    })
+    tableNote = [type !== t.type ? `${cat.name} вместо ${CATALOG_MAP[t.type]?.name.toLowerCase() ?? t.type}: здесь для него мало места` : '', dining.window ? 'обеденная зона у окна' : 'обеденная зона', 'вне прохода у гарнитура'].filter(Boolean).join(' — ')
+  }
+  const restChecks = planned.length ? vetLayout(planned, room, withRun, { ...options, forbidden }) : []
+  // в отчёте — предложение модели как было
+  restChecks.forEach((c, i) => {
+    if (i >= rest.length) return
+    if (i === tableIdx && c.ok && c.furniture && tableNote) {
+      c.furniture = { ...c.furniture, note: tableNote }
+      if (rest[i].type !== planned[i].type) c.replaced = CATALOG_MAP[rest[i].type]?.name
+      c.paired = dining?.window ? 'у окна, вне рабочего прохода' : 'вне рабочего прохода'
+    }
+    c.item = rest[i]
+  })
+  return [...checks, ...restChecks]
+}
+
+/** где стояки и вентканал: метки, колонны и шахты в контуре, стена с санузлом */
+function communications(room: Room, plan: Plan, inner: Pt[], rooms?: Room[]): { risers: Pt[]; vents: Pt[]; riserWord: string; ventWord: string } {
+  const near = (f: Furniture) => pointInPoly({ x: f.x, y: f.y }, room.polygon) || pointSegDistPoly({ x: f.x, y: f.y }, room.polygon) < 40
+  const marks = plan.furniture.filter(near)
+  const pt = (f: Furniture): Pt => ({ x: f.x, y: f.y })
+  const markedRisers = marks.filter((f) => f.type === 'riser').map(pt)
+  const markedVents = marks.filter((f) => f.type === 'vent-duct').map(pt)
+  const shafts = [...shaftsOf(inner), ...marks.filter((f) => f.type === 'column').map(pt)]
+  let risers = markedRisers.length ? markedRisers : shafts
+  const vents = markedVents.length ? markedVents : shafts
+  let riserWord = markedRisers.length ? 'стояка' : 'шахты со стояками'
+  if (!risers.length && rooms) {
+    // стена, общая с санузлом или ванной: стояки обычно за ней
+    for (let i = 0; i < inner.length; i++) {
+      const a = inner[i]
+      const b = inner[(i + 1) % inner.length]
+      const L = dist(a, b)
+      if (L < 40) continue
+      const dir = norm(sub(b, a))
+      let n = perp(dir)
+      const mid = add(a, mul(dir, L / 2))
+      if (pointInPoly(add(mid, mul(n, 5)), inner)) n = mul(n, -1)
+      for (const k of [0.25, 0.5, 0.75]) {
+        const p = add(a, mul(dir, L * k))
+        const behind = add(p, mul(n, 45))
+        if (rooms.some((r) => r.meta.id !== room.meta.id && roomKind(r.meta.name) === 'wet' && pointInPoly(behind, r.polygon))) risers.push(p)
+      }
+    }
+    if (risers.length) riserWord = 'стены санузла'
+  }
+  risers = risers.slice(0, 6)
+  return { risers, vents, riserWord, ventWord: markedVents.length ? 'вентканала' : 'шахты' }
+}
+
+/**
+ * Коммуникации кухни словами — модели: по контуру она шахту не видит и ставит
+ * мойку куда придётся. Координаты — плана
+ */
+export function kitchenCommunications(room: Room, plan: Plan, rooms?: Room[]): { x: number; y: number; what: string }[] {
+  const inner = room.inner.length >= 3 ? room.inner : room.polygon
+  const c = communications(room, plan, inner, rooms)
+  const key = (p: Pt) => `${Math.round(p.x)},${Math.round(p.y)}`
+  const vents = new Set(c.vents.map(key))
+  const out: { x: number; y: number; what: string }[] = []
+  for (const p of c.risers) {
+    const what = vents.has(key(p)) ? 'шахта: стояки воды и канализации, вентканал' : c.riserWord === 'стены санузла' ? 'стена санузла: стояки за ней' : 'стояк воды и канализации'
+    out.push({ x: p.x, y: p.y, what })
+  }
+  for (const p of c.vents) if (!c.risers.some((q) => key(q) === key(p))) out.push({ x: p.x, y: p.y, what: 'вентканал: вытяжка над плитой' })
+  return out
+}
+
+/**
+ * Свободное место под обеденную зону: самый большой прямоугольник пола, где нет
+ * гарнитура, рабочего прохода, дверей и стен; и точка у окна, если окно рядом
+ */
+function diningZone(
+  inner: Pt[],
+  blocked: Pt[][],
+  windows: [Pt, Pt][],
+): { x0: number; y0: number; x1: number; y1: number; x: number; y: number; w: number; h: number; window?: Pt; walls: { side: 'left' | 'right' | 'top' | 'bottom'; mid: Pt }[] } | null {
+  const cell = 5
+  const xs = inner.map((p) => p.x)
+  const ys = inner.map((p) => p.y)
+  const X0 = Math.min(...xs)
+  const Y0 = Math.min(...ys)
+  const nx = Math.ceil((Math.max(...xs) - X0) / cell)
+  const ny = Math.ceil((Math.max(...ys) - Y0) / cell)
+  if (nx < 4 || ny < 4 || nx * ny > 250_000) return null
+  const grid = Array.from({ length: ny }, (_, j) =>
+    Array.from({ length: nx }, (_, i) => {
+      const p = { x: X0 + (i + 0.5) * cell, y: Y0 + (j + 0.5) * cell }
+      return pointInPoly(p, inner) && !blocked.some((b) => pointInPoly(p, b))
+    }),
+  )
+  const r = largestRect(grid, nx, ny)
+  if (!r) return null
+  const x0 = X0 + r.i0 * cell
+  const x1 = X0 + (r.i1 + 1) * cell
+  const y0 = Y0 + r.j0 * cell
+  const y1 = Y0 + (r.j1 + 1) * cell
+  const center = { x: (x0 + x1) / 2, y: (y0 + y1) / 2 }
+  // окно рядом с местом (до 1,2 м) — стол к нему
+  let win: Pt | undefined
+  for (const [a, b] of windows) {
+    const c = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+    const dx = Math.max(x0 - c.x, 0, c.x - x1)
+    const dy = Math.max(y0 - c.y, 0, c.y - y1)
+    if (Math.hypot(dx, dy) < 120 && (!win || dist(c, center) < dist(win, center))) win = c
+  }
+  // какие стороны места — у стены комнаты: к ним можно прижать стол
+  const outside = (p: Pt) => !pointInPoly(p, inner)
+  const sideWall = (pts: Pt[]) => pts.every(outside)
+  const k = [0.2, 0.5, 0.8]
+  const walls: { side: 'left' | 'right' | 'top' | 'bottom'; mid: Pt }[] = []
+  if (sideWall(k.map((t) => ({ x: x0 - 4, y: y0 + (y1 - y0) * t })))) walls.push({ side: 'left', mid: { x: x0, y: center.y } })
+  if (sideWall(k.map((t) => ({ x: x1 + 4, y: y0 + (y1 - y0) * t })))) walls.push({ side: 'right', mid: { x: x1, y: center.y } })
+  if (sideWall(k.map((t) => ({ x: x0 + (x1 - x0) * t, y: y0 - 4 })))) walls.push({ side: 'top', mid: { x: center.x, y: y0 } })
+  if (sideWall(k.map((t) => ({ x: x0 + (x1 - x0) * t, y: y1 + 4 })))) walls.push({ side: 'bottom', mid: { x: center.x, y: y1 } })
+  return { x0, y0, x1, y1, x: center.x, y: center.y, w: x1 - x0, h: y1 - y0, window: win, walls }
 }
 
 /**
@@ -766,7 +982,7 @@ function vetOnce(proposed: AiPlacement[], room: Room, plan: Plan, options: Layou
   const taken: Pt[][] = standing.map(furnitureBody)
   const takenZones: Zone[] = standing.flatMap((f) => zonesFor(f, CATALOG_MAP[f.type]))
   const niches = findNiches(inner, { doors: doorCenters, windows: windowCenters })
-  const ctx: Ctx = { inner, walls: wallPolys, swings, windowPts, taken, takenKinds: standing.map((f) => f.type), takenZones, tol: o.outTolerance, niches, windows: windowSegs }
+  const ctx: Ctx = { inner, walls: wallPolys, swings, windowPts, taken, takenKinds: standing.map((f) => f.type), takenZones, tol: o.outTolerance, niches, windows: windowSegs, forbidden: options.forbidden ?? [] }
 
   // журнальный стол в санузле геометрию пройдёт, а смысл — нет: только уместные в комнате типы
   // список тот же, что ушёл модели: по назначению, а не по старому имени комнаты
@@ -1191,7 +1407,8 @@ export function catalogForRoom(name: string, all: CatalogItem[]): { type: string
   if (cats.has('bedroom') && !cats.has('living')) for (const t of ['desk', 'office-chair']) extra.add(t)
   // радиатор и колонна — часть здания, «произвольный объект» — заготовка: их не расставляют;
   // пианино — только там, где гостиная
-  const never = new Set(['radiator', 'column', 'box'])
+  // стояки, вентканалы и куски столешницы ставит человек или сборщик кухни, а не модель
+  const never = new Set(['radiator', 'column', 'box', 'riser', 'vent-duct', 'counter-top'])
   return all
     .filter((c) => !c.symbol && !never.has(c.type) && (cats.has(c.category) || extra.has(c.type)))
     .filter((c) => c.type !== 'piano' || cats.has('living'))

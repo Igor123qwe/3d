@@ -112,7 +112,7 @@ describe('кухня и гостиная', () => {
     }
     const r = check(plan)
     expect(r.triangle?.ok).toBe(false)
-    expect(r.issues.some((i) => i.text.includes('Рабочий треугольник'))).toBe(true)
+    expect(r.issues.some((i) => /Рабочий треугольник|Кухня в линию/.test(i.text) && i.level === 'warn')).toBe(true)
   })
 
   it('нормальный треугольник отмечается как корректный', () => {
