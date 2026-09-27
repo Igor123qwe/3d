@@ -103,7 +103,10 @@ export function workTriangle(fridge: Pt, sink: Pt, stove: Pt): { sides: number[]
   const linear = off < 45
   const g1 = dist(pts[ia], pts[mid])
   const g2 = dist(pts[mid], pts[ib])
-  const ok = linear ? g1 >= 90 && g2 >= 90 && g1 <= 270 && g2 <= 270 && g1 + g2 <= 450 : total >= 360 && total <= 800 && sides.every((s) => s >= 90 && s <= 270)
+  // между мойкой и плитой готовят — там от 0,9 м; холодильник рядом с мойкой в маленькой кухне — обычное дело
+  const min1 = ia === 0 || mid === 0 ? 60 : 90
+  const min2 = mid === 0 || ib === 0 ? 60 : 90
+  const ok = linear ? g1 >= min1 && g2 >= min2 && g1 <= 270 && g2 <= 270 && g1 + g2 <= 450 : total >= 360 && total <= 800 && sides.every((s) => s >= 90 && s <= 270)
   return { sides, total, ok, linear, path: g1 + g2, order: [ia, mid, ib] }
 }
 
@@ -301,7 +304,7 @@ export function runChecks(plan: Plan, rooms: Room[]): CheckResult {
         id: 'triangle',
         level: 'warn',
         text: t.linear
-          ? `Кухня в линию: ${line} ${(path / 100).toFixed(1)} м — норма до 4,5 м, между соседними зонами 0,9–2,7 м`
+          ? `Кухня в линию: ${line} ${(path / 100).toFixed(1)} м — норма до 4,5 м, между соседними зонами 0,9–2,7 м (от холодильника — от 0,6 м)`
           : `Рабочий треугольник кухни ${(total / 100).toFixed(1)} м — норма 4–8 м в сумме, каждая сторона 1,2–2,7 м`,
         target: { kind: 'furniture', id: sink.id },
       })

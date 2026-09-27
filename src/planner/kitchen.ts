@@ -59,6 +59,8 @@ export interface KitchenRun {
   stoveToVent?: number
   /** что из предложенного не встало у коммуникаций: пенал, посудомойка */
   dropped: string[]
+  /** холодильник — в нише у края стены */
+  fridgeInNiche?: boolean
 }
 
 type Token = 'fridge' | 'tall' | 'sink' | 'dw' | 'stove' | 'C' | 'W' | 'C0'
@@ -349,6 +351,37 @@ function orders(has: { dw: boolean; tall: boolean }): Token[][] {
   return [...withDw, ...noW].map((o) => (has.tall ? (['fridge', 'tall', ...o.slice(1)] as Token[]) : o))
 }
 
+/**
+ * Ниша у края стены: стена там отступает на 8–45 см — туда просится холодильник.
+ * Он встаёт спиной к задней стене ниши, вплотную к гарнитуру, и не отнимает
+ * столешницу; фасад чуть глубже тумб — так и задумано
+ */
+interface Pocket {
+  line: number
+  /** участок по задней стене ниши, по ходу линии */
+  leg: Leg
+  /** граница ниши на линии: отсюда идёт гарнитур */
+  mouth: number
+  atStart: boolean
+}
+
+function pocketsOf(lines: Line[], wins: [number, number][][]): Pocket[] {
+  const fw = CATALOG_MAP.fridge?.w ?? 60
+  const out: Pocket[] = []
+  lines.forEach((l, i) => {
+    if (l.parts.length < 2) return
+    for (const [[a, b, d], atStart] of [
+      [l.parts[0], true],
+      [l.parts[l.parts.length - 1], false],
+    ] as [[number, number, number], boolean][]) {
+      if (d > -8 || d < -45 || b - a < fw) continue
+      const windows = wins[i].filter(([x, y]) => y > a && x < b).map(([x, y]) => [Math.max(x, a) - a, Math.min(y, b) - a] as [number, number])
+      out.push({ line: i, leg: { origin: add(l.a, add(mul(l.dir, a), mul(l.n, d))), dir: l.dir, n: l.n, len: b - a, rot: l.rot, windows, bumps: [] }, mouth: atStart ? b : a, atStart })
+    }
+  })
+  return out
+}
+
 // ---------- раскладка ----------
 
 interface Placed {
@@ -359,6 +392,8 @@ interface Placed {
   d: number
   /** столешница над шахтой: насколько стена выступает (тумба мельче) */
   bump?: number
+  /** холодильник в нише */
+  pocket?: boolean
 }
 
 /**
@@ -501,23 +536,28 @@ function compose(inp: KitchenInput): Omit<KitchenRun, 'atWindow'> | null {
   const runs = lines.map((l, i) => freeRuns(l, inp, wins[i]))
   const area = signedArea(inp.inner)
 
-  const candidates: { legs: Leg[]; corner: boolean }[] = []
+  type Cand = { legs: Leg[]; corner: boolean; pocket?: Pocket }
+  const candidates: Cand[] = []
   lines.forEach((l, i) => {
     for (const [a, b] of runs[i]) {
       if (b - a < 240) continue
       for (const rev of [false, true]) candidates.push({ legs: [leg(l, a, b, rev, wins[i])], corner: false })
     }
   })
+  // угол — там, где линии сходятся в вершине контура и обе у угла на своей базе
+  const cornerAt = (i: number, j: number) => {
+    const l1 = lines[i]
+    const l2 = lines[j]
+    if (!l1.endsOnBase || !l2.startsOnBase) return false
+    if (dist(add(l1.a, mul(l1.dir, l1.L)), l2.a) > 1) return false
+    const cross = l1.dir.x * l2.dir.y - l1.dir.y * l2.dir.x
+    return Math.abs(cross) >= 0.9 && Math.sign(cross) === Math.sign(area)
+  }
   for (let i = 0; i < lines.length; i++) {
     const l1 = lines[i]
     const j = (i + 1) % lines.length
     const l2 = lines[j]
-    // угол — там, где линии сходятся в вершине контура и обе у угла на своей базе
-    if (!l1.endsOnBase || !l2.startsOnBase) continue
-    const end1 = add(l1.a, mul(l1.dir, l1.L))
-    if (dist(end1, l2.a) > 1) continue
-    const cross = l1.dir.x * l2.dir.y - l1.dir.y * l2.dir.x
-    if (Math.abs(cross) < 0.9 || Math.sign(cross) !== Math.sign(area)) continue
+    if (!cornerAt(i, j)) continue
     const r1 = runs[i].find(([, b]) => b >= l1.L - 5)
     const r2 = runs[j].find(([a]) => a <= 5)
     if (!r1 || !r2 || l1.L - r1[0] < 150 || r2[1] < 150) continue
@@ -525,40 +565,73 @@ function compose(inp: KitchenInput): Omit<KitchenRun, 'atWindow'> | null {
     candidates.push({ legs: [leg(l1, r1[0], l1.L, false, wins[i]), leg(l2, 0, r2[1], false, wins[j])], corner: true })
     candidates.push({ legs: [leg(l2, 0, r2[1], true, wins[j]), leg(l1, r1[0], l1.L, true, wins[i])], corner: true })
   }
+  // холодильник в нише у края стены, гарнитур — от ниши: вдоль стены или до угла
+  for (const pk of pocketsOf(lines, wins)) {
+    const i = pk.line
+    const l = lines[i]
+    if (pk.atStart) {
+      const r = runs[i].find(([a, b]) => a <= pk.mouth + 5 && b > pk.mouth + 5)
+      if (!r) continue
+      if (r[1] - pk.mouth >= 180) candidates.push({ legs: [leg(l, pk.mouth, r[1], false, wins[i])], corner: false, pocket: pk })
+      const j = (i + 1) % lines.length
+      const r2 = runs[j].find(([a]) => a <= 5)
+      if (r[1] >= l.L - 5 && cornerAt(i, j) && r2 && r2[1] >= 150) candidates.push({ legs: [leg(l, pk.mouth, l.L, false, wins[i]), leg(lines[j], 0, r2[1], false, wins[j])], corner: true, pocket: pk })
+    } else {
+      const r = runs[i].find(([a, b]) => b >= pk.mouth - 5 && a < pk.mouth - 5)
+      if (!r) continue
+      if (pk.mouth - r[0] >= 180) candidates.push({ legs: [leg(l, r[0], pk.mouth, true, wins[i])], corner: false, pocket: pk })
+      const h = (i - 1 + lines.length) % lines.length
+      const r1 = runs[h].find(([, b]) => b >= lines[h].L - 5)
+      if (r[0] <= 5 && cornerAt(h, i) && r1 && lines[h].L - r1[0] >= 150) candidates.push({ legs: [leg(l, 0, pk.mouth, true, wins[i]), leg(lines[h], r1[0], lines[h].L, true, wins[h])], corner: true, pocket: pk })
+    }
+  }
 
   const pos = (type: string) => inp.proposed.find((p) => p.type === type)
-  type Best = { score: number; furniture: Furniture[]; shape: 'line' | 'corner'; order: Token[]; corner: number; dropped: string[] }
+  type Best = { score: number; furniture: Furniture[]; shape: 'line' | 'corner'; order: Token[]; corner: number; dropped: string[]; pocket: boolean }
   let best: Best | null = null
-  const consider = (placed: Placed[], cand: { legs: Leg[]; corner: boolean }, order: Token[], corner: number, dropped: string[]) => {
+  const consider = (placed: Placed[], cand: Cand, order: Token[], corner: number, dropped: string[]) => {
     const furniture = toFurniture(placed, cand.corner ? { leg: cand.legs[0] } : null)
     const base = scoreRun(placed, furniture, inp, pos)
     if (base === null) return
     // каждый оставленный за бортом модуль — заметный минус: его просили
     const score = base + dropped.length * 120
-    if (!best || score < best.score) best = { score, furniture, shape: cand.corner ? 'corner' : 'line', order, corner, dropped }
+    if (!best || score < best.score) best = { score, furniture, shape: cand.corner ? 'corner' : 'line', order, corner, dropped, pocket: !!cand.pocket }
   }
+  const fw = CATALOG_MAP.fridge?.w ?? 60
   for (const cand of candidates) {
-    for (const { order, dropped } of variants(has)) {
+    const pk = cand.pocket
+    // холодильник в нише — вплотную к гарнитуру; остальное — от ниши
+    const pre: Placed[] = pk ? [{ token: 'fridge', leg: pk.leg, s: pk.atStart ? pk.leg.len - fw : 0, w: fw, d: CATALOG_MAP.fridge?.d ?? 65, pocket: true }] : []
+    for (const { order: full, dropped } of variants(has)) {
+      // холодильник в нише стоит глубже ряда: тумба за ним — по месту, не обязательно
+      const order = pk ? full.slice(1).map((t, i) => (i === 0 && t === 'C' ? 'C0' : t)) : full
+      const shift = pk ? 1 : 0
       if (!cand.corner) {
-        for (const placed of packLeg(order, cand.legs[0], false, 0)) consider(placed, cand, order, -1, dropped)
+        for (const placed of packLeg(order, cand.legs[0], false, 0)) consider([...pre, ...placed], cand, full, -1, dropped)
         continue
       }
-      for (let k = 1; k < order.length; k++) {
-        // на первом участке — от края к углу, на втором — от угла
+      for (let k = 1; k <= order.length; k++) {
+        // на первом участке — от края к углу, на втором — от угла; всё на первом — за углом столешница
         const p0 = packLeg(order.slice(0, k).reverse(), cand.legs[0], true, 90)
         if (!p0.length) continue
-        const p1 = packLeg(order.slice(k), cand.legs[1], false, 90)
-        for (const a of p0) for (const b of p1) consider([...a, ...b], cand, order, k, dropped)
+        const p1 = packLeg(k < order.length ? order.slice(k) : ['C'], cand.legs[1], false, 90)
+        for (const a of p0) {
+          // от ниши до первого модуля — столешница: холодильник не стоит особняком
+          const gap = pk ? Math.min(...a.map((q) => q.s)) : 0
+          // до 10 см — просто зазор: холодильнику он и нужен, чтобы дышать
+          const fill: Placed[] = gap >= 10 ? [{ token: 'cover', leg: cand.legs[0], s: 0, w: gap, d: DEPTH }] : []
+          for (const b of p1) consider([...pre, ...fill, ...a, ...b], cand, full, k + shift, dropped)
+        }
       }
     }
   }
   if (!best) return null
   const b = best as Best
   const names: Partial<Record<Token, string>> = { fridge: 'холодильник', tall: 'пенал', sink: 'мойка', dw: 'посудомойка', stove: 'плита' }
-  const order = b.order.flatMap((t, i) => [...(i === b.corner ? ['угол'] : []), ...(names[t] ? [names[t]!] : [])])
+  const order = [...b.order.flatMap((t, i) => [...(i === b.corner ? ['угол'] : []), ...(names[t] ? [names[t]!] : [])]), ...(b.corner >= b.order.length ? ['угол'] : [])]
   const one = (type: string) => b.furniture.find((f) => f.type === type)
   const near = (p: Pt | undefined, list?: Pt[]) => (p && list?.length ? Math.round(Math.min(...list.map((q) => dist(p, q)))) : undefined)
-  return { furniture: b.furniture, shape: b.shape, order, sinkToRiser: near(one('sink'), inp.risers), stoveToVent: near(one('stove'), inp.vents), dropped: b.dropped }
+  return { furniture: b.furniture, shape: b.shape, order, sinkToRiser: near(one('sink'), inp.risers), stoveToVent: near(one('stove'), inp.vents), dropped: b.dropped, fridgeInNiche: b.pocket }
 }
 
 /** Оценка раскладки: меньше — лучше; null — нельзя */
@@ -567,6 +640,7 @@ function scoreRun(placed: Placed[], furniture: Furniture[], inp: KitchenInput, p
     const body = obbCorners(f.x, f.y, f.w, f.d, f.rot)
     if (!body.every((p) => pointInPoly(p, inp.inner) || inp.inner.some((q, i) => segDist(p, q, inp.inner[(i + 1) % inp.inner.length]) < 2.5))) return null
     if (inp.blockers.some((b) => convexOverlap(body, b, 1.5)) || inp.doorZones.some((z) => convexOverlap(body, z, 1.5))) return null
+    if (!inp.allowWindow && (inp.windowZones ?? []).some((z) => convexOverlap(body, z, 0.5))) return null
   }
   let score = 0
   const winHit = (p: Placed, margin = 0) => p.leg.windows.some(([a, b]) => p.s < b + margin && p.s + p.w > a - margin)
@@ -612,7 +686,9 @@ function scoreRun(placed: Placed[], furniture: Furniture[], inp: KitchenInput, p
     if (!touching) score += 200
   }
   // высокое — не вплотную к окну и сбоку от него: тень на подоконник, откос не открыть
-  for (const tall of furniture.filter((f) => f.type === 'fridge' || f.type === 'tall-cabinet')) {
+  // холодильник в нише — туда его и задумали, даже у окна
+  const niche = placed.some((p) => p.pocket)
+  for (const tall of furniture.filter((f) => (f.type === 'fridge' && !niche) || f.type === 'tall-cabinet')) {
     for (const [a, b] of inp.windows) if (segDist(tall, a, b) < Math.max(tall.w, tall.d) / 2 + 40) score += 80
   }
   // коммуникации — главное: мойка у стояка, плита у вентканала
@@ -631,6 +707,8 @@ function scoreRun(placed: Placed[], furniture: Furniture[], inp: KitchenInput, p
     const p = pos(f.type)
     if (p) score += Math.min(dist(p, f), 400) * 0.1
   }
+  // холодильник в нише: не торчит из гарнитура и не отнимает столешницу
+  if (placed.some((p) => p.pocket)) score -= 150
   // больше столешницы — удобнее готовить
   const worktop = furniture.filter((f) => f.type.startsWith('counter-')).reduce((s, f) => s + f.w, 0)
   score -= worktop * 0.2

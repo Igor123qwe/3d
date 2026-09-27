@@ -41,7 +41,7 @@ const orthogonal = (poly: Pt[]) =>
   })
 
 /** самый большой прямоугольник из заполненных клеток: по строкам, как гистограмма */
-export function largestRect(grid: boolean[][], nx: number, ny: number): { i0: number; i1: number; j0: number; j1: number } | null {
+export function largestRect(grid: boolean[][], nx: number, ny: number, min = 1): { i0: number; i1: number; j0: number; j1: number } | null {
   const h = new Array<number>(nx).fill(0)
   let best: { area: number; i0: number; i1: number; j0: number; j1: number } | null = null
   for (let j = 0; j < ny; j++) {
@@ -54,7 +54,8 @@ export function largestRect(grid: boolean[][], nx: number, ny: number): { i0: nu
         const height = h[top]
         const left = stack.length ? stack[stack.length - 1] + 1 : 0
         const area = height * (i - left)
-        if (height && (!best || area > best.area)) best = { area, i0: left, i1: i - 1, j0: j - height + 1, j1: j }
+        // min — обе стороны не короче: узкая полоса во всю комнату не годится под стол
+        if (height >= min && i - left >= min && (!best || area > best.area)) best = { area, i0: left, i1: i - 1, j0: j - height + 1, j1: j }
       }
       stack.push(i)
     }

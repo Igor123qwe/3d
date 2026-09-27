@@ -59,8 +59,8 @@ function runsOf(fs: Furniture[]): Furniture[][] {
   return [...byRot.values()].map((list) => list.sort((a, b) => (a.rot % 180 === 0 ? a.x - b.x : a.y - b.y)))
 }
 
-function continuous(kitchen: Furniture[]) {
-  for (const run of runsOf(kitchen)) {
+function continuous(kitchen: Furniture[], skip: string[] = []) {
+  for (const run of runsOf(kitchen.filter((f) => !skip.includes(f.type)))) {
     for (let i = 1; i < run.length; i++) {
       const a = run[i - 1]
       const b = run[i]
@@ -103,9 +103,16 @@ describe('кухонный гарнитур — у коммуникаций, о�
     expect(cover.d).toBeCloseTo(44, 0)
     expect(Math.abs(cover.x + cover.d / 2 - 288)).toBeLessThan(1)
     // под окном ничего: окно x 113…258 в нижней стене
-    const underWindow = obbCorners(185, 400, 165, 60, 0)
+    const underWindow = obbCorners(185, 400, 155, 60, 0)
     for (const f of kitchen) expect(convexOverlap(obbCorners(f.x, f.y, f.w, f.d, f.rot), underWindow, 0.5), `${f.type} под окном`).toBe(false)
-    continuous(kitchen)
+    // холодильник — в нише у окна (x 304…329, y 363…426): спиной к её задней стене, вплотную к мойке
+    const fridge = one('fridge')!
+    expect(Math.abs(fridge.x + fridge.d / 2 - 329)).toBeLessThan(1)
+    expect(fridge.y - fridge.w / 2).toBeGreaterThan(362)
+    expect(fridge.y + fridge.w / 2).toBeLessThan(427)
+    expect(Math.abs(fridge.y - fridge.w / 2 - (one('sink')!.y + one('sink')!.w / 2))).toBeLessThan(10)
+    // ряд от ниши до угла — сплошной; холодильник в нише стоит глубже ряда, с зазором
+    continuous(kitchen, ['fridge'])
     // стол — у левой стены в углу у окна; стулья — с открытых сторон
     const table = one('kitchen-table')!
     expect(table.x - table.d / 2).toBeLessThan(2)
@@ -115,6 +122,7 @@ describe('кухонный гарнитур — у коммуникаций, о�
     const summary = layoutSummary(checks)
     expect(summary).toMatch(/от мойки до шахты со стояками 0,\d м/)
     expect(summary).toMatch(/под окном свободно/)
+    expect(summary).toMatch(/холодильник — в нише/)
     // «Проверка»: ни красного, ни жёлтого — стулья не в проходе у гарнитура
     const next = applyLayout(plan, checks)
     expect(runChecks(next, buildRooms(next).rooms).issues.filter((i) => i.level !== 'info').map((i) => i.text)).toEqual([])
@@ -181,6 +189,44 @@ describe('кухонный гарнитур — у коммуникаций, о�
     expect(layoutSummary(checks)).toMatch(/от мойки до стояка/)
     const next = applyLayout(plan, checks)
     expect(runChecks(next, buildRooms(next).rooms).issues.filter((i) => /стояка|вентканала/.test(i.text))).toEqual([])
+  })
+
+  it('ниша у края стены — холодильник в неё, спиной к задней стене ниши; гарнитур от ниши', () => {
+    // справа внизу стена отступает на 30 см: ниша 30 × 70 в углу
+    let plan: Plan = {
+      ...empty,
+      walls: [
+        W('top', -10, -10, 330, -10, 20),
+        W('r1', 330, -10, 330, 320, 20),
+        W('j', 330, 320, 360, 320, 20),
+        W('r2', 360, 320, 360, 410, 20),
+        W('bottom', -10, 410, 360, 410, 20),
+        W('left', -10, -10, -10, 410, 20),
+      ],
+    }
+    const rooms0 = buildRooms(plan).rooms
+    plan = addOpening(plan, 'door', 'top', 80 / 340, 80, rooms0).plan
+    plan = addOpening(plan, 'window', 'left', 0.5, 140, rooms0).plan
+    plan = { ...plan, furniture: [{ id: 'r', type: 'riser', x: 307.5, y: 200, w: 25, d: 20, rot: 90 }] }
+    const room = buildRooms(plan).rooms.find((r) => r.area > 10)!
+    const checks = vetLayout(
+      [
+        { type: 'fridge', x: 200, y: 40, rot: 0, why: '' },
+        { type: 'sink', x: 290, y: 200, rot: 90, why: '' },
+        { type: 'stove', x: 290, y: 100, rot: 90, why: '' },
+      ],
+      room,
+      plan,
+      { purpose: 'Кухня' },
+    )
+    const one = (t: string) => checks.find((c) => c.furniture?.type === t)!.furniture!
+    const fridge = one('fridge')
+    expect(Math.abs(fridge.x + fridge.d / 2 - 350)).toBeLessThan(1)
+    expect(fridge.y - fridge.w / 2).toBeGreaterThan(329)
+    expect(Math.hypot(one('sink').x - 307.5, one('sink').y - 200)).toBeLessThan(150)
+    expect(layoutSummary(checks)).toMatch(/холодильник — в нише/)
+    const next = applyLayout(plan, checks)
+    expect(runChecks(next, buildRooms(next).rooms).issues.filter((i) => i.level !== 'info').map((i) => i.text)).toEqual([])
   })
 
   it('мойку у окна попросили — ставится у окна', () => {

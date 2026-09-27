@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { openingGeom, runChecks, zonesOf } from '../src/planner/checks'
+import { openingGeom, runChecks, workTriangle, zonesOf } from '../src/planner/checks'
 import { buildRooms } from '../src/planner/rooms'
 import { CATALOG_MAP } from '../src/planner/catalog'
 import { TEMPLATES } from '../src/planner/templates'
@@ -164,5 +164,12 @@ describe('стартовые шаблоны', () => {
 
   it('пустой шаблон не даёт замечаний', () => {
     expect(check(TEMPLATES[0].build()).issues).toEqual([])
+  })
+
+  it('кухня в линию: холодильник вплотную к мойке — норма, мойка вплотную к плите — нет', () => {
+    // холодильник в нише рядом с мойкой: 73 см между центрами
+    expect(workTriangle({ x: 296, y: 393 }, { x: 274, y: 320 }, { x: 274, y: 180 }).ok).toBe(true)
+    // между мойкой и плитой готовят: 70 см мало
+    expect(workTriangle({ x: 274, y: 400 }, { x: 274, y: 250 }, { x: 274, y: 180 }).ok).toBe(false)
   })
 })

@@ -705,11 +705,13 @@ function kitchenFirst(proposed: AiPlacement[], room: Room, plan: Plan, options: 
   const how =
     `кухня собрана гарнитуром ${run.shape === 'corner' ? 'буквой Г' : 'вдоль стены'}: ${run.order.join(' — ')}` +
     (commText.length ? `; ${commText.join(', ')}` : '') +
+    (run.fridgeInNiche ? '; холодильник — в нише: не торчит и не отнимает столешницу' : '') +
     (run.dropped.length ? `; места у коммуникаций не хватило: ${run.dropped.join(', ')}` : '') +
     (windows.length ? (run.atWindow ? '; у глухих стен не поместился — часть под окном' : '; под окном свободно') : '')
   const noteOf = (f: Furniture): string => {
     if (f.type === 'sink' && run.sinkToRiser !== undefined) return `до ${comm.riserWord} ${m(run.sinkToRiser)} — короткий слив${run.furniture.some((g) => g.type === 'dishwasher') ? '; рядом посудомойка' : ''}`
     if (f.type === 'stove' && run.stoveToVent !== undefined) return `до ${comm.ventWord} ${m(run.stoveToVent)} — короткий воздуховод вытяжки; столешница с обеих сторон`
+    if (f.type === 'fridge' && run.fridgeInNiche) return 'в нише у края стены — для него её и оставили: не торчит из гарнитура, столешница вся для работы'
     if (f.type === 'counter-top') return f.d < 58 ? 'столешница над выступом шахты — тумбы там мельче, фасад в линию' : 'добор столешницы до шахты'
     return KITCHEN_NOTE[f.type] ?? 'столешница гарнитура'
   }
@@ -755,11 +757,11 @@ function kitchenFirst(proposed: AiPlacement[], room: Room, plan: Plan, options: 
     const target = dining.window ?? { x: dining.x, y: dining.y }
     const clamp = (v: number, a: number, b: number) => (a > b ? (a + b) / 2 : Math.min(Math.max(v, a), b))
     let want: { x: number; y: number; rot: number }
-    // стена, вдоль которой у торцов стола остаётся по 75 см на стулья, — ближайшая к окну
+    // стена, вдоль которой у свободного торца стола остаётся 75 см на стул (другим торцом — в угол), — ближайшая к окну
     const room = (side: string) => (side === 'left' || side === 'right' ? dining.h : dining.w)
     const wall =
       type === 'kitchen-table'
-        ? [...dining.walls].sort((p, q) => Number(room(q.side) >= cat.w + 150) - Number(room(p.side) >= cat.w + 150) || dist(p.mid, target) - dist(q.mid, target))[0]
+        ? [...dining.walls].sort((p, q) => Number(room(q.side) >= cat.w + 75) - Number(room(p.side) >= cat.w + 75) || dist(p.mid, target) - dist(q.mid, target))[0]
         : undefined
     if (wall) {
       // стол у стены — спинкой к стене свободного места, что ближе к окну, и не в угол: у торцов 75 см на стулья
@@ -888,7 +890,8 @@ function diningZone(
       return pointInPoly(p, inner) && !blocked.some((b) => pointInPoly(p, b))
     }),
   )
-  const r = largestRect(grid, nx, ny)
+  // место, куда встанет хотя бы стол у стены со стульями (1,2 м в узкую сторону); нет такого — какое есть
+  const r = largestRect(grid, nx, ny, Math.ceil(120 / cell)) ?? largestRect(grid, nx, ny)
   if (!r) return null
   const x0 = X0 + r.i0 * cell
   const x1 = X0 + (r.i1 + 1) * cell
